@@ -40,6 +40,11 @@ including the ones building it.
 - `tools/attach.js` — one-command wiring into another project: vendors the
   hook kit into `<target>/.nightshift/`, merges `.claude/settings.json`,
   installs the git hook. Idempotent.
+- `tools/install-global.js` — merge hooks into *global* `~/.claude/settings.json`
+  so every session in every project records, routing to central per-project
+  logs under `~/.nightshift/sessions/` (no per-repo files, no git config). The
+  hook (`claude-hook.js`) resolves local-vs-central and, in central mode only,
+  captures commits from Bash output so attached projects aren't double-counted.
 - `tools/poll-github.js` — records PR/CI facts as events via gh; folds the
   log's known state each tick and appends only deltas (stateless, idempotent).
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.

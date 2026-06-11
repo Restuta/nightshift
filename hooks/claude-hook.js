@@ -5,10 +5,27 @@
 // observability. Every path exits 0.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-const LOG = path.join(root, '.nightshift', 'events.jsonl');
+
+// Where this project's events go:
+//   1. $NIGHTSHIFT_LOG                          — explicit override
+//   2. <root>/.nightshift/events.jsonl          — if attached (dir exists)
+//   3. ~/.nightshift/sessions/<slug>.jsonl      — central, for global install
+// Central mode lets one global hook record every project without dropping a
+// .nightshift/ folder into repos that never opted in.
+function resolveLog() {
+  if (process.env.NIGHTSHIFT_LOG) return { log: process.env.NIGHTSHIFT_LOG, central: false };
+  const localDir = path.join(root, '.nightshift');
+  if (fs.existsSync(localDir)) return { log: path.join(localDir, 'events.jsonl'), central: false };
+  const home = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
+  const slug = root.replace(/^\/+/, '').replace(/[^A-Za-z0-9._-]+/g, '-') || 'session';
+  return { log: path.join(home, 'sessions', `${slug}.jsonl`), central: true };
+}
+
+const { log: LOG, central: CENTRAL } = resolveLog();
 
 function append(ev) {
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
@@ -58,6 +75,23 @@ function main() {
         type: 'todos',
         todos: inp.todos.map(td => ({ text: td.content, done: td.status === 'completed' })),
       });
+    } else if (CENTRAL && tool === 'Bash' && /git\s+commit/.test(inp.command || '')) {
+      // No git hook is installed in central/global mode, so capture commits the
+      // agent makes by parsing the Bash output (only emits if the commit
+      // actually printed its "[branch sha] message" confirmation). Attached
+      // projects skip this — their git post-commit hook already covers commits,
+      // including ones made by hand.
+      const r = hook.tool_response;
+      const out = typeof r === 'string' ? r : (r && (r.stdout || r.output)) || '';
+      const head = out.match(/\[[^\s\]]+ ([0-9a-f]{7,40})\] (.+)/);
+      if (head) {
+        const num = re => { const m = out.match(re); return m ? Number(m[1]) : 0; };
+        append({
+          type: 'commit', sha: head[1].slice(0, 7), message: head[2].trim(),
+          add: num(/(\d+) insertions?\(\+\)/), del: num(/(\d+) deletions?\(-\)/),
+          files: num(/(\d+) files? changed/),
+        });
+      }
     }
     return;
   }

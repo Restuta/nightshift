@@ -57,9 +57,32 @@ The corollary (see [docs/EVENTS.md](docs/EVENTS.md)) is that external facts —
 CI status, PR state — are *recorded as events*, never fetched at render time.
 Replaying yesterday's session must show yesterday's CI status.
 
-## Attaching to a real session
+## Record every session (global install)
 
-One command:
+To watch all your normal Claude Code sessions, in any project, with no
+per-project setup:
+
+```sh
+node tools/install-global.js
+node server.js --dir ~/.nightshift/sessions   # one board, a switcher per project
+```
+
+This merges nightshift's hooks into your global `~/.claude/settings.json`
+(additively — it backs the file up first and never clobbers existing hooks).
+Each project's events route to a central per-project log under
+`~/.nightshift/sessions/<project>.jsonl`, so **nothing is written inside your
+repos**. Start a *new* session in any project and it records itself; the
+session switcher lists them all. Commits are captured from the agent's own
+`git commit` output, so **no global git config is touched** (a global
+`core.hooksPath` would override per-repo hooks like Husky). Undo any time with
+`node tools/install-global.js --remove`.
+
+Projects you explicitly `attach` (below) keep their own local log and take
+precedence — use one mode or the other per project, not both.
+
+## Attaching a single project
+
+When you want the log to live inside one repo (e.g. to share it with a team):
 
 ```sh
 npm run attach -- /path/to/project
