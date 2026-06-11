@@ -59,17 +59,21 @@ Replaying yesterday's session must show yesterday's CI status.
 
 ## Attaching to a real session
 
-This repo watches itself, and the same wiring works in any project:
+One command:
 
-1. Copy `hooks/claude-hook.js` and the `hooks` block of `.claude/settings.json`
-   into the target project — Claude Code sessions there now emit `session`,
-   `edit`, and `todos` events automatically.
-2. `npm run setup` (or copy `.githooks/post-commit`) — commits now emit
-   `commit` events with line counts, no matter who commits.
-3. Run `node server.js` from this repo with `--log <project>/.nightshift/events.jsonl`.
-4. Optionally, teach the agent the intent layer (see the dogfooding protocol in
-   [CLAUDE.md](CLAUDE.md)): one `item` event per PR-sized deliverable via
-   `tools/emit.js`.
+```sh
+npm run attach -- /path/to/project
+node server.js --log /path/to/project/.nightshift/events.jsonl
+```
+
+`attach` vendors a self-contained kit into `<project>/.nightshift/` (Claude
+Code hook, git post-commit hook, `emit.js`), merges the hook wiring into the
+project's `.claude/settings.json` without touching what's there, installs the
+git hook, and gitignores the log. Idempotent — rerun it after updating
+nightshift. From then on, Claude Code sessions in that project emit `session` /
+`edit` / `todos` events and every commit emits line counts, no matter who
+commits. Optionally teach the agent the intent layer (see the dogfooding
+protocol in [CLAUDE.md](CLAUDE.md)): one `item` event per PR-sized deliverable.
 
 The board is also **bidirectional**: type into the inbox column and the card is
 appended to the log; the `UserPromptSubmit` hook surfaces open inbox cards to

@@ -35,6 +35,9 @@ including the ones building it.
   and humans.
 - `tools/import-transcript.js` — synthesize a tape from a past Claude Code
   transcript; `--repo` sources commit facts from `git log`, not model output.
+- `tools/attach.js` — one-command wiring into another project: vendors the
+  hook kit into `<target>/.nightshift/`, merges `.claude/settings.json`,
+  installs the git hook. Idempotent.
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
 
 ## Commands
