@@ -102,6 +102,16 @@ function parseClaude(lines) {
 
     if (e.type === 'assistant' && e.message && Array.isArray(e.message.content)) {
       lastActivityT = t;
+      const u = e.message.usage;
+      if (u) {
+        r.events.push({
+          t, type: 'usage', model: e.message.model,
+          in: u.input_tokens || 0, out: u.output_tokens || 0,
+          cacheRead: u.cache_read_input_tokens || 0,
+          cacheWrite: u.cache_creation_input_tokens || 0,
+        });
+        r.tokOut = (r.tokOut || 0) + (u.output_tokens || 0);
+      }
       for (const b of e.message.content) {
         if (b.type !== 'tool_use') continue;
         const inp = b.input || {};
@@ -148,7 +158,7 @@ function parseCodex(lines) {
     sessionId: null, cwd: null, title: null,
     firstT: null, lastT: null, prompts: 0, edits: 0,
   };
-  let lastActivityT = null, phase = null;
+  let lastActivityT = null, phase = null, model = null;
   const pendingCommitCalls = new Map(); // call_id → t of the exec call
 
   for (const line of lines) {
@@ -164,6 +174,8 @@ function parseCodex(lines) {
       r.cwd = p.cwd || r.cwd;
       continue;
     }
+
+    if (e.type === 'turn_context' && p.model) { model = p.model; continue; }
 
     if (e.type === 'event_msg') {
       if (p.type === 'user_message') {
@@ -183,6 +195,17 @@ function parseCodex(lines) {
           r.events.push({ t, type: 'edit', path: path.relative(r.cwd || '.', file), tool: 'apply_patch' });
           r.edits++;
         }
+      } else if (p.type === 'token_count' && p.info && p.info.last_token_usage) {
+        // last_token_usage is the per-turn delta; input_tokens includes the
+        // cached portion, so split it out for accurate cost.
+        const u = p.info.last_token_usage;
+        const cached = u.cached_input_tokens || 0;
+        r.events.push({
+          t, type: 'usage', model,
+          in: Math.max(0, (u.input_tokens || 0) - cached),
+          out: u.output_tokens || 0, cacheRead: cached,
+        });
+        r.tokOut = (r.tokOut || 0) + (u.output_tokens || 0);
       }
       continue;
     }
@@ -267,7 +290,9 @@ fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, events.map(e => JSON.stringify(e)).join('\n') + '\n');
 
 const mins = Math.round((r.lastT - r.firstT) / 60000);
+const usageCount = events.filter(e => e.type === 'usage').length;
 console.log(`${out}: ${events.length} events — "${title}" (${r.agent})`);
 console.log(`  ${mins} min, ${r.prompts} prompts, ${r.edits} edits, ${commits.length} commits` +
-  (gitCommits.length ? ` (${gitCommits.length} from git${autoRepo ? `, auto: ${flags.repo[0]}` : ''})` : ''));
+  (gitCommits.length ? ` (${gitCommits.length} from git${autoRepo ? `, auto: ${flags.repo[0]}` : ''})` : '') +
+  (usageCount ? `, ${(r.tokOut || 0).toLocaleString('en-US')} out-tokens over ${usageCount} turns` : ''));
 console.log(`  replay: node server.js --log ${out}`);

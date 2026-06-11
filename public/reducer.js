@@ -6,6 +6,38 @@ export const STATUSES = ['inbox', 'doing', 'pr', 'done'];
 
 const FEED_CAP = 150;
 
+// A single working gap longer than this is almost certainly the session
+// sitting idle without an `idle` event (a missed Stop hook, say), not real
+// work — cap each gap so one stuck window can't inflate a card's timer.
+const ACTIVE_GAP_CAP = 30 * 60e3;
+
+// Approximate USD per million tokens, matched by model-id substring. A local
+// estimate, not a billing source of truth — update as prices move. Cache reads
+// bill ~0.1× input; cache writes ~1.25×.
+const PRICES = [
+  [/opus/i, { in: 15, out: 75 }],
+  [/sonnet/i, { in: 3, out: 15 }],
+  [/haiku/i, { in: 0.8, out: 4 }],
+  [/fable|mythos/i, { in: 5, out: 25 }],
+  [/gpt-5|o[34]|codex/i, { in: 1.25, out: 10 }],
+];
+const DEFAULT_PRICE = { in: 3, out: 15 };
+
+function priceFor(model) {
+  if (model) for (const [re, p] of PRICES) if (re.test(model)) return p;
+  return DEFAULT_PRICE;
+}
+
+function usageCost(ev) {
+  const p = priceFor(ev.model);
+  return (
+    ((ev.in || 0) * p.in) +
+    ((ev.out || 0) * p.out) +
+    ((ev.cacheRead || 0) * p.in * 0.1) +
+    ((ev.cacheWrite || 0) * p.in * 1.25)
+  ) / 1e6;
+}
+
 export function initialState() {
   return {
     session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null },
@@ -13,8 +45,18 @@ export function initialState() {
     todos: [],
     files: new Map(), // path → {edits, lastAt} — churn signal
     feed: [],
-    totals: { add: 0, del: 0, commits: 0, edits: 0, events: 0 },
+    totals: { add: 0, del: 0, commits: 0, edits: 0, events: 0, tokIn: 0, tokOut: 0, cacheTok: 0, cost: 0 },
   };
+}
+
+// Most recently touched item still in `doing` — the card the agent is on now.
+function activeDoingItem(state) {
+  let best = null;
+  for (const it of state.items.values()) {
+    if (it.status !== 'doing') continue;
+    if (!best || (it.touchedAt || 0) > (best.touchedAt || 0)) best = it;
+  }
+  return best;
 }
 
 // Events usually arrive unattributed (hooks don't know which card they belong
@@ -37,6 +79,19 @@ function targetItem(state, ev) {
 }
 
 export function reduce(state, ev) {
+  // Accrue active work-time to the card in progress over the gap that just
+  // elapsed — but only while the session was working. Idle/attention gaps
+  // (waiting on the human) don't count, so a card's timer reflects time spent
+  // on it, not wall-clock since it opened. Pure over the log, so the number is
+  // the same live or in replay.
+  if (state.session.lastAt != null && state.session.phase === 'working') {
+    const dt = ev.t - state.session.lastAt;
+    if (dt > 0) {
+      const active = activeDoingItem(state);
+      if (active) active.activeMs += Math.min(dt, ACTIVE_GAP_CAP);
+    }
+  }
+
   state.totals.events++;
   state.session.lastAt = ev.t;
 
@@ -68,7 +123,7 @@ export function reduce(state, ev) {
       if (!it) {
         it = {
           id: ev.id, title: '', status: 'inbox', note: null, emoji: null,
-          add: 0, del: 0, commits: 0, edits: 0,
+          add: 0, del: 0, commits: 0, edits: 0, activeMs: 0,
           todos: null, pr: null, ci: null,
           createdAt: ev.t, touchedAt: ev.t,
         };
@@ -148,11 +203,25 @@ export function reduce(state, ev) {
       break;
     }
 
+    case 'usage': {
+      // Token accounting, emitted per model turn (mostly by the importer —
+      // live hooks have no token visibility). Drives the masthead meters.
+      state.totals.tokIn += ev.in || 0;
+      state.totals.tokOut += ev.out || 0;
+      state.totals.cacheTok += (ev.cacheRead || 0) + (ev.cacheWrite || 0);
+      state.totals.cost += usageCost(ev);
+      break;
+    }
+
     // 'note' and unknown types land in the feed only (forward compatibility).
   }
 
-  state.feed.unshift(ev);
-  if (state.feed.length > FEED_CAP) state.feed.length = FEED_CAP;
+  // Usage events are frequent and machine-ish — they feed the meters, not the
+  // human-readable activity tape.
+  if (ev.type !== 'usage') {
+    state.feed.unshift(ev);
+    if (state.feed.length > FEED_CAP) state.feed.length = FEED_CAP;
+  }
   return state;
 }
 
@@ -177,10 +246,6 @@ export function hotFiles(state, min = 3, cap = 5) {
 
 // The card whose todo drill-in is expanded: most recently touched `doing` item.
 export function activeItemId(state) {
-  let best = null;
-  for (const it of state.items.values()) {
-    if (it.status !== 'doing') continue;
-    if (!best || (it.touchedAt || 0) > (best.touchedAt || 0)) best = it;
-  }
-  return best ? best.id : null;
+  const it = activeDoingItem(state);
+  return it ? it.id : null;
 }

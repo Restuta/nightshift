@@ -122,6 +122,9 @@ button { font-family: inherit; }
 
 .stat-value.adds { color: var(--green); }
 .stat-value.dels { color: var(--red); }
+.stat-value.cost { color: var(--yellow); }
+
+.stat[hidden] { display: none; }
 
 .badge {
   display: flex;

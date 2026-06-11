@@ -147,7 +147,7 @@ function playLoop(now) {
     cursor++;
   }
   if (fresh.length) renderAll(true, fresh);
-  else { drawTimeline(); renderReadout(); }
+  else { drawTimeline(); renderReadout(); tickActiveCards(); }
   if (cursor >= log.length && log.length) {
     const tapeEnd = log[log.length - 1].t;
     if (Date.now() - tapeEnd < 5000) return goLive();   // caught up with reality
@@ -313,7 +313,7 @@ function makeCard() {
   el._refs = {
     emoji: el.querySelector('.emoji'),
     cid: el.querySelector('.cid'),
-    age: el.querySelector('.age'),
+    age: Object.assign(el.querySelector('.age'), { title: 'time worked (idle excluded)' }),
     title: el.querySelector('.title'),
     pills: el.querySelector('.pills'),
     diff: el.querySelector('.pill.diff'),
@@ -336,7 +336,13 @@ function updateCard(el, it, animate, activeId) {
   R.emoji.textContent = cardEmoji(it);
   R.cid.textContent = it.id;
   R.title.textContent = it.title || it.id;
-  R.age.textContent = ageText(vtNow() - it.touchedAt);
+
+  // Time worked, not time since touched. The active `doing` card keeps
+  // accruing the in-flight gap between events (see _activeLive ticker).
+  el._activeMs = it.activeMs || 0;
+  el._activeLive = it.id === activeId && state.session.phase === 'working';
+  const dur = el._activeMs + (el._activeLive ? Math.max(0, vtNow() - state.session.lastAt) : 0);
+  R.age.textContent = dur > 0 ? ageText(dur) : '';
 
   const hasDiff = !!(it.add || it.del);
   R.diff.style.display = hasDiff ? '' : 'none';
@@ -372,7 +378,6 @@ function updateCard(el, it, animate, activeId) {
 
   R.pills.classList.toggle('has-pills', hasDiff || !!it.commits || hasTodos || !!it.pr);
 
-  el._touchedAt = it.touchedAt;
   el.classList.toggle('is-done', it.status === 'done');
   el.classList.toggle('is-active', it.id === activeId);
 
@@ -535,11 +540,31 @@ function renderAgentBadge() {
   el.className = `agent-badge agent-${agent}`;
 }
 
+// 12_345 → "12.3k", 2_100_000 → "2.1M"
+function compactNum(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e4) return `${(n / 1e3).toFixed(1)}k`;
+  return n.toLocaleString('en-US');
+}
+
 function renderInstruments(animate) {
   setNum($('#stat-add'), state.totals.add, animate);
   setNum($('#stat-del'), state.totals.del, animate);
   setNum($('#stat-commits'), state.totals.commits, animate);
   setNum($('#stat-events'), state.totals.events, animate);
+
+  const tok = state.totals.tokIn + state.totals.tokOut + state.totals.cacheTok;
+  $('#stat-tokens-wrap').hidden = !tok;
+  $('#stat-cost-wrap').hidden = !tok;
+  if (tok) {
+    setNum($('#stat-tokens'), tok, animate, compactNum);
+    $('#stat-tokens').title = `${state.totals.tokIn.toLocaleString('en-US')} in · ` +
+      `${state.totals.tokOut.toLocaleString('en-US')} out · ` +
+      `${state.totals.cacheTok.toLocaleString('en-US')} cached`;
+    const cost = state.totals.cost;
+    $('#stat-cost').textContent = cost >= 1 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(3)}`;
+    $('#stat-cost').title = 'approximate — local price table, not a billing source';
+  }
   const t0 = state.session.startedAt ?? (log.length ? log[0].t : null);
   $('#stat-elapsed').textContent = t0 ? durText(vtNow() - t0) : '00:00';
   if (state.session.title) $('#session-title').textContent = state.session.title;
@@ -653,15 +678,22 @@ $('#add-card-form').addEventListener('submit', async e => {
 
 // ----------------------------------------------------------------- clock
 
+// Advance the running timer on the active card between events (live or while
+// a replay is paused/playing) — only that card has an in-flight gap.
+function tickActiveCards() {
+  for (const el of cardEls.values()) {
+    if (!el._activeLive) continue;
+    el._refs.age.textContent = ageText(el._activeMs + Math.max(0, vtNow() - state.session.lastAt));
+  }
+}
+
 setInterval(() => {
   if (!ready) return;
   if (live) {
     renderReadout();
     drawTimeline();
     renderAttention();
-    for (const el of cardEls.values()) {
-      if (el._touchedAt) el._refs.age.textContent = ageText(Date.now() - el._touchedAt);
-    }
+    tickActiveCards();
   }
 }, 1000);
 

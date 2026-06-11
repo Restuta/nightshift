@@ -66,6 +66,13 @@ numbers from `git diff --shortstat`. Drives the line counters and tickers.
 ### `ci`
 `{status: "pending" | "pass" | "fail", pr?}`
 
+### `usage`
+Token accounting for a model turn. `{in?, out?, cacheRead?, cacheWrite?, model?}`
+— all token counts; `model` is the model id (used to pick a price). Accumulates
+into the masthead tokens/cost meters. Mostly emitted by the transcript importer
+(live hooks have no token visibility). Kept out of the activity feed — too
+frequent — and cost is an approximate local estimate, not a billing record.
+
 ### `note`
 Free-form narration from the agent. `{text}` — used sparingly for milestones,
 not a chat log.
