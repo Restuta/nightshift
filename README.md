@@ -117,9 +117,10 @@ vocabulary can grow without breaking old logs.
 
 - [x] Transcript importer — synthesize a board from any past Claude Code
       session JSONL, no hooks required (attach retroactively)
-- [ ] PR/CI poller — record GitHub facts as events (`pr`, `ci`) automatically
-- [ ] Churn heatmap — surface add/delete/re-add loops, the visual signature of
-      an agent flailing
+- [x] PR/CI poller — record GitHub facts as events (`pr`, `ci`) automatically
+      (`node tools/poll-github.js`, gh-based, appends only deltas)
+- [x] Churn heatmap — hot-files strip in the tape; repeat-edit counts in three
+      heat tiers, the visual signature of an agent flailing
 - [ ] Multi-session switcher — one server, many tapes
 - [ ] Shareable replays — export a tape + static player
 
