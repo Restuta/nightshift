@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>traceboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="wordmark">traceboard</span>
+    <span class="divider">/</span>
+    <span class="session-title" id="session-title">no session</span>
+  </div>
+  <div class="instruments">
+    <div class="stat"><span class="stat-label">lines +</span><span class="stat-value adds" id="stat-add">0</span></div>
+    <div class="stat"><span class="stat-label">lines −</span><span class="stat-value dels" id="stat-del">0</span></div>
+    <div class="stat"><span class="stat-label">commits</span><span class="stat-value" id="stat-commits">0</span></div>
+    <div class="stat"><span class="stat-label">events</span><span class="stat-value" id="stat-events">0</span></div>
+    <div class="stat"><span class="stat-label">elapsed</span><span class="stat-value" id="stat-elapsed">00:00</span></div>
+    <div class="badge" id="status-badge"><i class="badge-dot"></i><span id="status-text">CONNECTING</span></div>
+  </div>
+</header>
+
+<main class="deck">
+  <section class="board" id="board">
+    <div class="col" data-status="inbox">
+      <header class="col-head"><h2>Inbox</h2><span class="col-count" id="count-inbox"></span></header>
+      <div class="cards" id="cards-inbox"></div>
+      <form class="add-card" id="add-card-form">
+        <input type="text" id="add-card-input" placeholder="+ drop a card for the agent" autocomplete="off" spellcheck="false">
+      </form>
+    </div>
+    <div class="col" data-status="doing">
+      <header class="col-head"><h2>In&nbsp;progress</h2><span class="col-count" id="count-doing"></span></header>
+      <div class="cards" id="cards-doing"></div>
+    </div>
+    <div class="col" data-status="pr">
+      <header class="col-head"><h2>PR&nbsp;open</h2><span class="col-count" id="count-pr"></span></header>
+      <div class="cards" id="cards-pr"></div>
+    </div>
+    <div class="col" data-status="done">
+      <header class="col-head"><h2>Done</h2><span class="col-count" id="count-done"></span></header>
+      <div class="cards" id="cards-done"></div>
+    </div>
+  </section>
+
+  <aside class="tape">
+    <header class="col-head"><h2>Tape</h2><span class="col-count" id="count-feed"></span></header>
+    <ul class="feed" id="feed"></ul>
+  </aside>
+</main>
+
+<footer class="recorder">
+  <div class="transport">
+    <button class="t-btn" id="btn-play" title="play / pause replay">▶</button>
+    <div class="speeds" id="speeds">
+      <button class="speed" data-speed="1">1×</button>
+      <button class="speed sel" data-speed="10">10×</button>
+      <button class="speed" data-speed="60">60×</button>
+    </div>
+    <span class="readout" id="readout">T+00:00:00</span>
+  </div>
+  <canvas id="timeline"></canvas>
+  <button class="t-live" id="btn-live"><i class="badge-dot"></i>LIVE</button>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+#!/bin/sh
+node "$(git rev-parse --show-toplevel)/hooks/git-post-commit.js" 2>/dev/null || true
