@@ -3,3 +3,4 @@ node_modules/
 .nightshift/
 demo/events.jsonl
 docs/screenshots/scratch-*
+.gstack/

@@ -66,7 +66,7 @@ export function reduce(state, ev) {
       let it = state.items.get(ev.id);
       if (!it) {
         it = {
-          id: ev.id, title: '', status: 'inbox', note: null,
+          id: ev.id, title: '', status: 'inbox', note: null, emoji: null,
           add: 0, del: 0, commits: 0, edits: 0,
           todos: null, pr: null, ci: null,
           createdAt: ev.t, touchedAt: ev.t,
@@ -76,6 +76,7 @@ export function reduce(state, ev) {
       if (ev.title != null) it.title = ev.title;
       if (ev.status != null && STATUSES.includes(ev.status)) it.status = ev.status;
       if (ev.note != null) it.note = ev.note;
+      if (ev.emoji != null) it.emoji = ev.emoji;
       it.touchedAt = ev.t;
       break;
     }

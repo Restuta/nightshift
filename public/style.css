@@ -295,6 +295,12 @@ body.tape-collapsed .tape { border-left: none; }
   margin-bottom: 4px;
 }
 
+.head-l { display: flex; align-items: center; gap: 6px; min-width: 0; }
+
+.card-head .emoji { font-size: 12px; line-height: 1; flex: none; }
+
+.card.is-done .emoji { filter: grayscale(.6); }
+
 .cid {
   font-family: var(--mono);
   font-size: 10.5px;

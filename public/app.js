@@ -260,6 +260,39 @@ window.addEventListener('resize', sizeCanvas);
 
 // ----------------------------------------------------------------- board
 
+// Every card gets a mark in the corner — explicit `emoji` on the item event
+// wins, otherwise inferred from the title. Inference is a pure function of
+// state, so replay shows the same marks as live. First matching rule wins.
+const EMOJI_RULES = [
+  [/\b(hi|hello|hey|wave)\b/i, '👋'],
+  [/emoji/i, '😀'],
+  [/\b(bug|fix|crash|broken|flaky)\b/i, '🐛'],
+  [/\b(import|transcript|tape|replay)\b/i, '📼'],
+  [/\b(churn|heatmap)\b/i, '🔥'],
+  [/\b(night|moon|sky|star)\b/i, '🌙'],
+  [/\b(attach|wire|wiring|setup|install)\b/i, '🔌'],
+  [/\b(hooks?|dogfood)\b/i, '🪝'],
+  [/\b(codex|agents?|model)\b/i, '🤖'],
+  [/\b(input|attention|alert|notify)\b/i, '🔔'],
+  [/\b(board|kanban|cards?)\b/i, '📋'],
+  [/\b(ui|design|theme|style|visual|logo|redesign)\b/i, '🎨'],
+  [/\b(docs?|readme|spec)\b/i, '📝'],
+  [/\b(server|sse|stream|api|poller)\b/i, '📡'],
+  [/\b(tests?|qa)\b/i, '🧪'],
+  [/\b(perf|performance|fast|slow)\b/i, '⚡'],
+  [/\b(ship|release|deploy|launch)\b/i, '🚀'],
+  [/\b(pr|ci|checks|merge)\b/i, '🔁'],
+  [/\b(schema|reducer|fold|events?)\b/i, '🧩'],
+  [/\b(rename|naming)\b/i, '🏷️'],
+];
+
+function cardEmoji(it) {
+  if (it.emoji) return it.emoji;
+  const title = it.title || it.id;
+  for (const [re, em] of EMOJI_RULES) if (re.test(title)) return em;
+  return '🗂️';
+}
+
 const cardEls = new Map();
 const cols = Object.fromEntries(STATUSES.map(s => [s, $(`#cards-${s}`)]));
 const counts = Object.fromEntries(STATUSES.map(s => [s, $(`#count-${s}`)]));
@@ -268,7 +301,7 @@ function makeCard() {
   const el = document.createElement('article');
   el.className = 'card';
   el.innerHTML = `
-    <div class="card-head"><span class="cid"></span><span class="age"></span></div>
+    <div class="card-head"><span class="head-l"><span class="emoji"></span><span class="cid"></span></span><span class="age"></span></div>
     <h3 class="title"></h3>
     <div class="pills">
       <span class="pill diff"><b class="a"></b><b class="d"></b></span>
@@ -278,6 +311,7 @@ function makeCard() {
     </div>
     <ul class="todo-list"></ul>`;
   el._refs = {
+    emoji: el.querySelector('.emoji'),
     cid: el.querySelector('.cid'),
     age: el.querySelector('.age'),
     title: el.querySelector('.title'),
@@ -299,6 +333,7 @@ function makeCard() {
 
 function updateCard(el, it, animate, activeId) {
   const R = el._refs;
+  R.emoji.textContent = cardEmoji(it);
   R.cid.textContent = it.id;
   R.title.textContent = it.title || it.id;
   R.age.textContent = ageText(vtNow() - it.touchedAt);

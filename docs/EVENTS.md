@@ -40,7 +40,9 @@ Session lifecycle. `{phase: "start" | "resume" | "attention" | "idle" | "end", t
   the request was answered.
 
 ### `item`
-Work item upsert — the kanban cards. `{id, title?, status?, note?}`
+Work item upsert — the kanban cards. `{id, title?, status?, note?, emoji?}`
+- `emoji` pins the card's corner mark; when absent the UI infers one from the
+  title (a pure function of state, so live and replay agree).
 - `status`: `inbox` → `doing` → `pr` → `done` (any transition is legal;
   `inbox` cards may also come from the UI or another human).
 - Partial updates merge by `id`: `{type:"item", id:"wi-2", status:"pr"}` just
