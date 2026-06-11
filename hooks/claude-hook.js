@@ -32,7 +32,7 @@ function main() {
   const name = hook.hook_event_name;
 
   if (name === 'SessionStart') {
-    append({ type: 'session', phase: 'start', session: hook.session_id, cwd: hook.cwd });
+    append({ type: 'session', phase: 'start', agent: 'claude', session: hook.session_id, cwd: hook.cwd });
     return;
   }
 
@@ -63,7 +63,7 @@ function main() {
   }
 
   if (name === 'UserPromptSubmit') {
-    append({ type: 'session', phase: 'resume', session: hook.session_id });
+    append({ type: 'session', phase: 'resume', agent: 'claude', session: hook.session_id });
     // Bidirectional pickup: surface open inbox cards as context for the turn.
     const items = new Map();
     for (const ev of readLog()) {

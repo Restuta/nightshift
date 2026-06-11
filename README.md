@@ -81,18 +81,30 @@ the agent as context at the start of its next turn.
 
 ## Importing a past session
 
-No hooks in place when the session ran? Synthesize the tape after the fact from
-the Claude Code transcript (`~/.claude/projects/<munged-cwd>/<session-id>.jsonl`):
+No hooks in place when the session ran? Synthesize the tape after the fact —
+Claude Code transcripts (`~/.claude/projects/<munged-cwd>/<session-id>.jsonl`)
+and Codex rollouts (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) are both
+read, format auto-detected:
 
 ```sh
-npm run import -- <transcript.jsonl> --repo <repo>
+npm run import -- <session.jsonl>
 node server.js --log .nightshift/import-<id>.jsonl
 ```
 
 Human prompts, file edits, todos, and agent questions are read from the
-transcript. With `--repo`, commit facts — sha, message, line counts — come
-straight from `git log` over the session's time window instead of being parsed
-out of model output, so the tickers show exactly what git recorded.
+transcript. Commit facts — sha, message, line counts — come straight from
+`git log` over the session's time window (the session's cwd when it's a repo,
+or `--repo <path>`) instead of being parsed out of model output, so the
+tickers show exactly what git recorded.
+
+## Which agent is on shift?
+
+`session` events carry an `agent` field, rendered as a badge next to the
+session title — ✳ Claude in terracotta, ⬢ Codex in steel blue. The Claude
+hooks and both importers set it automatically. For live Codex sessions the
+surface is thinner (Codex has no per-tool hooks): point `notify` in
+`~/.codex/config.toml` at `hooks/codex-notify.js` to get turn-completion and
+approval-request events; for the full picture, import the rollout afterwards.
 
 ## Event vocabulary
 

@@ -472,6 +472,20 @@ function renderFeed(freshEvents) {
 
 // ------------------------------------------------------------ instruments
 
+// Who works this shift — glyph + name, colored per agent. Unknown agents get
+// a neutral glyph so new producers show up without a UI change.
+const AGENT_BADGES = { claude: ['✳', 'Claude'], codex: ['⬢', 'Codex'] };
+
+function renderAgentBadge() {
+  const el = $('#agent-badge');
+  const agent = state.session.agent;
+  el.hidden = !agent;
+  if (!agent) return;
+  const [glyph, name] = AGENT_BADGES[agent] || ['◇', agent];
+  el.textContent = `${glyph} ${name}`;
+  el.className = `agent-badge agent-${agent}`;
+}
+
 function renderInstruments(animate) {
   setNum($('#stat-add'), state.totals.add, animate);
   setNum($('#stat-del'), state.totals.del, animate);
@@ -481,6 +495,7 @@ function renderInstruments(animate) {
   $('#stat-elapsed').textContent = t0 ? durText(vtNow() - t0) : '00:00';
   if (state.session.title) $('#session-title').textContent = state.session.title;
   else if (state.session.cwd) $('#session-title').textContent = state.session.cwd.split('/').pop();
+  renderAgentBadge();
 }
 
 function renderStatus() {

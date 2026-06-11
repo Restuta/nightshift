@@ -8,7 +8,7 @@ const FEED_CAP = 150;
 
 export function initialState() {
   return {
-    session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, attentionText: null },
+    session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null },
     items: new Map(),
     todos: [],
     feed: [],
@@ -43,6 +43,7 @@ export function reduce(state, ev) {
     case 'session': {
       if (ev.title != null) state.session.title = ev.title;
       if (ev.cwd != null) state.session.cwd = ev.cwd;
+      if (ev.agent != null) state.session.agent = ev.agent;
       if (ev.phase === 'start' || ev.phase === 'resume') {
         if (state.session.startedAt == null) state.session.startedAt = ev.t;
         state.session.phase = 'working';

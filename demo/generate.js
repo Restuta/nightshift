@@ -15,7 +15,7 @@ const events = [];
 const e = (min, ev) => events.push({ t: Math.round(base + min * MIN), ...ev });
 
 // --- t+0 — session opens, plan goes up
-e(0.0, { type: 'session', phase: 'start', title: 'building nightshift', cwd: '/Users/restuta/Projects/ai/experiments/nightshift' });
+e(0.0, { type: 'session', phase: 'start', title: 'building nightshift', agent: 'claude', cwd: '/Users/restuta/Projects/ai/experiments/nightshift' });
 e(0.4, { type: 'note', text: 'Plan: schema → server → UI → replay. Board watches itself from here.' });
 e(0.6, { type: 'item', id: 'wi-schema', title: 'Event schema + pure reducer', status: 'doing' });
 e(0.7, { type: 'item', id: 'wi-server', title: 'Zero-dep SSE tail server', status: 'inbox' });

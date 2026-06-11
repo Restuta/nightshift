@@ -91,6 +91,22 @@ button { font-family: inherit; }
   text-overflow: ellipsis;
 }
 
+.agent-badge {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.agent-badge[hidden] { display: none; }
+.agent-badge.agent-claude { color: #d97757; border-color: #d9775745; }
+.agent-badge.agent-codex { color: #9fb3c8; border-color: #9fb3c845; }
+
 .instruments { display: flex; align-items: center; gap: 18px; }
 
 .stat { display: flex; align-items: baseline; gap: 5px; }

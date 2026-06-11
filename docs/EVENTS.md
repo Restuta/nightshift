@@ -26,7 +26,10 @@ Unknown event types must be ignored by consumers (forward compatibility).
 ## Types
 
 ### `session`
-Session lifecycle. `{phase: "start" | "resume" | "attention" | "idle" | "end", title?, text?, session?, cwd?}`
+Session lifecycle. `{phase: "start" | "resume" | "attention" | "idle" | "end", title?, text?, session?, cwd?, agent?}`
+- `agent` identifies who works the shift (`"claude"`, `"codex"`, …) and is
+  shown as a badge next to the session title. Unknown values still render —
+  new producers need no UI change.
 - `start` opens the board clock; `resume` fires on each user prompt; `idle`
   means the agent finished a turn and is waiting for input; `end` closes the
   session. `start`/`resume` flip the badge to LIVE, `idle` to IDLE.
