@@ -61,9 +61,10 @@ so you (the agent) maintain the work-item layer:
 
 - Vanilla JS, ES modules, no semicolons-vs-semicolons debates: match existing
   files (semicolons yes, 2-space indent).
-- The UI aesthetic is a deliberate "flight recorder / instrument panel"
-  direction: IBM Plex Mono + Instrument Serif, hairline borders, dark, dense,
-  amber accent. Don't introduce frameworks, gradients-on-white, or rounded
-  pastel cards. Motion = data changing, never decoration.
+- The UI follows Linear's visual language (per Anton's direction): flat
+  near-black, quiet hairlines, Inter for UI text with IBM Plex Mono reserved
+  for numbers/ids/log lines, status-icon column headers, pill badges with
+  progress rings. No gradients, no glow, no serif, no frameworks. Motion =
+  data changing, never decoration.
 - Commit messages: imperative, scoped (`server:`, `ui:`, `hooks:`, `demo:`,
   `docs:`). Commit and push as you go.

@@ -105,9 +105,11 @@ es.addEventListener('ready', () => {
   vt = log.length ? log[log.length - 1].t : Date.now();
   renderAll(false);
   // deep link into the tape: ?at=0.45 (fraction) or ?at=620 (seconds from start)
+  // Fractions map over the recorded event span, not the live domain — an old
+  // tape's idle gap shouldn't dilute them.
   const at = new URLSearchParams(location.search).get('at');
   if (at != null && log.length) {
-    const [t0, t1] = domain();
+    const t0 = log[0].t, t1 = log[log.length - 1].t;
     const v = parseFloat(at);
     if (!Number.isNaN(v)) scrubTo(v <= 1 ? t0 + v * (t1 - t0) : t0 + v * 1000);
   }
@@ -216,23 +218,23 @@ function drawTimeline() {
     const b = buckets[i];
     if (!b) continue;
     const h = Math.min(base - 8, 3 + Math.sqrt(b.n) * 7);
-    ctx.fillStyle = b.commit ? '#e8a14d' : b.pr ? '#79c0ff' : '#2c3645';
+    ctx.fillStyle = b.commit ? '#d29922' : b.pr ? '#4ea7fc' : '#26282e';
     ctx.fillRect(i * BW + 1, base - h, BW - 2, h);
   }
 
   // baseline
-  ctx.fillStyle = '#1e2531';
+  ctx.fillStyle = '#1a1c20';
   ctx.fillRect(0, base, W, 1);
 
   // unplayed tape dimmed while in replay
   const px = x(Math.min(vtNow(), t1));
   if (!live) {
-    ctx.fillStyle = 'rgba(10,12,16,.62)';
+    ctx.fillStyle = 'rgba(9,10,11,.62)';
     ctx.fillRect(px, 0, W - px, H);
   }
 
   // playhead
-  ctx.fillStyle = live ? '#f47067' : '#e8a14d';
+  ctx.fillStyle = live ? '#eb6e64' : '#4ea7fc';
   ctx.fillRect(px - 0.5, 4, 1, H - 8);
   ctx.beginPath();
   ctx.moveTo(px - 4, 4); ctx.lineTo(px + 4, 4); ctx.lineTo(px, 10);
@@ -266,59 +268,76 @@ function makeCard() {
   const el = document.createElement('article');
   el.className = 'card';
   el.innerHTML = `
+    <div class="card-head"><span class="cid"></span><span class="age"></span></div>
     <h3 class="title"></h3>
-    <div class="card-stats"><span class="a"></span><span class="d"></span><span class="c"></span></div>
-    <div class="todo-wrap"><div class="todo-bar"><i></i></div><span class="todo-count"></span></div>
-    <ul class="todo-list"></ul>
-    <div class="card-foot"><a class="pr-chip" target="_blank" rel="noopener"></a><span class="age"></span></div>`;
+    <div class="pills">
+      <span class="pill diff"><b class="a"></b><b class="d"></b></span>
+      <span class="pill commits"><b class="c"></b></span>
+      <span class="pill progress"><i class="ring"></i><b class="frac"></b></span>
+      <a class="pill pr" target="_blank" rel="noopener"><i class="ci"></i><b class="prtxt"></b></a>
+    </div>
+    <ul class="todo-list"></ul>`;
   el._refs = {
-    title: el.querySelector('.title'),
-    a: el.querySelector('.a'), d: el.querySelector('.d'), c: el.querySelector('.c'),
-    bar: el.querySelector('.todo-bar i'),
-    tcount: el.querySelector('.todo-count'),
-    tlist: el.querySelector('.todo-list'),
-    chip: el.querySelector('.pr-chip'),
+    cid: el.querySelector('.cid'),
     age: el.querySelector('.age'),
+    title: el.querySelector('.title'),
+    pills: el.querySelector('.pills'),
+    diff: el.querySelector('.pill.diff'),
+    a: el.querySelector('.a'), d: el.querySelector('.d'),
+    commitsPill: el.querySelector('.pill.commits'),
+    c: el.querySelector('.c'),
+    progress: el.querySelector('.pill.progress'),
+    ring: el.querySelector('.ring'),
+    frac: el.querySelector('.frac'),
+    pr: el.querySelector('.pill.pr'),
+    ci: el.querySelector('.pill.pr .ci'),
+    prtxt: el.querySelector('.prtxt'),
+    tlist: el.querySelector('.todo-list'),
   };
   return el;
 }
 
 function updateCard(el, it, animate, activeId) {
   const R = el._refs;
+  R.cid.textContent = it.id;
   R.title.textContent = it.title || it.id;
+  R.age.textContent = ageText(vtNow() - it.touchedAt);
 
-  const hasStats = it.add || it.del || it.commits;
-  el.querySelector('.card-stats').style.display = hasStats ? '' : 'none';
-  setNum(R.a, it.add, animate, n => n ? `+${n.toLocaleString('en-US')}` : '');
-  setNum(R.d, it.del, animate, n => n ? `−${n.toLocaleString('en-US')}` : '');
-  R.c.textContent = it.commits ? `· ${it.commits} commit${it.commits > 1 ? 's' : ''}` : '';
+  const hasDiff = !!(it.add || it.del);
+  R.diff.style.display = hasDiff ? '' : 'none';
+  setNum(R.a, it.add, animate, n => `+${n.toLocaleString('en-US')}`);
+  setNum(R.d, it.del, animate, n => `−${n.toLocaleString('en-US')}`);
 
-  el.classList.toggle('has-todos', !!(it.todos && it.todos.length));
-  if (it.todos && it.todos.length) {
+  R.commitsPill.style.display = it.commits ? '' : 'none';
+  R.c.textContent = it.commits ? `${it.commits} commit${it.commits > 1 ? 's' : ''}` : '';
+
+  const hasTodos = !!(it.todos && it.todos.length);
+  R.progress.style.display = hasTodos ? '' : 'none';
+  if (hasTodos) {
     const done = it.todos.filter(t => t.done).length;
-    R.bar.style.width = `${(done / it.todos.length) * 100}%`;
-    R.tcount.textContent = `${done}/${it.todos.length}`;
-    let firstOpen = it.todos.findIndex(t => !t.done);
+    const pct = (done / it.todos.length) * 100;
+    R.ring.style.setProperty('--p', `${pct}%`);
+    R.ring.style.setProperty('--ring-c', pct >= 100 ? 'var(--green)' : 'var(--yellow)');
+    R.frac.textContent = `${done}/${it.todos.length}`;
+    const firstOpen = it.todos.findIndex(t => !t.done);
     R.tlist.innerHTML = it.todos.map((t, i) =>
       `<li class="${t.done ? 'done' : i === firstOpen ? 'now' : ''}">${esc(t.text)}</li>`
     ).join('');
   }
 
-  const foot = el.querySelector('.card-foot');
   if (it.pr) {
-    foot.classList.add('has-content');
-    R.chip.style.display = '';
-    R.chip.className = `pr-chip${it.pr.state === 'merged' ? ' merged' : ''}`;
-    R.chip.innerHTML = `<i class="ci ${it.ci || ''}"></i>#${it.pr.number} ${it.pr.state}`;
-    if (it.pr.url) R.chip.href = it.pr.url; else R.chip.removeAttribute('href');
+    R.pr.style.display = '';
+    R.pr.classList.toggle('merged', it.pr.state === 'merged');
+    R.ci.className = `ci ${it.ci || ''}`;
+    R.prtxt.textContent = `#${it.pr.number} ${it.pr.state}`;
+    if (it.pr.url) R.pr.href = it.pr.url; else R.pr.removeAttribute('href');
   } else {
-    R.chip.style.display = 'none';
-    foot.classList.toggle('has-content', it.status !== 'inbox');
+    R.pr.style.display = 'none';
   }
 
-  el._touchedAt = it.touchedAt;
-  R.age.textContent = ageText(vtNow() - it.touchedAt);
+  R.pills.classList.toggle('has-pills', hasDiff || !!it.commits || hasTodos || !!it.pr);
 
+  el._touchedAt = it.touchedAt;
   el.classList.toggle('is-done', it.status === 'done');
   el.classList.toggle('is-active', it.id === activeId);
 
@@ -492,6 +511,25 @@ function renderAll(animate, freshEvents = null) {
   renderReadout();
   drawTimeline();
 }
+
+// ------------------------------------------------------------------ tape
+
+const TAPE_KEY = 'tb-tape-collapsed';
+
+function setTape(collapsed) {
+  document.body.classList.toggle('tape-collapsed', collapsed);
+  $('#tape-toggle').classList.toggle('active', !collapsed);
+  try { localStorage.setItem(TAPE_KEY, collapsed ? '1' : '0'); } catch { /* private mode */ }
+  setTimeout(sizeCanvas, 240); // after the grid transition settles
+}
+
+$('#tape-toggle').addEventListener('click', () =>
+  setTape(!document.body.classList.contains('tape-collapsed')));
+$('#tape-close').addEventListener('click', () => setTape(true));
+
+let tapeCollapsed = false;
+try { tapeCollapsed = localStorage.getItem(TAPE_KEY) === '1'; } catch { /* private mode */ }
+setTape(tapeCollapsed);
 
 // ---------------------------------------------------------------- inbox →
 
