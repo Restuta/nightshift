@@ -192,7 +192,7 @@ function parseCodex(lines) {
         phase = 'working';
         r.prompts++;
       } else if (p.type === 'task_complete') {
-        if (card) { r.events.push({ t, type: 'item', id: card, status: 'done' }); card = null; }
+        // Keep the turn's card in progress until the next prompt supersedes it.
         r.events.push({ t, type: 'session', phase: 'idle' });
         phase = 'idle';
       } else if (p.type === 'patch_apply_end' && p.success && p.changes) {

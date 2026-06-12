@@ -154,7 +154,8 @@ function step(e) {
       state.titled = true;
       state.phase = 'working';
     } else if (p.type === 'task_complete') {
-      if (state.card) { out.push({ t, type: 'item', id: state.card, status: 'done' }); state.card = null; }
+      // The turn's card stays in "in progress" — it's the current focus — until
+      // the next prompt supersedes it. Only the session badge flips to idle.
       out.push({ t, type: 'session', phase: 'idle' });
       state.phase = 'idle';
     } else if (p.type === 'patch_apply_end' && p.success && p.changes) {
