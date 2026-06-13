@@ -138,19 +138,31 @@ function connect(id) {
 }
 
 // Session switcher — fetch the served tapes; show the dropdown when >1.
+// Most-recently-active first, with a live/idle marker, so you can't get stranded
+// on a stale worktree tape (a dead session looks dead but isn't your current one).
 async function initSessions() {
   let list = [];
   try { list = await (await fetch('/sessions')).json(); } catch { /* offline */ }
+  list.sort((a, b) => (b.lastT || 0) - (a.lastT || 0)); // freshest first
   const params = new URLSearchParams(location.search);
   const wanted = params.get('session');
+  // Respect an explicit ?session=, else default to the most recently active.
   const start = (list.find(s => s.id === wanted) || list[0] || {}).id || 'default';
 
+  const now = Date.now();
+  const mark = s => {
+    const age = now - (s.lastT || 0);
+    if (age < 90e3) return '🟢';          // wrote in the last 90s — live
+    if (age < 30 * 60e3) return '🟡';     // within 30 min — recent
+    return '⚪';                           // older — stale
+  };
+  // Label by directory (worktrees share a title but differ by cwd).
+  const place = s => (s.cwd ? s.cwd.split('/').pop() : s.title) || s.id;
   const sel = $('#session-select');
   if (list.length > 1) {
-    sel.innerHTML = list.map(s => {
-      const label = `${s.title}${s.agent ? ` · ${s.agent}` : ''} · ${s.events} ev`;
-      return `<option value="${esc(s.id)}">${esc(label)}</option>`;
-    }).join('');
+    sel.innerHTML = list.map(s =>
+      `<option value="${esc(s.id)}">${mark(s)} ${esc(place(s))}${s.agent ? ` · ${s.agent}` : ''} · ${ageText(now - (s.lastT || now))} ago</option>`
+    ).join('');
     sel.value = start;
     sel.hidden = false;
     $('#session-title').hidden = true;

@@ -89,7 +89,7 @@ function scanMeta(s) {
   }
   return {
     id: s.id, title: title || (cwd ? path.basename(cwd) : s.id),
-    agent, phase, events: count, lastT,
+    cwd, agent, phase, events: count, lastT,
   };
 }
 
