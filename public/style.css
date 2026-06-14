@@ -477,6 +477,81 @@ body.tape-collapsed .tape { border-left: none; }
 .tape-head h2 { flex: 1; }
 .tape-head .col-count { flex: none; margin-right: 2px; }
 
+/* ----------------------------------------------------------- PR panel */
+
+.prs {
+  flex: none;
+  padding: 8px 14px 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.prs[hidden] { display: none; }
+
+.prs h3 {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--faint);
+  margin-bottom: 6px;
+}
+
+.prs-count {
+  font-family: var(--mono);
+  color: var(--faint);
+  margin-left: 2px;
+}
+
+.prs ul { list-style: none; max-height: 38vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+
+.prs li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.prs .ci {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+.prs .ci.pending { background: var(--yellow); animation: blink 1.2s infinite; }
+.prs .ci.pass { background: var(--green); }
+.prs .ci.fail { background: var(--red); }
+
+.prs .prnum { font-family: var(--mono); font-weight: 500; flex: none; }
+.prs .prnum a { color: var(--blue); text-decoration: none; }
+.prs .prnum a:hover { text-decoration: underline; }
+
+.prs .prstate {
+  flex: none;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: 1px 6px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.prs li.pr-open .prstate { color: var(--green); border-color: #4cb78240; }
+.prs li.pr-merged .prstate { color: var(--merged); border-color: #a371f740; }
+.prs li.pr-merged .prnum a { color: var(--merged); }
+.prs li.pr-closed .prstate { color: var(--faint); }
+
+.prs .prtitle {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .hotfiles {
   flex: none;
   padding: 4px 14px 10px 16px;
@@ -524,9 +599,12 @@ body.tape-collapsed .tape { border-left: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  direction: rtl; /* keep the filename visible, clip the folder on the left */
+  text-align: left;
 }
 
-.hotfiles .fpath b { color: var(--ink); font-weight: 500; }
+.hotfiles .fpath b { color: var(--ink); font-weight: 500; direction: ltr; unicode-bidi: embed; }
+.hotfiles .fdir { color: var(--faint); direction: ltr; unicode-bidi: embed; }
 
 .hotfiles .fcount {
   flex: none;

@@ -44,6 +44,7 @@ export function initialState() {
     items: new Map(),
     todos: [],
     files: new Map(), // path → {edits, lastAt} — churn signal
+    prs: new Map(),   // pr number → {number, state, url, title, ci, openedAt} — the PR panel
     feed: [],
     totals: { add: 0, del: 0, commits: 0, edits: 0, events: 0, tokIn: 0, tokOut: 0, cacheTok: 0, cost: 0 },
   };
@@ -187,14 +188,21 @@ export function reduce(state, ev) {
     }
 
     case 'pr': {
-      const it = targetItem(state, ev);
+      if (ev.number != null) {
+        // PRs are session-level entities (the PR panel), tracked by number.
+        const pr = state.prs.get(ev.number) ||
+          { number: ev.number, state: 'open', url: null, title: null, ci: null, openedAt: ev.t };
+        if (ev.state) pr.state = ev.state;
+        if (ev.url) pr.url = ev.url;
+        if (ev.title) pr.title = ev.title;
+        pr.t = ev.t;
+        state.prs.set(ev.number, pr);
+      }
+      // Only move a card when a PR is explicitly linked to one (ev.item) —
+      // don't hijack Codex's per-turn cards via the attribution heuristic.
+      const it = ev.item ? state.items.get(ev.item) : null;
       if (it) {
-        it.pr = {
-          number: ev.number, state: ev.state || 'open',
-          url: ev.url || null, title: ev.title || null,
-        };
-        // PR lifecycle advances the card on its own — hooks-only sessions
-        // still get column movement without the agent emitting item events.
+        it.pr = { number: ev.number, state: ev.state || 'open', url: ev.url || null, title: ev.title || null };
         if (ev.state === 'open' && (it.status === 'inbox' || it.status === 'doing')) it.status = 'pr';
         if (ev.state === 'merged') it.status = 'done';
         it.touchedAt = ev.t;
@@ -203,8 +211,11 @@ export function reduce(state, ev) {
     }
 
     case 'ci': {
-      const it = targetItem(state, ev);
-      if (it) { it.ci = ev.status; it.touchedAt = ev.t; }
+      if (ev.pr != null && state.prs.has(ev.pr)) state.prs.get(ev.pr).ci = ev.status;
+      // attach to a card only if one is explicitly carrying this PR
+      for (const it of state.items.values()) {
+        if (it.pr && it.pr.number === ev.pr) { it.ci = ev.status; it.touchedAt = ev.t; }
+      }
       break;
     }
 
@@ -261,6 +272,11 @@ export function hotFiles(state, min = 3, cap = 5) {
 }
 
 // The card whose todo drill-in is expanded: most recently touched `doing` item.
+// PRs touched this session, most recent first — drives the PR panel.
+export function prList(state) {
+  return [...state.prs.values()].sort((a, b) => (b.t || 0) - (a.t || 0));
+}
+
 export function activeItemId(state) {
   const it = activeDoingItem(state);
   return it ? it.id : null;

@@ -3,7 +3,7 @@
 // render path goes through renderAll(); animation only happens on forward,
 // incremental application of events, never on rebuilds (scrub/refresh).
 
-import { initialState, reduce, fold, activeItemId, hotFiles, STATUSES } from './reducer.js';
+import { initialState, reduce, fold, activeItemId, hotFiles, prList, STATUSES } from './reducer.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -584,6 +584,25 @@ function renderFeed(freshEvents) {
   $('#count-feed').textContent = state.totals.events || '';
 }
 
+// -------------------------------------------------------- pull requests
+
+function renderPRs() {
+  const box = $('#prs');
+  const prs = prList(state);
+  box.hidden = !prs.length;
+  if (!prs.length) return;
+  $('#prs-count').textContent = prs.length;
+  $('#prs-list').innerHTML = prs.map(pr => {
+    const st = pr.state || 'open';
+    const num = pr.url
+      ? `<a href="${esc(pr.url)}" target="_blank" rel="noopener">#${pr.number}</a>`
+      : `#${pr.number}`;
+    const ci = pr.ci ? `<i class="ci ${esc(pr.ci)}" title="checks ${esc(pr.ci)}"></i>` : '';
+    return `<li class="pr-${esc(st)}">${ci}<b class="prnum">${num}</b><span class="prstate">${esc(st)}</span>` +
+      `${pr.title ? `<span class="prtitle">${esc(pr.title)}</span>` : ''}</li>`;
+  }).join('');
+}
+
 // ------------------------------------------------------------- hot files
 
 function renderHotfiles() {
@@ -592,9 +611,14 @@ function renderHotfiles() {
   box.hidden = !hot.length;
   if (!hot.length) return;
   $('#hotfiles-list').innerHTML = hot.map(f => {
-    const i = f.path.lastIndexOf('/');
-    const file = i < 0 ? esc(f.path) : `${esc(f.path.slice(0, i + 1))}<b>${esc(f.path.slice(i + 1))}</b>`;
-    return `<li class="${f.tier}"><i class="heat"></i><span class="fpath">${file}</span><span class="fcount">${f.edits}×</span></li>`;
+    // Show the filename (+ its immediate folder) — the useful end of the path —
+    // not a middle-truncated prefix. Full path on hover.
+    const segs = String(f.path).split('/').filter(Boolean);
+    const name = segs[segs.length - 1] || f.path;
+    const dir = segs.length > 1 ? segs[segs.length - 2] + '/' : '';
+    return `<li class="${f.tier}" title="${esc(f.path)}"><i class="heat"></i>` +
+      `<span class="fpath"><span class="fdir">${esc(dir)}</span><b>${esc(name)}</b></span>` +
+      `<span class="fcount">${f.edits}×</span></li>`;
   }).join('');
 }
 
@@ -685,9 +709,14 @@ function renderAttention() {
   } else if (live && phase === 'idle') {
     banner.hidden = false;
     banner.classList.remove('urgent');
-    $('#attention-text').textContent = 'Turn finished — agent is waiting for your next prompt';
-    $('#attention-age').textContent = `idle ${waiting}`;
-    document.title = '◌ waiting · nightshift';
+    // "Idle" only means the log went quiet — for an autonomous agent that's
+    // usually a pause or a slow command, NOT "finished, waiting for you".
+    const autonomous = state.session.agent === 'codex';
+    $('#attention-text').textContent = autonomous
+      ? 'No activity on the log — the agent may be thinking, running a long command, or done'
+      : 'Turn finished — agent is waiting for your next prompt';
+    $('#attention-age').textContent = `quiet ${waiting}`;
+    document.title = '◌ idle · nightshift';
   } else {
     banner.hidden = true;
     document.title = 'nightshift';
@@ -703,6 +732,7 @@ function renderReadout() {
 function renderAll(animate, freshEvents = null) {
   renderInstruments(animate);
   renderBoard(animate);
+  renderPRs();
   renderHotfiles();
   renderFeed(animate ? freshEvents : null);
   renderStatus();
