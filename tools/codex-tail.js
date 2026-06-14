@@ -76,6 +76,14 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch { return
 function readState() { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } }
 function writeState(s) { fs.mkdirSync(NS_HOME, { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s) + '\n'); }
 
+// --status: print `live` if a worker is tailing this log right now, else `off`.
+// Lets /nightshift tell "already recording" from "an old tape is sitting here".
+if (args.includes('--status')) {
+  const e = readState()[LOG];
+  process.stdout.write(e && e.pid && alive(e.pid) ? 'live\n' : 'off\n');
+  process.exit(0);
+}
+
 // --stop: kill the worker tailing this log (or all of them).
 if (stop) {
   const s = readState();

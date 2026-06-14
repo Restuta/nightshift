@@ -26,24 +26,62 @@ SLUG=$(basename "$LOG" .jsonl)
 
 ## `/nightshift` / `/nightshift on`
 
+First decide whether a tape already exists for this project, and whether it's
+already being recorded:
+```sh
+EVENTS=$([ -f "$LOG" ] && wc -l < "$LOG" | tr -d ' ' || echo 0)
+if [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+  [ -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID" ] && LIVE=live || LIVE=off
+else
+  LIVE=$(node "$REPO/tools/codex-tail.js" --status --log "$LOG")
+fi
+```
+
+Branch on that:
+
+- **Already recording** (`LIVE` = `live`): just (re)open the board — skip to
+  *Open the board*. Don't ask, don't restart.
+- **An existing tape, not currently recording** (`LIVE` = `off` and `EVENTS` >
+  0): the tape is left over from an earlier session/run. **Ask the user and wait
+  for their answer** — do not start recording until they choose:
+  > Found an existing nightshift tape for this project (`$EVENTS` events).
+  > **Reset** to a fresh board for this session, or **continue** onto it?
+  - **Reset** → run *Reset (archive the old tape)*, then *Start*, then *Open*.
+  - **Continue** → *Start*, then *Open* (the old tape is kept and appended to).
+- **No tape** (`EVENTS` = 0): *Start*, then *Open*.
+
+### Reset (archive the old tape)
+Archives, never deletes — the board ignores `*.bak-*` so old tapes vanish from
+the switcher but stay on disk:
+```sh
+[ -n "$CLAUDE_CODE_SESSION_ID" ] || node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
+[ -s "$LOG" ] && mv "$LOG" "$LOG.bak-$(date +%s)"
+```
+
+### Start
 **Claude Code** — mark the session, emit the opening event:
 ```sh
 mkdir -p ~/.nightshift/active && touch ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 node "$REPO/tools/emit.js" session --phase start --agent claude --title "$(basename "$PWD")" --cwd "$PWD" --log "$LOG"
 ```
 
-**Codex** — start a detached tailer on this session's rollout (idempotent; it
-replays the rollout so far, so the board shows the session from its start):
+**Codex** — start a detached tailer on this session's rollout (idempotent; on a
+fresh tape it replays the current session's rollout from its start, so the board
+shows this session from turn 1):
 ```sh
 node "$REPO/tools/codex-tail.js" --log "$LOG"
 ```
 
-**Both** — bring up and open the board:
+### Open the board
 ```sh
 node "$REPO/tools/board.js" --open --session "$SLUG"
 ```
 Tell the user recording is **on for this session only**, give them the URL
 `board.js` printed, and mention `/nightshift off` to stop.
+
+## `/nightshift reset`
+Reset without asking: run *Reset (archive the old tape)*, then *Start*, then
+*Open the board*. Confirm the board is a fresh tape for this session.
 
 ## `/nightshift off` (or `stop`)
 ```sh
