@@ -71,6 +71,41 @@ if (stop) {
   process.exit(0);
 }
 
+// A long Codex session gets split across rollout files (context compaction
+// starts a fresh rollout and continues there). When our rollout goes quiet,
+// look for a newer one for the SAME project that has surpassed it, so the tail
+// follows the session instead of freezing on the old file.
+function findSuccessor(cwd, current) {
+  if (!cwd) return null;
+  let curM = 0;
+  try { curM = fs.statSync(current).mtimeMs; } catch { /* gone */ }
+  const base = path.join(os.homedir(), '.codex', 'sessions');
+  let best = null, bestM = curM;
+  const firstCwd = p => {
+    try {
+      const fd = fs.openSync(p, 'r');
+      const buf = Buffer.alloc(4096);
+      const n = fs.readSync(fd, buf, 0, 4096, 0);
+      fs.closeSync(fd);
+      const j = JSON.parse(buf.toString('utf8', 0, n).split('\n', 1)[0]);
+      return j.payload && j.payload.cwd;
+    } catch { return null; }
+  };
+  const walk = d => {
+    let es; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of es) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/^rollout-.*\.jsonl$/.test(e.name) && p !== current) {
+        let m = 0; try { m = fs.statSync(p).mtimeMs; } catch { continue; }
+        if (m > bestM && firstCwd(p) === cwd) { best = p; bestM = m; }
+      }
+    }
+  };
+  walk(base);
+  return best;
+}
+
 rollout = rollout || newestRollout();
 if (!rollout || !fs.existsSync(rollout)) {
   console.error('no rollout file found — pass one explicitly or start a Codex session first');
@@ -224,8 +259,10 @@ function append(events) {
 // --- tail loop --------------------------------------------------------------
 
 let offset = 0, partial = '', idleTicks = 0, emittedIdle = false;
-const IDLE_EMIT_TICKS = 120;  // ~60s of no rollout growth → the agent is idle
-const IDLE_EXIT_TICKS = 3600; // ~30 min of no growth (500ms ticks) → worker exits
+const IDLE_EMIT_TICKS = 120;     // ~60s of no rollout growth → the agent is idle
+const IDLE_EXIT_TICKS = 12 * 3600 * 2; // ~12h of no growth → worker exits. Long on
+// purpose: a paused overnight session must NOT lose its tailer (the old 30-min
+// exit froze the board mid-run). Re-running /nightshift restarts a dead tailer.
 function drain() {
   let size;
   try { size = fs.statSync(rollout).size; } catch { return; }
@@ -259,6 +296,14 @@ if (!once) {
   try { fs.watch(rollout, drain); } catch { /* polling covers it */ }
   setInterval(() => {
     drain();
+    // Our rollout went quiet — did the session rotate to a new file? Follow it.
+    if (idleTicks > 0 && idleTicks % 10 === 0) {
+      const succ = findSuccessor(rolloutCwd, rollout);
+      if (succ) {
+        rollout = succ; offset = 0; partial = ''; idleTicks = 0; emittedIdle = false;
+        // turn/card/model state carries over → the tape stays one continuous session
+      }
+    }
     // Rollout quiet for a while → mark idle once (a later flush wakes it).
     if (idleTicks >= IDLE_EMIT_TICKS && !emittedIdle && state.started) {
       emittedIdle = true;
