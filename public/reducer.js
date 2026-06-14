@@ -207,7 +207,10 @@ export function reduce(state, ev) {
     }
 
     case 'pr': {
-      if (ev.number != null) {
+      // A metadata-only event (title/url, no state) must not conjure a PR — an
+      // unknown number would default to 'open' and flood the panel (e.g. a
+      // `gh pr list` dump of merged PRs). Attach to a known PR or skip.
+      if (ev.number != null && !(ev.meta && !state.prs.has(ev.number))) {
         // PRs are session-level entities (the PR panel), tracked by number.
         const pr = state.prs.get(ev.number) ||
           { number: ev.number, state: 'open', url: null, title: null, ci: null, openedAt: ev.t, mergedAt: null };

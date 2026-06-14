@@ -133,7 +133,10 @@ if (!worker && !once) {
   const child = spawn(process.execPath, [__filename, '--worker', rollout, '--log', LOG],
     { detached: true, stdio: ['ignore', out, out] });
   child.unref();
-  s[LOG] = { pid: child.pid, rollout };
+  // Preserve a prior worker's resume snapshot when respawning on the SAME
+  // rollout, so a restart continues instead of re-draining the whole tape.
+  const prev = s[LOG] && s[LOG].rollout === rollout ? s[LOG] : {};
+  s[LOG] = { ...prev, pid: child.pid, rollout };
   writeState(s);
   process.exit(0);
 }
@@ -144,9 +147,10 @@ const state = {
   phase: null, model: null, lastActivityT: null, started: false, titled: false,
   turnN: 0, card: null, // one card per turn (prompt)
   lastToolKey: null, // dedupe Codex's same-instant double-logged commands
-  prsSeen: new Set(), // PR numbers we've already emitted 'open' for
+  prsSeen: new Set(), // PR numbers we've already recorded a state for
   toastPending: new Map(), // call_id → pr number (toast review-ci → ci status)
-  openListPending: new Set(), // call_ids of `gh pr list --state open` (authoritative open set)
+  listPending: new Map(), // call_id → {filter, json} for `gh pr list` (state-aware)
+  createPending: new Set(), // call_ids of `gh pr create` (its url output means 'open')
   pending: new Map(), // call_id → t
 };
 
@@ -161,8 +165,9 @@ function parseCommitOutput(text, t) {
   };
 }
 
-// PRs the agent touched show up as github.com/owner/repo/pull/N in command
-// output and agent messages — emit one 'pr' open the first time we see each.
+// `gh pr create` prints the new PR's url on success — the ONE place a bare
+// pull url proves a PR is open. (A url appearing in any other output — a merged
+// list, a `pr view`, a comment — proves nothing about its state.)
 function prOpensFrom(text, t) {
   const evs = [];
   const re = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
@@ -176,11 +181,9 @@ function prOpensFrom(text, t) {
   return evs;
 }
 
-// gh json output (gh pr list/view --json number,title,url,headRefName,...) is the
-// source of PR titles. Parse the array (or jq-filtered ndjson) and emit a
-// metadata-only pr event (no state) so the reducer fills in title/url.
-function prMetaFrom(text, t) {
-  if (!(text.includes('"title"') && text.includes('"number"'))) return [];
+// Parse gh's json PR output (a `--json` array, or jq-filtered ndjson) into rows.
+function parsePrRows(text) {
+  if (!text.includes('"number"')) return [];
   let objs = [];
   try { const a = JSON.parse(text); if (Array.isArray(a)) objs = a; } catch { /* not a clean array */ }
   if (!objs.length) {
@@ -189,16 +192,30 @@ function prMetaFrom(text, t) {
       if (s[0] === '{') { try { objs.push(JSON.parse(s)); } catch { /* skip */ } }
     }
   }
-  const out = [];
-  for (const o of objs) {
-    if (typeof o.number !== 'number') continue;
-    const ev = { t, type: 'pr', number: o.number };
-    if (o.title) ev.title = o.title;
-    else if (o.headRefName) ev.title = o.headRefName; // branch name as a fallback
-    if (o.url) ev.url = o.url;
-    out.push(ev);
-  }
-  return out;
+  return objs.filter(o => typeof o.number === 'number');
+}
+
+const prMeta = o => {
+  const ev = {};
+  if (o.title) ev.title = o.title;
+  else if (o.headRefName) ev.title = o.headRefName; // branch name as a fallback
+  if (o.url) ev.url = o.url;
+  return ev;
+};
+
+// Titles/urls (and an explicit state when the json carries one) from a single
+// `gh pr view --json ...` style output. A row WITHOUT an authoritative state is
+// `meta:true` — the reducer attaches its title/url but won't invent an open PR
+// (an unknown number defaulting to 'open' is exactly what flooded the panel).
+function prMetaFrom(text, t) {
+  return parsePrRows(text).map(o => {
+    const ev = { t, type: 'pr', number: o.number, ...prMeta(o) };
+    const st = o.state ? String(o.state).toLowerCase() : null;
+    if (st === 'open') ev.state = 'open';
+    else if (st === 'merged' || st === 'closed') ev.state = 'merged';
+    else ev.meta = true;
+    return ev;
+  });
 }
 
 // The agent narrates merges reliably ("PR #198 merged", "merged in PR #205").
@@ -214,6 +231,15 @@ function prMergesFrom(text, t) {
     if (/\bnot\b|isn'?t|n'?t |\bun/i.test(m[0])) continue;
     nums.add(Number(m[1]));
   }
+  // Completed-merge phrasings the past-tense match misses ("#223 did merge",
+  // "#236 was merged", "merged successfully"). Intentionally NOT "merging #224"
+  // — present tense is intent, not done, and the merge can still be gate-blocked.
+  for (const m of text.matchAll(/#(\d+)\b[^.\n]{0,24}\b(?:did merge|was merged|got merged|has merged|merged successfully|merge commit)\b/gi)) {
+    if (/\bnot\b|isn'?t|n'?t |\bun|\bwill\b|\bwould\b|\bshould\b|\bonce\b|\bbefore\b|\bafter\b|\bwhen\b|\bif\b/i.test(m[0])) continue;
+    nums.add(Number(m[1]));
+  }
+  // "pull/N at merge commit <sha>" — a merge commit hash is proof it landed.
+  for (const m of text.matchAll(/pull\/(\d+)\b[^.\n]{0,30}\bmerge commit\b/gi)) nums.add(Number(m[1]));
   return [...nums].map(n => ({ t, type: 'pr', number: n, state: 'merged' }));
 }
 
@@ -275,7 +301,9 @@ function step(e) {
         in: Math.max(0, (u.input_tokens || 0) - cached), out: u.output_tokens || 0, cacheRead: cached,
       });
     } else if (p.type === 'agent_message' && p.message) {
-      out.push(...prOpensFrom(p.message, t), ...prMergesFrom(p.message, t));
+      // Merge narration ("PR #205 merged") is reliable and guarded; opens come
+      // from `gh pr create` output, not prose urls (which may cite merged PRs).
+      out.push(...prMergesFrom(p.message, t));
     }
     return out;
   }
@@ -311,10 +339,15 @@ function step(e) {
           const tt = cmd.match(/--pr\s+(\d+)/);
           if (tt) state.toastPending.set(p.call_id, Number(tt[1]));
         }
-        // An unfiltered open-list is the source of truth for what's still open.
-        if (/gh pr list/.test(cmd) && /--state open/.test(cmd) && !/--head/.test(cmd)) {
-          state.openListPending.add(p.call_id);
+        // `gh pr list` is state-aware: remember its --state filter (gh defaults
+        // to open) and whether it's --json (parseable) so the output handler
+        // classifies by what was actually queried — not by urls in the dump.
+        if (/gh pr list\b/.test(cmd) && !/--head/.test(cmd)) {
+          const sm = cmd.match(/--state\s+(\w+)/);
+          state.listPending.set(p.call_id, { filter: sm ? sm[1].toLowerCase() : 'open', json: /--json\b/.test(cmd) });
         }
+        // A freshly created PR's url output is a real 'open' signal.
+        if (/gh pr create\b/.test(cmd)) state.createPending.add(p.call_id);
       }
     } else if (p.type === 'function_call_output') {
       const o = String(p.output || '');
@@ -330,16 +363,30 @@ function step(e) {
         const ci = toastCi(o);
         if (ci) out.push({ t, type: 'ci', pr: n, status: ci });
       }
-      if (state.openListPending.has(p.call_id)) {
-        // Reconcile: PRs in the list are open (corrects a premature 'merged');
-        // previously-seen PRs absent from it are merged/closed.
-        state.openListPending.delete(p.call_id);
-        const openNow = new Set([...o.matchAll(/"number":\s*(\d+)/g)].map(m => Number(m[1])));
-        for (const n of openNow) { state.prsSeen.add(n); out.push({ t, type: 'pr', number: n, state: 'open' }); }
-        for (const n of state.prsSeen) if (!openNow.has(n)) out.push({ t, type: 'pr', number: n, state: 'merged' });
+      if (state.listPending.has(p.call_id)) {
+        // Classify the listed PRs by what was queried, not by urls in the dump.
+        const { filter, json } = state.listPending.get(p.call_id);
+        state.listPending.delete(p.call_id);
+        if (json) {
+          const rows = parsePrRows(o);
+          if (filter === 'open') {
+            // Listed → open. We do NOT infer merged from absence: open lists get
+            // truncated by --limit or narrowed by filters, so a missing PR isn't
+            // proof it merged (that false-merged the one real open PR). Merges
+            // come only from positive signals (merged list, narration, state).
+            for (const r of rows) { state.prsSeen.add(r.number); out.push({ t, type: 'pr', number: r.number, state: 'open', ...prMeta(r) }); }
+          } else if (filter === 'merged' || filter === 'closed') {
+            for (const r of rows) { state.prsSeen.add(r.number); out.push({ t, type: 'pr', number: r.number, state: 'merged', ...prMeta(r) }); }
+          } else { // 'all' or unknown — trust each row's own state field if present
+            for (const r of rows) out.push(...prMetaFrom(JSON.stringify(r), t));
+          }
+        }
+      } else if (state.createPending.has(p.call_id)) {
+        state.createPending.delete(p.call_id);
+        out.push(...prOpensFrom(o, t)); // the new PR's url → open
+      } else {
+        out.push(...prMetaFrom(o, t)); // titles/urls (+ explicit state) only
       }
-      out.push(...prMetaFrom(o, t)); // titles/urls from gh json output
-      out.push(...prOpensFrom(o, t)); // PR urls in command output → opens
     }
   }
   return out;
@@ -359,6 +406,11 @@ function append(events) {
 // --- tail loop --------------------------------------------------------------
 
 let offset = 0, partial = '', idleTicks = 0, emittedIdle = false;
+// A turn card has no terminal event of its own — it closes on the next prompt.
+// When the session goes idle we retire it to `done` so a finished agent doesn't
+// leave a card stuck in "In progress"; we remember which card so the SAME turn
+// resuming (a long buffering pause, not a real finish) can reopen it.
+let idleClosedCard = null;
 const IDLE_EMIT_TICKS = 120;     // ~60s of no rollout growth → the agent is idle
 const IDLE_EXIT_TICKS = 12 * 3600 * 2; // ~12h of no growth → worker exits. Long on
 // purpose: a paused overnight session must NOT lose its tailer (the old 30-min
@@ -377,6 +429,13 @@ function drain() {
   const lines = (partial + buf.toString('utf8')).split('\n');
   partial = lines.pop();
   const events = [];
+  // We'd retired the open turn card on idle, but the same turn just resumed —
+  // reopen it before applying the new activity. If these lines carry a fresh
+  // prompt, step() closes this card and opens a new one, so it ends correctly.
+  if (idleClosedCard && idleClosedCard === state.card) {
+    events.push({ t: Date.now(), type: 'item', id: state.card, status: 'doing' });
+  }
+  idleClosedCard = null;
   for (const line of lines) {
     if (!line.trim()) continue;
     let e; try { e = JSON.parse(line); } catch { continue; }
@@ -391,26 +450,76 @@ function cleanupState() {
   if (s[LOG] && s[LOG].pid === process.pid) { delete s[LOG]; writeState(s); }
 }
 
+// Checkpoint enough to resume after a restart/crash: the file position (so we
+// don't re-emit history) plus the turn/PR state (so numbering and dedup carry
+// over). Transient call_id maps are intentionally dropped — losing an in-flight
+// command's classification at the seam is harmless; re-emitting 18k events isn't.
+function persist() {
+  const s = readState();
+  if (!s[LOG] || s[LOG].pid !== process.pid) return; // a newer worker owns it
+  s[LOG] = {
+    ...s[LOG], rollout,
+    snap: {
+      offset, partial, rolloutCwd, emittedIdle, idleClosedCard,
+      turnN: state.turnN, card: state.card, model: state.model,
+      started: state.started, titled: state.titled, prsSeen: [...state.prsSeen],
+    },
+  };
+  writeState(s);
+}
+
+// Restore a prior worker's checkpoint for this exact rollout (resume, don't
+// re-drain). Guarded: only if the file is the same and hasn't shrunk below our
+// mark (a shrink means rotation → start fresh).
+if (worker) {
+  const entry = readState()[LOG] || {};
+  const snap = entry.snap;
+  let size = 0; try { size = fs.statSync(rollout).size; } catch { /* gone */ }
+  if (snap && entry.rollout === rollout && typeof snap.offset === 'number' && snap.offset <= size) {
+    offset = snap.offset; partial = snap.partial || ''; rolloutCwd = snap.rolloutCwd || null;
+    emittedIdle = !!snap.emittedIdle; idleClosedCard = snap.idleClosedCard || null;
+    state.turnN = snap.turnN || 0; state.card = snap.card || null; state.model = snap.model || null;
+    state.started = !!snap.started; state.titled = !!snap.titled;
+    if (Array.isArray(snap.prsSeen)) state.prsSeen = new Set(snap.prsSeen);
+    console.error(`resumed at offset ${offset} (turn ${state.turnN})`);
+  }
+}
+
 drain();
+if (worker) persist();
 if (!once) {
   try { fs.watch(rollout, drain); } catch { /* polling covers it */ }
   setInterval(() => {
+    const before = offset;
     drain();
     // Our rollout went quiet — did the session rotate to a new file? Follow it.
     if (idleTicks > 0 && idleTicks % 10 === 0) {
       const succ = findSuccessor(rolloutCwd, rollout);
       if (succ) {
         rollout = succ; offset = 0; partial = ''; idleTicks = 0; emittedIdle = false;
+        persist(); // checkpoint the new file before reading it
         // turn/card/model state carries over → the tape stays one continuous session
       }
     }
     // Rollout quiet for a while → mark idle once (a later flush wakes it).
     if (idleTicks >= IDLE_EMIT_TICKS && !emittedIdle && state.started) {
       emittedIdle = true;
-      append([{ t: Date.now(), type: 'session', phase: 'idle' }]);
+      const evs = [{ t: Date.now(), type: 'session', phase: 'idle' }];
+      // Retire the open turn card too — the agent stopped, so it shouldn't sit
+      // in "In progress." Reopened by drain() if the same turn resumes.
+      if (state.card && idleClosedCard !== state.card) {
+        idleClosedCard = state.card;
+        evs.push({ t: Date.now(), type: 'item', id: state.card, status: 'done' });
+      }
+      append(evs);
+      persist();
     }
+    if (offset !== before) persist(); // checkpoint after any growth
     if (idleTicks > IDLE_EXIT_TICKS) { cleanupState(); process.exit(0); } // long-dead → exit
   }, 500);
-  process.on('SIGTERM', () => { cleanupState(); process.exit(0); });
+  // Exit but KEEP the snapshot, so a kill-and-restart resumes instead of
+  // re-draining. `--stop` deletes the entry parent-side (explicit forget); a
+  // 12h idle-exit cleans up itself. A bare SIGTERM (restart) leaves resume state.
+  process.on('SIGTERM', () => process.exit(0));
   console.error(`tailing ${rollout}\n     → ${LOG}`);
 }
