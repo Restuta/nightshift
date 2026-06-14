@@ -700,6 +700,49 @@ $('#prs-list').addEventListener('click', e => {
   if (li) window.open(li.dataset.url, '_blank', 'noopener');
 });
 
+// ----------------------------------------------------------- PR gantt
+// A dedicated, taller view: one row per PR, bar length = open→merge duration,
+// readable per-PR, on a shared time axis. Opened from the PR panel header.
+function renderGantt() {
+  const prs = prList(state).filter(p => p.openedAt != null);
+  $('#gantt-count').textContent = prs.length || '';
+  const body = $('#gantt-body'), axis = $('#gantt-axis');
+  if (!prs.length) { body.innerHTML = '<div class="gantt-empty">No PRs recorded yet.</div>'; axis.innerHTML = ''; return; }
+  const now = vtNow();
+  let t0 = Infinity, t1 = -Infinity;
+  for (const p of prs) { t0 = Math.min(t0, p.openedAt); t1 = Math.max(t1, p.mergedAt || now); }
+  if (t1 <= t0) t1 = t0 + 60e3;
+  const span = t1 - t0;
+  const pct = t => ((t - t0) / span) * 100;
+
+  const iv = niceTickMs(span);
+  let ax = '';
+  for (let tk = Math.ceil(t0 / iv) * iv; tk <= t1; tk += iv) ax += `<span class="gantt-tick" style="left:${pct(tk)}%">${tickLabel(tk - t0)}</span>`;
+  axis.innerHTML = ax;
+
+  const sorted = prs.slice().sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
+  body.innerHTML = sorted.map(p => {
+    const open = p.state !== 'merged';
+    const end = open ? now : (p.mergedAt || p.t);
+    const left = pct(p.openedAt), width = Math.max(0.4, pct(end) - left);
+    const dur = ageText(Math.max(0, end - p.openedAt));
+    const barCls = (open ? 'g-open' : 'g-merged') + (p.ci ? ` g-${p.ci}` : '');
+    return `<div class="gantt-row ${open ? 'g-open' : 'g-merged'}${p.url ? ' has-url' : ''}"${p.url ? ` data-url="${esc(p.url)}"` : ''} title="${esc(p.title || ('#' + p.number))}">` +
+      `<div class="g-label"><b>#${p.number}</b><span class="g-title">${esc(p.title || '')}</span><span class="g-dur">${dur}${open ? ' open' : ''}</span></div>` +
+      `<div class="g-track"><span class="g-bar ${barCls}" style="left:${left}%;width:${width}%"></span></div></div>`;
+  }).join('');
+}
+
+const ganttOpen = () => !$('#gantt-overlay').hidden;
+$('#gantt-open').addEventListener('click', () => { $('#gantt-overlay').hidden = false; renderGantt(); });
+$('#gantt-close').addEventListener('click', () => { $('#gantt-overlay').hidden = true; });
+$('#gantt-overlay').addEventListener('click', e => { if (e.target.id === 'gantt-overlay') $('#gantt-overlay').hidden = true; });
+$('#gantt-body').addEventListener('click', e => {
+  const r = e.target.closest('.gantt-row[data-url]');
+  if (r) window.open(r.dataset.url, '_blank', 'noopener');
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && ganttOpen()) $('#gantt-overlay').hidden = true; });
+
 // ------------------------------------------------------------- hot files
 
 function renderHotfiles() {
@@ -830,6 +873,7 @@ function renderAll(animate, freshEvents = null) {
   renderInstruments(animate);
   renderBoard(animate);
   renderPRs();
+  if (!$('#gantt-overlay').hidden) renderGantt();
   renderHotfiles();
   renderFeed(animate ? freshEvents : null);
   renderStatus();

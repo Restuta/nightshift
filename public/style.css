@@ -505,6 +505,83 @@ body.tape-collapsed .tape-resize { display: none; }
 .tape-head h2 { flex: 1; }
 .tape-head .col-count { flex: none; margin-right: 2px; }
 
+/* --------------------------------------------------------- PR gantt */
+
+.gantt-overlay {
+  position: fixed; inset: 0;
+  background: rgba(5, 8, 15, .6);
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+}
+.gantt-overlay[hidden] { display: none; }
+
+.gantt {
+  width: 100%;
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -20px 50px rgba(0, 0, 0, .5);
+}
+
+.gantt-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+.gantt-head h2 { font-size: 13px; font-weight: 600; }
+.gantt-count { font-family: var(--mono); color: var(--faint); font-weight: 400; margin-left: 2px; }
+.gantt-legend { font-size: 11px; color: var(--faint); display: flex; align-items: center; gap: 5px; margin-left: auto; }
+.gantt-legend .g-bar { position: static; display: inline-block; width: 14px; height: 5px; border-radius: 3px; margin: 0 1px; }
+.gantt-head .icon-btn { margin-left: 8px; }
+
+.gantt-axis {
+  position: relative;
+  height: 16px;
+  margin-left: 240px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+.gantt-tick {
+  position: absolute; bottom: 2px;
+  font-family: var(--mono); font-size: 9px; color: var(--faint);
+  transform: translateX(-50%);
+}
+.gantt-tick::before {
+  content: ''; position: absolute; left: 50%; top: 14px; width: 1px; height: 100vh;
+  background: #141b2a;
+}
+
+.gantt-body { overflow-y: auto; flex: 1; padding: 4px 16px 12px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.gantt-empty { color: var(--faint); padding: 18px 0; font-size: 12px; }
+
+.gantt-row { display: flex; align-items: center; height: 24px; border-radius: 4px; }
+.gantt-row.has-url { cursor: pointer; }
+.gantt-row.has-url:hover { background: var(--card); }
+.gantt-row.has-url:hover .g-title { color: var(--ink); }
+
+.g-label { width: 224px; flex: none; display: flex; align-items: baseline; gap: 6px; overflow: hidden; padding-right: 16px; font-size: 12px; }
+.g-label b { font-family: var(--mono); font-weight: 500; flex: none; }
+.gantt-row.g-merged .g-label b { color: var(--merged); }
+.g-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+.g-dur { flex: none; font-family: var(--mono); font-size: 10px; color: var(--faint); }
+
+.g-track { flex: 1; position: relative; height: 100%; }
+.g-bar {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  height: 6px; min-width: 3px; border-radius: 3px;
+  background: var(--faint);
+}
+.g-bar.g-open { background: var(--green); }
+.g-bar.g-merged { background: var(--merged); }
+.g-bar.g-pending { box-shadow: 0 0 0 1.5px var(--yellow) inset; }
+.g-bar.g-fail { box-shadow: 0 0 0 1.5px var(--red) inset; }
+
 /* ----------------------------------------------------------- PR panel */
 
 .prs {

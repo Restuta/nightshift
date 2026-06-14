@@ -82,6 +82,9 @@
     <div class="prs" id="prs" hidden>
       <header class="prs-head">
         <h3>Pull requests <span class="prs-count" id="prs-count"></span></h3>
+        <button class="icon-btn" id="gantt-open" title="PR timeline (gantt)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.5 4h7M2.5 8h10M2.5 12h5"/></svg>
+        </button>
         <button class="icon-btn" id="tape-close" title="collapse panel">
           <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 3.5 L8.5 7 L5 10.5"/></svg>
         </button>
@@ -100,6 +103,18 @@
     </div>
   </aside>
 </main>
+
+<div class="gantt-overlay" id="gantt-overlay" hidden>
+  <div class="gantt">
+    <header class="gantt-head">
+      <h2>PR timeline <span class="gantt-count" id="gantt-count"></span></h2>
+      <span class="gantt-legend"><i class="g-bar g-open"></i> open <i class="g-bar g-merged"></i> merged — bar length = open→merge</span>
+      <button class="icon-btn" id="gantt-close" title="close">✕</button>
+    </header>
+    <div class="gantt-axis" id="gantt-axis"></div>
+    <div class="gantt-body" id="gantt-body"></div>
+  </div>
+</div>
 
 <footer class="recorder">
   <div class="transport">
