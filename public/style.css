@@ -453,6 +453,17 @@ body.tape-collapsed .tape-resize { display: none; }
   border: 1.4px solid var(--faint);
 }
 
+.todo-list li .steptime {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--faint);
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.todo-list li.now .steptime { color: var(--yellow); }
+.todo-list li.done .steptime { text-decoration: none; opacity: .8; }
+
 .todo-list li.done { color: var(--faint); text-decoration: line-through; text-decoration-color: #5e646e60; }
 .todo-list li.done::before { border-color: var(--green); background: var(--green); opacity: .75; }
 .todo-list li.now { color: var(--ink); }

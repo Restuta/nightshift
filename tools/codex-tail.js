@@ -288,7 +288,7 @@ function step(e) {
       try { plan = JSON.parse(p.arguments || '{}').plan || []; } catch { /* skip */ }
       out.push({
         t, type: 'todos', ...(state.card ? { item: state.card } : {}),
-        todos: plan.map(s => ({ text: s.step, done: s.status === 'completed' })),
+        todos: plan.map(s => ({ text: s.step, done: s.status === 'completed', status: s.status })),
       });
     } else if (p.type === 'function_call') {
       let cmd = '';

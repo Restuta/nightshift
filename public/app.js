@@ -412,6 +412,17 @@ function cardTiming(el) {
   return ageText(dur) + (idle > 90e3 ? ` <span class="stale">· idle ${ageText(idle)}</span>` : '');
 }
 
+// Per-plan-step timing: a done step shows how long it took; the running step
+// shows how long it's been in progress.
+function stepTime(t, isNow) {
+  if (t.done && t.doneAt) {
+    const s = t.startedAt || t.firstSeenAt;
+    return s ? ageText(Math.max(0, t.doneAt - s)) : '';
+  }
+  if (isNow && t.startedAt) return ageText(Math.max(0, vtNow() - t.startedAt));
+  return '';
+}
+
 function makeCard() {
   const el = document.createElement('article');
   el.className = 'card';
@@ -485,10 +496,14 @@ function updateCard(el, it, animate, activeId) {
     R.ring.style.setProperty('--p', `${pct}%`);
     R.ring.style.setProperty('--ring-c', pct >= 100 ? 'var(--green)' : 'var(--yellow)');
     R.frac.textContent = `${done}/${it.todos.length}`;
+    el._todos = it.todos;
     const firstOpen = it.todos.findIndex(t => !t.done);
-    R.tlist.innerHTML = it.todos.map((t, i) =>
-      `<li class="${t.done ? 'done' : i === firstOpen ? 'now' : ''}">${esc(t.text)}</li>`
-    ).join('');
+    R.tlist.innerHTML = it.todos.map((t, i) => {
+      const now = t.status === 'in_progress' || (t.status == null && i === firstOpen);
+      const cls = t.done ? 'done' : now ? 'now' : '';
+      const tm = stepTime(t, now);
+      return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}</li>`;
+    }).join('');
   }
 
   if (it.pr) {
@@ -881,6 +896,12 @@ function tickActiveCards() {
   for (const el of cardEls.values()) {
     if (el._status === 'done') continue;
     el._refs.age.innerHTML = cardTiming(el);
+    // live-tick the running step's elapsed time on the active card
+    if (el._activeLive && el._todos) {
+      const nowEl = el._refs.tlist.querySelector('li.now .steptime');
+      const t = el._todos.find(td => td.status === 'in_progress') || el._todos.find(td => !td.done);
+      if (nowEl && t && t.startedAt) nowEl.textContent = ageText(Math.max(0, vtNow() - t.startedAt));
+    }
   }
 }
 

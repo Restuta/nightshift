@@ -150,9 +150,28 @@ export function reduce(state, ev) {
     }
 
     case 'todos': {
-      const todos = (ev.todos || []).map(td => ({ text: td.text, done: !!td.done }));
-      state.todos = todos;
+      // Track per-step timing across plan snapshots (keyed by step text): when a
+      // step first goes in_progress (startedAt) and when it completes (doneAt),
+      // so the card can show how long each step took / has been running.
       const it = targetItem(state, ev);
+      const times = it ? (it.stepTimes || (it.stepTimes = new Map())) : null;
+      const todos = (ev.todos || []).map(td => {
+        const status = td.status || (td.done ? 'completed' : 'pending');
+        let tm = times && times.get(td.text);
+        if (times && !tm) { tm = { firstSeenAt: ev.t }; times.set(td.text, tm); }
+        if (tm) {
+          if (status === 'in_progress' && tm.startedAt == null) tm.startedAt = ev.t;
+          if (status === 'completed' && tm.doneAt == null) {
+            tm.doneAt = ev.t;
+            if (tm.startedAt == null) tm.startedAt = tm.firstSeenAt;
+          }
+        }
+        return {
+          text: td.text, done: status === 'completed', status,
+          startedAt: tm && tm.startedAt, doneAt: tm && tm.doneAt, firstSeenAt: tm && tm.firstSeenAt,
+        };
+      });
+      state.todos = todos;
       if (it) { it.todos = todos; it.touchedAt = ev.t; }
       awake(state);
       break;

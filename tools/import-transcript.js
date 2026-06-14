@@ -221,7 +221,7 @@ function parseCodex(lines) {
         try { plan = JSON.parse(p.arguments || '{}').plan || []; } catch { /* skip */ }
         r.events.push({
           t, type: 'todos', ...(card ? { item: card } : {}),
-          todos: plan.map(s => ({ text: s.step, done: s.status === 'completed' })),
+          todos: plan.map(s => ({ text: s.step, done: s.status === 'completed', status: s.status })),
         });
       } else if (p.type === 'function_call') {
         lastActivityT = t;
