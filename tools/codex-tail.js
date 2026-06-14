@@ -25,19 +25,22 @@ const worker = args.includes('--worker');
 const stop = args.includes('--stop');
 let rollout = args.find(a => !a.startsWith('--') && a !== val('--log'));
 
-// The cwd a rollout was recorded in. The session_meta first line can be tens of
-// KB (it embeds base_instructions), so we read a generous head and pull cwd by
-// regex rather than parsing the whole — a small read truncates and fails.
-function rolloutCwdOf(p) {
+// Read the head of a rollout. The session_meta first line can be tens of KB (it
+// embeds base_instructions), so a small read truncates it — 64KB covers the
+// meta fields we match by regex without slurping the whole file.
+function rolloutHead(p) {
   try {
     const fd = fs.openSync(p, 'r');
     const buf = Buffer.alloc(65536);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     fs.closeSync(fd);
-    const m = buf.toString('utf8', 0, n).match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    return m ? m[1] : null;
-  } catch { return null; }
+    return buf.toString('utf8', 0, n);
+  } catch { return ''; }
 }
+const headField = (head, re) => { const m = head.match(re); return m ? m[1] : null; };
+const CWD_RE = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+const ID_RE = /"id"\s*:\s*"([0-9a-f-]{36})"/;
+function rolloutCwdOf(p) { return headField(rolloutHead(p), CWD_RE); }
 
 // Newest rollout = the session being written right now. With preferCwd, the
 // newest rollout recorded in THAT directory wins — so `/nightshift` attaches to
@@ -96,12 +99,16 @@ if (stop) {
   process.exit(0);
 }
 
-// A long Codex session gets split across rollout files (context compaction
-// starts a fresh rollout and continues there). When our rollout goes quiet,
-// look for a newer one for the SAME project that has surpassed it, so the tail
-// follows the session instead of freezing on the old file.
-function findSuccessor(cwd, current) {
-  if (!cwd) return null;
+// A long Codex session can be split across rollout files (context compaction
+// continues in a fresh rollout). When our rollout goes quiet, follow such a
+// continuation so the tail doesn't freeze on the old file — but ONLY a genuine
+// continuation of THIS session. The same project dir also hosts subagent
+// rollouts (review/explorer/guardian) and unrelated new sessions; bridging
+// those onto this tape is wrong (it dumps a subagent's work, or a fresh
+// session, into the current board). Require same session id, or a rollout that
+// references our id (a resume/continuation), and never a subagent.
+function findSuccessor(cwd, current, sessionId) {
+  if (!cwd || !sessionId) return null;
   let curM = 0;
   try { curM = fs.statSync(current).mtimeMs; } catch { /* gone */ }
   const base = path.join(os.homedir(), '.codex', 'sessions');
@@ -113,7 +120,13 @@ function findSuccessor(cwd, current) {
       if (e.isDirectory()) walk(p);
       else if (/^rollout-.*\.jsonl$/.test(e.name) && p !== current) {
         let m = 0; try { m = fs.statSync(p).mtimeMs; } catch { continue; }
-        if (m > bestM && rolloutCwdOf(p) === cwd) { best = p; bestM = m; }
+        if (m <= bestM) continue;
+        const head = rolloutHead(p);
+        if (headField(head, CWD_RE) !== cwd) continue;
+        if (/"thread_source"\s*:\s*"subagent"/.test(head)) continue; // subagents tape separately
+        const id = headField(head, ID_RE);
+        if (id !== sessionId && !head.includes(sessionId)) continue;  // a different session
+        best = p; bestM = m;
       }
     }
   };
@@ -410,6 +423,7 @@ function step(e) {
 }
 
 let rolloutCwd = null;
+let rolloutSessionId = null; // this session's id — gates rotation-following
 function relCwd(file) {
   return rolloutCwd ? path.relative(rolloutCwd, file) : file;
 }
@@ -456,7 +470,10 @@ function drain() {
   for (const line of lines) {
     if (!line.trim()) continue;
     let e; try { e = JSON.parse(line); } catch { continue; }
-    if (e.type === 'session_meta' && e.payload && e.payload.cwd) rolloutCwd = e.payload.cwd;
+    if (e.type === 'session_meta' && e.payload) {
+      if (e.payload.cwd) rolloutCwd = e.payload.cwd;
+      if (e.payload.id) rolloutSessionId = e.payload.id;
+    }
     events.push(...step(e));
   }
   append(events);
@@ -477,7 +494,7 @@ function persist() {
   s[LOG] = {
     ...s[LOG], rollout,
     snap: {
-      offset, partial, rolloutCwd, emittedIdle, idleClosedCard,
+      offset, partial, rolloutCwd, rolloutSessionId, emittedIdle, idleClosedCard,
       turnN: state.turnN, card: state.card, model: state.model,
       started: state.started, titled: state.titled, prsSeen: [...state.prsSeen],
     },
@@ -494,6 +511,7 @@ if (worker) {
   let size = 0; try { size = fs.statSync(rollout).size; } catch { /* gone */ }
   if (snap && entry.rollout === rollout && typeof snap.offset === 'number' && snap.offset <= size) {
     offset = snap.offset; partial = snap.partial || ''; rolloutCwd = snap.rolloutCwd || null;
+    rolloutSessionId = snap.rolloutSessionId || null;
     emittedIdle = !!snap.emittedIdle; idleClosedCard = snap.idleClosedCard || null;
     state.turnN = snap.turnN || 0; state.card = snap.card || null; state.model = snap.model || null;
     state.started = !!snap.started; state.titled = !!snap.titled;
@@ -511,7 +529,7 @@ if (!once) {
     drain();
     // Our rollout went quiet — did the session rotate to a new file? Follow it.
     if (idleTicks > 0 && idleTicks % 10 === 0) {
-      const succ = findSuccessor(rolloutCwd, rollout);
+      const succ = findSuccessor(rolloutCwd, rollout, rolloutSessionId);
       if (succ) {
         rollout = succ; offset = 0; partial = ''; idleTicks = 0; emittedIdle = false;
         persist(); // checkpoint the new file before reading it
