@@ -84,11 +84,14 @@ function findSuccessor(cwd, current) {
   const firstCwd = p => {
     try {
       const fd = fs.openSync(p, 'r');
-      const buf = Buffer.alloc(4096);
-      const n = fs.readSync(fd, buf, 0, 4096, 0);
+      const buf = Buffer.alloc(65536);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
       fs.closeSync(fd);
-      const j = JSON.parse(buf.toString('utf8', 0, n).split('\n', 1)[0]);
-      return j.payload && j.payload.cwd;
+      // The session_meta line can be tens of KB (it embeds base_instructions),
+      // so the first line often doesn't fit a small read — parsing it whole
+      // fails and rotation-following silently breaks. Pull cwd from the head.
+      const m = buf.toString('utf8', 0, n).match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      return m ? m[1] : null;
     } catch { return null; }
   };
   const walk = d => {
