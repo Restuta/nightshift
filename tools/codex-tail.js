@@ -309,6 +309,7 @@ function step(e) {
       if (state.card) out.push({ t, type: 'item', id: state.card, status: 'done' });
       state.turnN++;
       state.card = `turn-${state.turnN}`;
+      state.hasPlan = false; state.planComplete = false; // fresh turn, no plan yet
       out.push({ t, type: 'item', id: state.card, title: title || `turn ${state.turnN}`, status: 'doing' });
       out.push({ t, type: 'session', phase: 'resume', agent: 'codex', ...(state.titled ? {} : { title }) });
       state.titled = true;
@@ -344,6 +345,10 @@ function step(e) {
       // turn's card so an in-progress card shows live steps + a progress ring.
       let plan = [];
       try { plan = JSON.parse(p.arguments || '{}').plan || []; } catch { /* skip */ }
+      // Track plan completeness so idle doesn't retire a turn whose steps aren't
+      // finished — a quiet rollout mid-plan is a pause, not a completed turn.
+      state.hasPlan = plan.length > 0;
+      state.planComplete = plan.length > 0 && plan.every(s => s.status === 'completed');
       out.push({
         t, type: 'todos', ...(state.card ? { item: state.card } : {}),
         todos: plan.map(s => ({ text: s.step, done: s.status === 'completed', status: s.status })),
@@ -495,6 +500,7 @@ function persist() {
     ...s[LOG], rollout,
     snap: {
       offset, partial, rolloutCwd, rolloutSessionId, emittedIdle, idleClosedCard,
+      hasPlan: state.hasPlan, planComplete: state.planComplete,
       turnN: state.turnN, card: state.card, model: state.model,
       started: state.started, titled: state.titled, prsSeen: [...state.prsSeen],
     },
@@ -514,6 +520,7 @@ if (worker) {
     rolloutSessionId = snap.rolloutSessionId || null;
     emittedIdle = !!snap.emittedIdle; idleClosedCard = snap.idleClosedCard || null;
     state.turnN = snap.turnN || 0; state.card = snap.card || null; state.model = snap.model || null;
+    state.hasPlan = !!snap.hasPlan; state.planComplete = !!snap.planComplete;
     state.started = !!snap.started; state.titled = !!snap.titled;
     if (Array.isArray(snap.prsSeen)) state.prsSeen = new Set(snap.prsSeen);
     console.error(`resumed at offset ${offset} (turn ${state.turnN})`);
@@ -541,8 +548,12 @@ if (!once) {
       emittedIdle = true;
       const evs = [{ t: Date.now(), type: 'session', phase: 'idle' }];
       // Retire the open turn card too — the agent stopped, so it shouldn't sit
-      // in "In progress." Reopened by drain() if the same turn resumes.
-      if (state.card && idleClosedCard !== state.card) {
+      // in "In progress." Reopened by drain() if the same turn resumes. But only
+      // if the turn looks finished: no plan, or a plan with all steps done. A
+      // quiet rollout with an unfinished plan is a pause mid-step, not a
+      // completed turn — retiring it would falsely mark the card done.
+      const turnDone = !state.hasPlan || state.planComplete;
+      if (state.card && idleClosedCard !== state.card && turnDone) {
         idleClosedCard = state.card;
         evs.push({ t: Date.now(), type: 'item', id: state.card, status: 'done' });
       }

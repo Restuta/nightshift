@@ -556,10 +556,14 @@ function updateCard(el, it, animate, activeId) {
     R.ring.style.setProperty('--ring-c', pct >= 100 ? 'var(--green)' : 'var(--yellow)');
     R.frac.textContent = `${done}/${it.todos.length}`;
     el._todos = it.todos;
+    // On a done card the turn has ended: a step that never completed is
+    // "unfinished", not "now" — don't show it as the active step with a live,
+    // ever-growing timer (that's what made a finished card look still-working).
+    const cardDone = it.status === 'done';
     const firstOpen = it.todos.findIndex(t => !t.done);
     R.tlist.innerHTML = it.todos.map((t, i) => {
-      const now = t.status === 'in_progress' || (t.status == null && i === firstOpen);
-      const cls = t.done ? 'done' : now ? 'now' : '';
+      const now = !cardDone && (t.status === 'in_progress' || (t.status == null && i === firstOpen));
+      const cls = t.done ? 'done' : now ? 'now' : cardDone ? 'unfinished' : '';
       const tm = stepTime(t, now);
       return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}</li>`;
     }).join('');
@@ -733,10 +737,10 @@ function renderPRs() {
   // Toast / CI status, spelled out and always present so it leads each open row —
   // the colored chip is the one thing that means "status".
   const status = pr => {
-    if (pr.ci === 'pass') return '<span class="prci pass" title="Toast/CI passing">✓ ready</span>';
-    if (pr.ci === 'fail') return '<span class="prci fail" title="checks failing / blocked">✗ blocked</span>';
-    if (pr.ci === 'pending') return '<span class="prci pending" title="checks running">⋯ checks</span>';
-    return '<span class="prci unknown" title="open — no check status seen yet">open</span>';
+    if (pr.ci === 'pass') return '<span class="prci pass" title="CI / Toast checks passed — ready to merge">✓ passed</span>';
+    if (pr.ci === 'fail') return '<span class="prci fail" title="a check failed or the merge is blocked">✗ blocked</span>';
+    if (pr.ci === 'pending') return '<span class="prci pending" title="CI / Toast checks are still running">⋯ running</span>';
+    return '<span class="prci unknown" title="PR is open; no check result recorded yet">open</span>';
   };
 
   const openRows = open.map(pr =>

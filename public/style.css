@@ -468,6 +468,10 @@ body.tape-collapsed .tape-resize { display: none; }
 .todo-list li.done::before { border-color: var(--green); background: var(--green); opacity: .75; }
 .todo-list li.now { color: var(--ink); }
 .todo-list li.now::before { border-color: var(--yellow); border-style: dashed; animation: spin 6s linear infinite; }
+/* A step still open when its turn ended (done card): muted + dashed, NOT a
+   live spinner — the turn finished without it, it isn't actively running. */
+.todo-list li.unfinished { color: var(--dim); opacity: .6; }
+.todo-list li.unfinished::before { border-color: var(--faint); border-style: dashed; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
