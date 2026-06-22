@@ -63,7 +63,9 @@ function updateCodexHooks(doRemove) {
   }
 
   const isOurs = g => (g.hooks || []).some(h => (h.command || '').includes(PROBE_MARK));
-  const cmd = `node ${JSON.stringify(probe)}`;
+  // Absolute node path — Codex runs hook commands in a shell that may not have
+  // `node` on PATH; the binary running this installer is one we know exists.
+  const cmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(probe)}`;
   let removedNotLast = false;
   for (const ev of PROBE_EVENTS) {
     const groups = cfg.hooks[ev] || [];
