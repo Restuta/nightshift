@@ -816,8 +816,9 @@ function renderHotfiles() {
   // A session launched in one worktree often edits sibling worktrees (paths that
   // escape root with `../`); the filename's immediate folder hides which one. For
   // those, surface the worktree instead, trimmed of the repo-name prefix so it
-  // reads `lock-gate › …` not `megablock-h1-lock-gate › …`.
-  const repo = (state.session.title || '').trim();
+  // reads `lock-gate › …` not `megablock-h1-lock-gate › …`. Key the prefix off the
+  // cwd basename — title can be a first-prompt/custom label on imported tapes.
+  const repo = ((state.session.cwd || '').split('/').filter(Boolean).pop() || (state.session.title || '').trim());
   $('#hotfiles-list').innerHTML = hot.map(f => {
     // Show the filename (+ its immediate folder) — the useful end of the path —
     // not a middle-truncated prefix. Full path on hover.
