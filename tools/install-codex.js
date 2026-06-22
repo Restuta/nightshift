@@ -28,9 +28,18 @@ const home = os.homedir();
 const nsHome = path.join(home, '.nightshift');
 const skillSrc = path.join(here, 'skills', 'nightshift');
 const skillDir = path.join(home, '.codex', 'skills', 'nightshift');
-const probe = path.join(here, 'tools', 'hook-probe.js');
-const PROBE_MARK = 'tools/hook-probe.js'; // identifies our hook group on re-runs
-const PROBE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse'];
+const agentHook = path.join(here, 'hooks', 'agent-hook.js');
+const HOOK_MARK = 'hooks/agent-hook.js'; // identifies our hook group on re-runs
+const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse'];
+// Cheap pre-gate (mirrors the Claude installer): spawn node only when a session
+// has opted in. Codex sets CODEX_THREAD_ID (== the hook payload's session_id) in
+// the command env, so the marker check is per-session. When nothing is
+// recording the marker dir is empty → no node, no cost to other sessions.
+const GATE =
+  'if [ -n "$NIGHTSHIFT" ] ' +
+  '|| { [ -n "$CODEX_THREAD_ID" ] && [ -e "$HOME/.nightshift/active/$CODEX_THREAD_ID" ]; } ' +
+  '|| { [ -z "$CODEX_THREAD_ID" ] && [ -n "$(ls -A "$HOME/.nightshift/active" 2>/dev/null)" ]; }; ' +
+  `then ${JSON.stringify(process.execPath)} ${JSON.stringify(agentHook)}; fi; true`;
 
 function clearSkill() {
   try {
@@ -62,12 +71,10 @@ function updateCodexHooks(doRemove) {
     fs.copyFileSync(real, real + '.nightshift-bak');
   }
 
-  const isOurs = g => (g.hooks || []).some(h => (h.command || '').includes(PROBE_MARK));
-  // Absolute node path — Codex runs hook commands in a shell that may not have
-  // `node` on PATH; the binary running this installer is one we know exists.
-  const cmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(probe)}`;
+  const isOurs = g => (g.hooks || []).some(h => (h.command || '').includes(HOOK_MARK));
+  const cmd = GATE;
   let removedNotLast = false;
-  for (const ev of PROBE_EVENTS) {
+  for (const ev of HOOK_EVENTS) {
     const groups = cfg.hooks[ev] || [];
     const ourIdx = groups.findIndex(isOurs);
     const kept = groups.filter(g => !isOurs(g)); // drop our prior group (idempotent)
@@ -90,7 +97,7 @@ if (remove) {
   const { real, removedNotLast } = updateCodexHooks(true);
   clearSkill();
   console.log(`nightshift Codex skill removed from ${skillDir}`);
-  console.log(`probe hook removed from ${real}`);
+  console.log(`recording hook removed from ${real}`);
   if (removedNotLast) console.log('  (a later hook shifted index — re-approve your other Codex hooks once.)');
   console.log(`(Claude install, install.json, and recorded tapes are left alone.)`);
   process.exit(0);
@@ -120,15 +127,14 @@ const { real: hooksFile } = updateCodexHooks(false);
 
 console.log('nightshift installed for Codex:');
 console.log(`  skill  → ${skillDir}  (use /nightshift in any Codex session)`);
-console.log(`  probe  → ${hooksFile}  (capture-only; writes ~/.nightshift/hook-debug.jsonl)`);
+console.log(`  hooks  → ${hooksFile}  (dormant until a session opts in via /nightshift)`);
 console.log(`  tapes  → ${path.join(nsHome, 'sessions')}/<project>.jsonl`);
 console.log('');
-console.log('Recording today still tails the rollout via /nightshift. The probe is');
-console.log('instrumentation only — it records nothing, just captures Codex hook payloads');
-console.log('so hook-based recording can be built next.');
+console.log('Recording is per-session and hook-based: /nightshift marks THIS session');
+console.log('(via $CODEX_THREAD_ID); the hooks record only marked sessions. Sessions where');
+console.log('you never type it pay nothing (a sub-ms shell test, no node).');
 console.log('');
-console.log('⚠ Codex will ask to TRUST the nightshift probe hook on your next session —');
-console.log('  approve it, or it captures nothing.');
-console.log('Then run any Codex session and inspect:  ~/.nightshift/hook-debug.jsonl');
+console.log('⚠ Codex will ask to TRUST the nightshift hook on your next session — approve it,');
+console.log('  or recording stays off.');
 console.log('');
 console.log('Uninstall:  node tools/install-codex.js --remove');
