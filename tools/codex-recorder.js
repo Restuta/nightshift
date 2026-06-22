@@ -62,12 +62,18 @@ try { installedAt = fs.statSync(path.join(NS_HOME, 'codex-hook-installed')).mtim
 const hookLive = !!(tid && rollout && installedAt && startTime(rollout) >= installedAt);
 
 if (hookLive) {
-  // Hook mode: mark the session (gates the hooks), seed the session-start event
-  // the hook missed (it fired before the marker existed), start the thin meter.
+  // Hook mode. Idempotent: the skill calls this on every /nightshift (incl. to
+  // restart a dead meter), so seed the session-start event the hook missed ONLY
+  // on first activation — re-runs must not append duplicate starts or flip an
+  // idle board back to working. Always (re)start the meter; codex-tail dedups.
+  const marker = path.join(NS_HOME, 'active', tid);
+  const fresh = !fs.existsSync(marker);
   fs.mkdirSync(path.join(NS_HOME, 'active'), { recursive: true });
-  fs.writeFileSync(path.join(NS_HOME, 'active', tid), '');
-  spawnSync(node, [path.join(here, 'tools', 'emit.js'), 'session', '--phase', 'start',
-    '--agent', 'codex', '--title', path.basename(process.cwd()), '--cwd', process.cwd(), '--log', LOG], { stdio: 'ignore' });
+  fs.writeFileSync(marker, '');
+  if (fresh) {
+    spawnSync(node, [path.join(here, 'tools', 'emit.js'), 'session', '--phase', 'start',
+      '--agent', 'codex', '--title', path.basename(process.cwd()), '--cwd', process.cwd(), '--log', LOG], { stdio: 'ignore' });
+  }
   spawnSync(node, [tail, '--meter', '--log', LOG, ...(rollout ? [rollout] : [])], { stdio: 'ignore' });
   console.log('hook');
 } else {

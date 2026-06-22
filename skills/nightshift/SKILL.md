@@ -37,7 +37,10 @@ EVENTS=$([ -f "$LOG" ] && wc -l < "$LOG" | tr -d ' ' || echo 0)
 if [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
   [ -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID" ] && LIVE=live || LIVE=off
 else
-  LIVE=$(node "$REPO/tools/codex-tail.js" --status --log "$LOG")
+  # Codex is live if hooks are recording (marker exists) OR a tailer/meter worker
+  # is up — a hook-mode session with a dead meter is still recording.
+  if { [ -n "$CODEX_THREAD_ID" ] && [ -f ~/.nightshift/active/"$CODEX_THREAD_ID" ]; } \
+     || [ "$(node "$REPO/tools/codex-tail.js" --status --log "$LOG")" = live ]; then LIVE=live; else LIVE=off; fi
 fi
 ```
 
