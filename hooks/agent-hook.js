@@ -127,6 +127,15 @@ function main() {
   }
 
   if (name === 'Stop') { // Claude only — Codex fires no Stop
+    // For central recordings (where we synthesize the turn card, below), retire
+    // it here: Claude gives a clean end-of-turn signal Codex lacks, so the card
+    // moves to "done" the moment the turn ends — no card stuck in "doing" until
+    // the next prompt. Locally-attached repos keep their hand-emitted cards, so
+    // leave those alone.
+    if (CENTRAL && sid) {
+      const st = turnState(sid);
+      if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
+    }
     append({ type: 'session', phase: 'idle', session: sid });
     return;
   }
@@ -137,10 +146,15 @@ function main() {
   }
 
   if (name === 'UserPromptSubmit') {
-    // Claude keeps its existing behavior (cards come from the agent's emit.js).
-    // Codex has no intent layer, so synthesize one card per prompt here: close
-    // the prior turn, open a new one titled by the prompt.
-    if (agent === 'codex' && sid) {
+    // Synthesize one card per prompt whenever there's no hand-curated intent
+    // layer to defer to: always for Codex (it has no intent layer at all), and
+    // for Claude in CENTRAL recordings — a globally-recorded session (e.g. some
+    // other repo) that won't call emit.js itself, so without this its board has
+    // zero cards. A locally-attached repo (CENTRAL false) keeps emitting its own
+    // PR-sized cards via emit.js, so we leave Claude alone there. Close the prior
+    // turn, open a new one titled by the prompt.
+    const synth = sid && (CENTRAL || agent === 'codex');
+    if (synth) {
       const st = turnState(sid);
       if (st.card) append({ type: 'item', id: st.card, status: 'done' });
       st.turnN++;

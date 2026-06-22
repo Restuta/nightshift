@@ -64,9 +64,11 @@ the switcher but stay on disk:
 ```sh
 [ -n "$CLAUDE_CODE_SESSION_ID" ] || node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
 [ -s "$LOG" ] && mv "$LOG" "$LOG.bak-$(date +%s)"
-# Codex: drop the per-session turn state so the fresh tape starts at turn 1 and
-# doesn't write a stale 'done' for the archived card.
+# Drop the per-session turn state so the fresh tape starts at turn 1 and doesn't
+# write a stale 'done' for the archived card. Both agents synthesize per-turn
+# cards now (Claude in central recordings), so clear whichever id this host has.
 [ -n "$CODEX_THREAD_ID" ] && rm -f ~/.nightshift/turns/"$CODEX_THREAD_ID".json
+[ -n "$CLAUDE_CODE_SESSION_ID" ] && rm -f ~/.nightshift/turns/"$CLAUDE_CODE_SESSION_ID".json
 ```
 
 ### Start
@@ -98,6 +100,10 @@ Reset without asking: run *Reset (archive the old tape)*, then *Start*, then
 
 ## `/nightshift off` (or `stop`)
 ```sh
+# Retire the open per-turn card before dropping the marker — once the marker is
+# gone the Stop hook (Claude) / meter (Codex) is gated out and can't close it, so
+# it would stick in "doing" on the kept tape. No-op if no card is open.
+node "$REPO/tools/retire-turn.js" --log "$LOG"
 # Claude Code:
 rm -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 # Codex (drop the marker so hooks stop recording, and stop the meter):

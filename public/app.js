@@ -813,12 +813,22 @@ function renderHotfiles() {
   const hot = hotFiles(state);
   box.hidden = !hot.length;
   if (!hot.length) return;
+  // A session launched in one worktree often edits sibling worktrees (paths that
+  // escape root with `../`); the filename's immediate folder hides which one. For
+  // those, surface the worktree instead, trimmed of the repo-name prefix so it
+  // reads `lock-gate › …` not `megablock-h1-lock-gate › …`. Key the prefix off the
+  // cwd basename — title can be a first-prompt/custom label on imported tapes.
+  const repo = ((state.session.cwd || '').split('/').filter(Boolean).pop() || (state.session.title || '').trim());
   $('#hotfiles-list').innerHTML = hot.map(f => {
     // Show the filename (+ its immediate folder) — the useful end of the path —
     // not a middle-truncated prefix. Full path on hover.
     const segs = String(f.path).split('/').filter(Boolean);
     const name = segs[segs.length - 1] || f.path;
-    const dir = segs.length > 1 ? segs[segs.length - 2] + '/' : '';
+    let dir = segs.length > 1 ? segs[segs.length - 2] + '/' : '';
+    if (segs[0] === '..') {
+      const wt = segs.find(s => s !== '..');           // sibling worktree dir
+      if (wt) dir = (repo && wt.startsWith(repo + '-') ? wt.slice(repo.length + 1) : wt) + '/';
+    }
     return `<li class="${f.tier}" title="${esc(f.path)}"><i class="heat"></i>` +
       `<span class="fpath"><span class="fdir">${esc(dir)}</span><b>${esc(name)}</b></span>` +
       `<span class="fcount">${f.edits}×</span></li>`;
