@@ -316,11 +316,16 @@ function step(e) {
       // prompt arrives or the turn completes. Edits/commits in between attach
       // to it, so the board isn't an empty grid of facts-only.
       const title = p.message ? String(p.message).trim().split('\n')[0].slice(0, 64).trim() : null;
-      if (state.card) out.push({ t, type: 'item', id: state.card, status: 'done' });
+      // In meter mode the agent-hook owns the card lifecycle (open on prompt,
+      // close on next prompt). We still advance turnN/card so the idle-retire
+      // below targets the same card the hook has open, but we emit no card
+      // events here — emitting the next-prompt close would race the hook and
+      // could close an active card (codex review P1).
+      if (state.card && !meter) out.push({ t, type: 'item', id: state.card, status: 'done' });
       state.turnN++;
       state.card = `turn-${state.turnN}`;
       state.hasPlan = false; state.planComplete = false; // fresh turn, no plan yet
-      out.push({ t, type: 'item', id: state.card, title: title || `turn ${state.turnN}`, status: 'doing' });
+      if (!meter) out.push({ t, type: 'item', id: state.card, title: title || `turn ${state.turnN}`, status: 'doing' });
       out.push({ t, type: 'session', phase: 'resume', agent: 'codex', ...(state.titled ? {} : { title }) });
       state.titled = true;
       state.phase = 'working';
@@ -479,7 +484,7 @@ function drain() {
   // We'd retired the open turn card on idle, but the same turn just resumed —
   // reopen it before applying the new activity. If these lines carry a fresh
   // prompt, step() closes this card and opens a new one, so it ends correctly.
-  if (idleClosedCard && idleClosedCard === state.card) {
+  if (idleClosedCard && idleClosedCard === state.card && !meter) {
     events.push({ t: Date.now(), type: 'item', id: state.card, status: 'doing' });
   }
   idleClosedCard = null;

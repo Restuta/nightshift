@@ -77,15 +77,18 @@ function updateCodexHooks(doRemove) {
   for (const ev of HOOK_EVENTS) {
     const groups = cfg.hooks[ev] || [];
     const ourIdx = groups.findIndex(isOurs);
-    const kept = groups.filter(g => !isOurs(g)); // drop our prior group (idempotent)
     if (doRemove) {
       // If ours wasn't the last group, removing it shifts later groups' indices,
       // and Codex trust is index-keyed — warn so the user re-approves them.
       if (ourIdx !== -1 && ourIdx !== groups.length - 1) removedNotLast = true;
+      const kept = groups.filter(g => !isOurs(g));
       if (kept.length) cfg.hooks[ev] = kept; else delete cfg.hooks[ev];
     } else {
-      kept.push({ hooks: [{ type: 'command', command: cmd }] }); // APPEND at end
-      cfg.hooks[ev] = kept;
+      const group = { hooks: [{ type: 'command', command: cmd }] };
+      // Update in place if present (keeps our index, and every other hook's,
+      // stable — trust is index-keyed); append only when absent (codex review P2).
+      if (ourIdx !== -1) groups[ourIdx] = group; else groups.push(group);
+      cfg.hooks[ev] = groups;
     }
   }
   fs.mkdirSync(path.dirname(real), { recursive: true });
