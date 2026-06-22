@@ -23,6 +23,16 @@ const val = f => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null
 const once = args.includes('--once');
 const worker = args.includes('--worker');
 const stop = args.includes('--stop');
+// Meter mode: a thin companion to hook-based recording. The agent-hook owns the
+// human-facing facts (cards, edits, tools, todos, commits, session start); the
+// rollout still has things hooks can't carry — token counts (cost), PR/CI
+// state, and the quiet signal for idle + card retirement. In --meter we emit
+// ONLY those, so the two recorders never double-count.
+const meter = args.includes('--meter');
+const meterKeep = e =>
+  e.type === 'usage' || e.type === 'pr' || e.type === 'ci' ||
+  (e.type === 'session' && e.phase === 'idle') ||
+  (e.type === 'item' && e.status === 'done'); // idle-retire of the hook's card
 let rollout = args.find(a => !a.startsWith('--') && a !== val('--log'));
 
 // Read the head of a rollout. The session_meta first line can be tens of KB (it
@@ -160,7 +170,7 @@ if (!worker && !once) {
   const s = readState();
   if (s[LOG] && s[LOG].pid && alive(s[LOG].pid)) { process.exit(0); } // already tailing
   const out = fs.openSync(path.join(NS_HOME, 'codex-tail.log'), 'a');
-  const child = spawn(process.execPath, [__filename, '--worker', rollout, '--log', LOG],
+  const child = spawn(process.execPath, [__filename, '--worker', rollout, '--log', LOG, ...(meter ? ['--meter'] : [])],
     { detached: true, stdio: ['ignore', out, out] });
   child.unref();
   // Preserve a prior worker's resume snapshot when respawning on the SAME
@@ -434,6 +444,7 @@ function relCwd(file) {
 }
 
 function append(events) {
+  if (meter) events = events.filter(meterKeep);
   if (!events.length || !LOG) return;
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
   fs.appendFileSync(LOG, events.map(e => JSON.stringify(e)).join('\n') + '\n');

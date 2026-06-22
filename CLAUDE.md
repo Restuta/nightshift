@@ -59,14 +59,23 @@ including the ones building it.
 - `tools/board.js` — ensures one detached board server is running (serving
   `~/.nightshift/sessions`), reused across sessions via `~/.nightshift/board.json`;
   prints the URL and, with `--open`, opens the browser at `?session=<slug>`.
+- `hooks/agent-hook.js` — single hook entrypoint for BOTH agents. Codex
+  implements Claude's hook contract (`~/.codex/hooks.json`; payload carries
+  `session_id`, `transcript_path`, `cwd`, normalized `tool_name`), so recording
+  is hook-based for both. `hooks/claude-hook.js` is a back-compat shim requiring
+  it. Synthesizes per-turn cards for Codex from `UserPromptSubmit`; maps
+  `apply_patch`→edit, `update_plan`→todos, `Bash`→commit/activity. Fail-open.
 - `tools/install-codex.js` — Codex counterpart of the global install: symlinks
-  the (shared) `/nightshift` skill into `~/.codex/skills/`. Touches no Codex
-  config — Codex recording is the rollout tail, not hooks.
-- `tools/codex-tail.js` — live-records a Codex session by tailing its rollout
-  (`~/.codex/sessions/…`) → nightshift events; Codex has no per-tool hooks but
-  journals every turn to the rollout. Self-detaches, idempotent per log
-  (`~/.nightshift/codex-tails.json`), `--stop` ends it, idle-exits after ~30 min
-  of no growth. Shares the Codex line→event mapping with `import-transcript.js`.
+  the (shared) `/nightshift` skill into `~/.codex/skills/` and registers
+  `agent-hook.js` in `~/.codex/hooks.json` behind a per-session pre-gate
+  (`$CODEX_THREAD_ID` marker), merged append-only (Codex keys hook trust by
+  index) and backed up.
+- `tools/codex-tail.js` — the rollout tailer. In `--meter` mode it's the thin
+  companion to hook recording: emits ONLY what hooks can't carry (token cost,
+  PR/CI, idle + card retirement), so the two never double-count. Full mode is
+  retained for `import-transcript` parity and as a fallback. Self-detaches,
+  idempotent per log (`~/.nightshift/codex-tails.json`), `--stop` ends it,
+  follows rotation within the same session id, resumes on restart.
 - `tools/poll-github.js` — records PR/CI facts as events via gh; folds the
   log's known state each tick and appends only deltas (stateless, idempotent).
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
