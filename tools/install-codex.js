@@ -98,6 +98,7 @@ function updateCodexHooks(doRemove) {
 
 if (remove) {
   const { real, removedNotLast } = updateCodexHooks(true);
+  fs.rmSync(path.join(nsHome, 'codex-hook-installed'), { force: true });
   clearSkill();
   console.log(`nightshift Codex skill removed from ${skillDir}`);
   console.log(`recording hook removed from ${real}`);
@@ -127,6 +128,10 @@ fs.writeFileSync(path.join(nsHome, 'install.json'), JSON.stringify({
 }, null, 2) + '\n');
 
 const { real: hooksFile } = updateCodexHooks(false);
+// Stamp when the hook became active. /nightshift uses this to tell whether a
+// session started with the hook loaded (→ hook recording) or before it (→ the
+// full tailer fallback), since Codex loads hooks only at session start.
+fs.writeFileSync(path.join(nsHome, 'codex-hook-installed'), new Date().toISOString() + '\n');
 
 console.log('nightshift installed for Codex:');
 console.log(`  skill  → ${skillDir}  (use /nightshift in any Codex session)`);
