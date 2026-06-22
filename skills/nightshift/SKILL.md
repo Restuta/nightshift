@@ -59,6 +59,9 @@ the switcher but stay on disk:
 ```sh
 [ -n "$CLAUDE_CODE_SESSION_ID" ] || node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
 [ -s "$LOG" ] && mv "$LOG" "$LOG.bak-$(date +%s)"
+# Codex: drop the per-session turn state so the fresh tape starts at turn 1 and
+# doesn't write a stale 'done' for the archived card.
+[ -n "$CODEX_THREAD_ID" ] && rm -f ~/.nightshift/turns/"$CODEX_THREAD_ID".json
 ```
 
 ### Start

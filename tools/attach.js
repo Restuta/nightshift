@@ -23,6 +23,7 @@ const done = [];
 // 1. vendor the kit — hooks + emit, runnable without this repo on disk
 const kit = [
   ['hooks/claude-hook.js', '.nightshift/hooks/claude-hook.js'],
+  ['hooks/agent-hook.js', '.nightshift/hooks/agent-hook.js'], // claude-hook is a shim that requires this
   ['hooks/git-post-commit.js', '.nightshift/hooks/git-post-commit.js'],
   ['tools/emit.js', '.nightshift/tools/emit.js'],
 ];
@@ -31,7 +32,7 @@ for (const [src, dst] of kit) {
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.copyFileSync(path.join(here, src), out);
 }
-done.push('kit       vendored into .nightshift/ (claude-hook, git hook, emit)');
+done.push('kit       vendored into .nightshift/ (agent-hook + claude-hook shim, git hook, emit)');
 
 // 2. merge Claude Code hooks into .claude/settings.json (never clobber)
 const settingsPath = path.join(root, '.claude', 'settings.json');
