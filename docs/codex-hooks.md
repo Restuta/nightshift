@@ -76,3 +76,32 @@ Run one Codex session, approve the hook trust prompt, then read `~/.nightshift/h
 - Thin always-on tail for `token_count`, `agent_message` merge narration, idle/retirement; mutual
   exclusion so hook + tail never double-record.
 - Docs: correct the "Codex has no hooks" line in `CLAUDE.md`.
+
+## VERIFIED — real Codex hook payloads (driven via `codex exec` + this probe)
+Far more Claude-compatible than feared:
+
+- **SessionStart**: `session_id`, **`transcript_path`** (the exact rollout file!), `cwd`,
+  `hook_event_name`, `model`, `source`.
+- **UserPromptSubmit**: + `turn_id`, `prompt` (the user's text).
+- **PostToolUse**: + `tool_name`, `tool_input`, `tool_response`, `tool_use_id`, `turn_id`.
+
+Resolved unknowns:
+- **U1 session_id — present** (same field as Claude) → per-session gating works identically.
+- **transcript_path is handed to us** → the thin tail pins to the exact rollout; the entire
+  rollout-discovery / `findSuccessor` problem disappears even for the tail.
+- **U3 tool shapes — confirmed**:
+  - shell → `tool_name:"Bash"` (Codex normalizes to Claude's name), `tool_input.command`,
+    `tool_response` = stdout (commit/PR-open capture via output parse works).
+  - edits → `tool_name:"apply_patch"`, `tool_input.command` = apply-patch text
+    (`*** Add/Update/Delete File: <path>`) → parse paths.
+  - plan → `tool_name:"update_plan"`, `tool_input.plan` = `[{step,status}]` → todos (same shape
+    `codex-tail.js` parses today).
+- **Events that fire**: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse. No Stop /
+  Notification / SessionEnd → idle + token counts come from the pinned tail.
+- `model` is in every payload (cost without a token hook still needs the tail for counts).
+
+Still to confirm before relying on it: **subagent attribution** — do subagent tool calls fire the
+global hook with the *subagent's own* `session_id` (→ auto-excluded by the per-session marker, which
+would be ideal) or the parent's? Not triggered in the probe runs; verify with a delegating session.
+Also: whether a Codex env var exposes `session_id` to the `/nightshift` skill for marker creation
+(the hook side is solid regardless).
