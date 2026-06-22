@@ -100,6 +100,10 @@ Reset without asking: run *Reset (archive the old tape)*, then *Start*, then
 
 ## `/nightshift off` (or `stop`)
 ```sh
+# Retire the open per-turn card before dropping the marker — once the marker is
+# gone the Stop hook (Claude) / meter (Codex) is gated out and can't close it, so
+# it would stick in "doing" on the kept tape. No-op if no card is open.
+node "$REPO/tools/retire-turn.js" --log "$LOG"
 # Claude Code:
 rm -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 # Codex (drop the marker so hooks stop recording, and stop the meter):
