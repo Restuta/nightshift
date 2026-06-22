@@ -23,6 +23,16 @@ const val = f => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null
 const once = args.includes('--once');
 const worker = args.includes('--worker');
 const stop = args.includes('--stop');
+// Meter mode: a thin companion to hook-based recording. The agent-hook owns the
+// human-facing facts (cards, edits, tools, todos, commits, session start); the
+// rollout still has things hooks can't carry — token counts (cost), PR/CI
+// state, and the quiet signal for idle + card retirement. In --meter we emit
+// ONLY those, so the two recorders never double-count.
+const meter = args.includes('--meter');
+const meterKeep = e =>
+  e.type === 'usage' || e.type === 'pr' || e.type === 'ci' ||
+  (e.type === 'session' && e.phase === 'idle') ||
+  e.type === 'item'; // in meter mode the only items emitted are idle-retire/reopen of the hook's card
 let rollout = args.find(a => !a.startsWith('--') && a !== val('--log'));
 
 // Read the head of a rollout. The session_meta first line can be tens of KB (it
@@ -158,15 +168,20 @@ if (!worker && !once) {
     LOG = centralLogFor(cwd);
   }
   const s = readState();
-  if (s[LOG] && s[LOG].pid && alive(s[LOG].pid)) { process.exit(0); } // already tailing
+  const cur = s[LOG];
+  const wantMode = meter ? 'meter' : 'full';
+  if (cur && cur.pid && alive(cur.pid)) {
+    if ((cur.mode || 'full') === wantMode) process.exit(0); // already tailing in this mode
+    try { process.kill(cur.pid); } catch { /* gone */ } // wrong mode (e.g. a pre-upgrade full tailer) → replace
+  }
   const out = fs.openSync(path.join(NS_HOME, 'codex-tail.log'), 'a');
-  const child = spawn(process.execPath, [__filename, '--worker', rollout, '--log', LOG],
+  const child = spawn(process.execPath, [__filename, '--worker', rollout, '--log', LOG, ...(meter ? ['--meter'] : [])],
     { detached: true, stdio: ['ignore', out, out] });
   child.unref();
   // Preserve a prior worker's resume snapshot when respawning on the SAME
-  // rollout, so a restart continues instead of re-draining the whole tape.
-  const prev = s[LOG] && s[LOG].rollout === rollout ? s[LOG] : {};
-  s[LOG] = { ...prev, pid: child.pid, rollout };
+  // rollout+mode, so a restart continues instead of re-draining the whole tape.
+  const prev = cur && cur.rollout === rollout && (cur.mode || 'full') === wantMode ? cur : {};
+  s[LOG] = { ...prev, pid: child.pid, rollout, mode: wantMode };
   writeState(s);
   process.exit(0);
 }
@@ -306,11 +321,16 @@ function step(e) {
       // prompt arrives or the turn completes. Edits/commits in between attach
       // to it, so the board isn't an empty grid of facts-only.
       const title = p.message ? String(p.message).trim().split('\n')[0].slice(0, 64).trim() : null;
-      if (state.card) out.push({ t, type: 'item', id: state.card, status: 'done' });
+      // In meter mode the agent-hook owns the card lifecycle (open on prompt,
+      // close on next prompt). We still advance turnN/card so the idle-retire
+      // below targets the same card the hook has open, but we emit no card
+      // events here — emitting the next-prompt close would race the hook and
+      // could close an active card (codex review P1).
+      if (state.card && !meter) out.push({ t, type: 'item', id: state.card, status: 'done' });
       state.turnN++;
       state.card = `turn-${state.turnN}`;
       state.hasPlan = false; state.planComplete = false; // fresh turn, no plan yet
-      out.push({ t, type: 'item', id: state.card, title: title || `turn ${state.turnN}`, status: 'doing' });
+      if (!meter) out.push({ t, type: 'item', id: state.card, title: title || `turn ${state.turnN}`, status: 'doing' });
       out.push({ t, type: 'session', phase: 'resume', agent: 'codex', ...(state.titled ? {} : { title }) });
       state.titled = true;
       state.phase = 'working';
@@ -433,7 +453,19 @@ function relCwd(file) {
   return rolloutCwd ? path.relative(rolloutCwd, file) : file;
 }
 
+// In meter mode the agent-hook owns the cards; read its current card from the
+// per-session turn statefile so idle-retire / reopen target the SAME card the
+// hook has open. (The meter's own state.card diverges when /nightshift starts
+// mid-session — the meter drains the rollout from the beginning, the hook counts
+// turns only from /nightshift forward.)
+function hookCard(sid) {
+  if (!sid) return null;
+  try { return JSON.parse(fs.readFileSync(path.join(NS_HOME, 'turns', sid + '.json'), 'utf8')).card || null; }
+  catch { return null; }
+}
+
 function append(events) {
+  if (meter) events = events.filter(meterKeep);
   if (!events.length || !LOG) return;
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
   fs.appendFileSync(LOG, events.map(e => JSON.stringify(e)).join('\n') + '\n');
@@ -465,11 +497,13 @@ function drain() {
   const lines = (partial + buf.toString('utf8')).split('\n');
   partial = lines.pop();
   const events = [];
-  // We'd retired the open turn card on idle, but the same turn just resumed —
-  // reopen it before applying the new activity. If these lines carry a fresh
-  // prompt, step() closes this card and opens a new one, so it ends correctly.
-  if (idleClosedCard && idleClosedCard === state.card) {
-    events.push({ t: Date.now(), type: 'item', id: state.card, status: 'doing' });
+  // We'd retired the card on idle, but the same turn just resumed — reopen it
+  // (in meter mode the hook never re-opens it on PostToolUse, so this is the
+  // only reopen). Target the hook's card; only reopen if it's still the card we
+  // retired (a fresh prompt would have moved the hook to a new card).
+  const reopen = meter ? hookCard(rolloutSessionId) : state.card;
+  if (idleClosedCard && idleClosedCard === reopen) {
+    events.push({ t: Date.now(), type: 'item', id: reopen, status: 'doing' });
   }
   idleClosedCard = null;
   for (const line of lines) {
@@ -553,9 +587,10 @@ if (!once) {
       // quiet rollout with an unfinished plan is a pause mid-step, not a
       // completed turn — retiring it would falsely mark the card done.
       const turnDone = !state.hasPlan || state.planComplete;
-      if (state.card && idleClosedCard !== state.card && turnDone) {
-        idleClosedCard = state.card;
-        evs.push({ t: Date.now(), type: 'item', id: state.card, status: 'done' });
+      const card = meter ? hookCard(rolloutSessionId) : state.card;
+      if (card && idleClosedCard !== card && turnDone) {
+        idleClosedCard = card;
+        evs.push({ t: Date.now(), type: 'item', id: card, status: 'done' });
       }
       append(evs);
       persist();
