@@ -40,8 +40,10 @@ SID="${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}"
 
 Branch on that:
 
-- **Already recording** (`LIVE` = `live`): just (re)open the board — skip to
-  *Open the board*. Don't ask, don't restart.
+- **Already recording** (`LIVE` = `live`): don't ask, don't reset. For **Codex**,
+  still run the meter line — `node "$REPO/tools/codex-tail.js" --meter --log "$LOG"`
+  is idempotent and restarts it if it died (the marker gates hooks, but the meter
+  is a separate worker that can stop). Then skip to *Open the board*.
 - **An existing tape, not currently recording** (`LIVE` = `off` and `EVENTS` >
   0): the tape is left over from an earlier session/run. **Ask the user and wait
   for their answer** — do not start recording until they choose:
