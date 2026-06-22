@@ -31,19 +31,24 @@ First decide whether a tape already exists for this project, and whether it's
 already being recorded:
 ```sh
 EVENTS=$([ -f "$LOG" ] && wc -l < "$LOG" | tr -d ' ' || echo 0)
-# Both hosts record via hooks gated on a per-session marker. Claude's id is
-# $CLAUDE_CODE_SESSION_ID; Codex's is $CODEX_THREAD_ID (it equals the hook
-# payload's session_id).
-SID="${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}"
-{ [ -n "$SID" ] && [ -f ~/.nightshift/active/"$SID" ]; } && LIVE=live || LIVE=off
+# Claude records via hooks gated on a per-session marker ($CLAUDE_CODE_SESSION_ID).
+# Codex may be in hook mode (marker) OR tailer-fallback mode (a worker, no marker),
+# so detect its recorder by asking the tailer whether a worker is live.
+if [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+  [ -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID" ] && LIVE=live || LIVE=off
+else
+  # Codex is live if hooks are recording (marker exists) OR a tailer/meter worker
+  # is up — a hook-mode session with a dead meter is still recording.
+  if { [ -n "$CODEX_THREAD_ID" ] && [ -f ~/.nightshift/active/"$CODEX_THREAD_ID" ]; } \
+     || [ "$(node "$REPO/tools/codex-tail.js" --status --log "$LOG")" = live ]; then LIVE=live; else LIVE=off; fi
+fi
 ```
 
 Branch on that:
 
 - **Already recording** (`LIVE` = `live`): don't ask, don't reset. For **Codex**,
-  still run the meter line — `node "$REPO/tools/codex-tail.js" --meter --log "$LOG"`
-  is idempotent and restarts it if it died (the marker gates hooks, but the meter
-  is a separate worker that can stop). Then skip to *Open the board*.
+  still run `node "$REPO/tools/codex-recorder.js" "$LOG"` (idempotent — it restarts
+  the recorder if it died). Then skip to *Open the board*.
 - **An existing tape, not currently recording** (`LIVE` = `off` and `EVENTS` >
   0): the tape is left over from an earlier session/run. **Ask the user and wait
   for their answer** — do not start recording until they choose:
@@ -71,13 +76,13 @@ mkdir -p ~/.nightshift/active && touch ~/.nightshift/active/"$CLAUDE_CODE_SESSIO
 node "$REPO/tools/emit.js" session --phase start --agent claude --title "$(basename "$PWD")" --cwd "$PWD" --log "$LOG"
 ```
 
-**Codex** — mark the session (the hooks record it, gated on this marker) and
-start the thin meter for what hooks can't carry (token cost, PR/CI, and the
-quiet signal for idle + card retirement). Recording is from here forward.
+**Codex** — start recording; `codex-recorder` picks the path automatically and
+prints which (`hook` or `tail`): **hook** recording + thin meter for a session
+that started after the hook was installed, or the **full rollout tailer** (pinned
+to this session, backfilling it) for one that predates the hook — since Codex
+loads hooks only at session start.
 ```sh
-mkdir -p ~/.nightshift/active && touch ~/.nightshift/active/"$CODEX_THREAD_ID"
-node "$REPO/tools/emit.js" session --phase start --agent codex --title "$(basename "$PWD")" --cwd "$PWD" --log "$LOG"
-node "$REPO/tools/codex-tail.js" --meter --log "$LOG"
+node "$REPO/tools/codex-recorder.js" "$LOG"
 ```
 
 ### Open the board
