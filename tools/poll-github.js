@@ -1,19 +1,26 @@
 #!/usr/bin/env node
-// Record GitHub PR/CI facts as events — never fetched at render time, per the
-// core rule in docs/EVENTS.md: replaying yesterday's session must show
-// yesterday's CI status.
+// Record PR/CI facts as events — never fetched at render time, per the core rule
+// in docs/EVENTS.md: replaying yesterday's session must show yesterday's CI.
 //   node tools/poll-github.js [--once] [--interval <sec>=30] [--limit <prs>=100]
-//     [--repo owner/name] [--log <file>]
+//     [--repo owner/name] [--log <file>] [--known]
+//   node tools/poll-github.js --known --repo o/r --log L   # self-detach a realtime worker
+//   node tools/poll-github.js --stop   [--log L]           # stop the worker
+//   node tools/poll-github.js --status [--log L]           # live | off
 //
-// Uses the gh CLI (auth included), zero deps. Stateless across restarts: the
-// known pr/ci state per PR number is folded out of the log itself — the full
-// log on the first tick, then only newly appended bytes — and each tick
-// appends only what changed. Safe to restart, safe to run alongside hooks,
-// idempotent.
+// CI/review status comes from toast review-ci (Orba's CI — fast, authoritative)
+// when available, falling back to the gh CLI's check rollup otherwise. PR
+// metadata (title/url/state) comes from gh. Zero deps. Stateless across restarts:
+// known pr/ci state is folded out of the log itself, and each tick appends only
+// what changed — safe to restart, safe to run alongside hooks, idempotent.
+//
+// In --known mode (session-scoped) a bare invocation self-detaches ONE background
+// worker that polls on --interval, so the board updates in near-realtime; it
+// exits on its own once every surfaced PR is merged/closed, or on --stop.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync, spawn } = require('child_process');
 
 const argv = process.argv.slice(2);
 const flags = {};
@@ -24,11 +31,42 @@ for (let i = 0; i < argv.length; i++) {
   else if (argv[i] === '--repo') flags.repo = argv[++i];
   else if (argv[i] === '--log') flags.log = argv[++i];
   else if (argv[i] === '--known') flags.known = true;
+  else if (argv[i] === '--stop') flags.stop = true;
+  else if (argv[i] === '--status') flags.status = true;
+  else if (argv[i] === '--worker') flags.worker = true;
 }
 const posInt = (n, dflt) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt);
-const LOG = flags.log || path.join('.nightshift', 'events.jsonl');
+// Absolute, so the worker registry key is cwd-independent — two repos invoking
+// with a relative --log must not collide (dedupe/--stop hitting the wrong worker).
+const LOG = path.resolve(flags.log || path.join('.nightshift', 'events.jsonl'));
 const INTERVAL = posInt(flags.interval, 30) * 1000;
 const LIMIT = posInt(flags.limit, 100);
+
+// Worker registry (one realtime poller per log), mirroring codex-tail's model.
+const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
+const stateFile = path.join(NS_HOME, 'pr-pollers.json');
+const alivePid = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const readState = () => { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } };
+const writeState = s => { fs.mkdirSync(NS_HOME, { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s) + '\n'); };
+
+const sleepMs = ms => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB */ } };
+if (flags.status) { const e = readState()[LOG]; process.stdout.write(e && e.pid && alivePid(e.pid) ? 'live\n' : 'off\n'); process.exit(0); }
+if (flags.stop) {
+  // Kill, then WAIT for the worker to actually exit before returning — reset/off
+  // rotates $LOG right after, and a worker still inside a synchronous gh/toast poll
+  // would otherwise wake up and append stale PR/CI events into the fresh tape.
+  for (const [key, e] of Object.entries(readState())) {
+    if (flags.log && key !== LOG) continue;
+    if (!(e && e.pid && alivePid(e.pid))) continue;
+    try { process.kill(e.pid, 'SIGTERM'); } catch { /* gone */ }
+    for (let i = 0; i < 20 && alivePid(e.pid); i++) sleepMs(100);        // up to ~2s graceful
+    if (alivePid(e.pid)) { try { process.kill(e.pid, 'SIGKILL'); } catch { /* gone */ } for (let i = 0; i < 20 && alivePid(e.pid); i++) sleepMs(50); }
+  }
+  const s = readState(); // re-read: workers' own SIGTERM cleanup ran during the wait
+  for (const k of Object.keys(s)) { if (!flags.log || k === LOG) delete s[k]; }
+  writeState(s);
+  process.exit(0);
+}
 
 // --known scopes refs to a repo. Resolve the cwd's repo when --repo wasn't given,
 // so `gh pr view <n>` and the repo filter agree. If it can't be resolved, repo-
@@ -59,6 +97,39 @@ function ghPr(n) {
 function urlRepo(s) {
   const m = (s || '').match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/);
   return m ? m[1] : null;
+}
+
+// toast review-ci (Orba's CI) is the authoritative, fast PR status — prefer it
+// over gh's raw checks. `toast review-ci status --json` → { status, ... }. Returns
+// the lowercased status, or null when toast isn't installed (→ gh fallback) or the
+// call fails. ENOENT is cached so we don't re-spawn a missing binary every tick.
+let toastOk = null;
+function toastInfo(n) {
+  if (toastOk === false || !flags.repo) return null;
+  // spawnSync, not execFileSync: toast exits non-zero when action is required
+  // (a blocked/needs-fix PR exits 1) yet still prints valid JSON to stdout — we
+  // must read that stdout regardless of exit code.
+  const r = spawnSync('toast', ['review-ci', 'status', '--repo', flags.repo, '--pr', String(n), '--json'],
+    { encoding: 'utf8', timeout: 15000 });
+  if (r.error) { if (r.error.code === 'ENOENT') toastOk = false; return null; } // not installed → gh
+  toastOk = true;
+  try { const d = JSON.parse(r.stdout || ''); return d && typeof d === 'object' ? d : null; }
+  catch { return null; } // exit 2 / no JSON → fall back to gh
+}
+
+// Map a toast review-ci result to the board's ci vocabulary. Classify on the base
+// status word (toast uses `base:sub_status` forms like degraded:stale). toast is a
+// GATING tool, so any action-required state (draft, unknown_reviewer, *_blocked,
+// needs_fix, degraded…) is `fail`, NOT a gh fallback — else a draft/blocked PR with
+// green checks would show ready. For an unrecognized word, a positive blocking
+// count still means fail; only genuinely indeterminate states return null (→ gh).
+function toastCi(d) {
+  const base = (((d && d.status) || '') + '').toLowerCase().split(':')[0];
+  if (/^(ready|pass|passing|clean|merged|acknowledged)$/.test(base)) return 'pass';
+  if (/^(pending|in_progress|active|running|blocking|awaiting_review|head_changed)$/.test(base)) return 'pending';
+  if (/^(needs_fix|blocked|github_blocked|draft|unknown_reviewer|degraded|conflicting|dirty|unstable|fail|failing|error|action_required)$/.test(base)) return 'fail';
+  if (d && d.counts && d.counts.blocking_items > 0) return 'fail'; // unknown word but explicitly blocking
+  return null; // closed / indeterminate → let gh decide
 }
 
 // Boolean (value-less) flags for the gh pr verbs below. Every other `--flag`
@@ -170,13 +241,14 @@ function rollupCi(checks) {
 // on the next tick instead of being lost.
 const known = new Map(); // number → {state, ci}
 let offset = 0;
+let sawOpenPr = false; // true once a PR was seen OPEN during THIS run (reset on log replace)
 
 function refreshKnown() {
   let fd;
   try { fd = fs.openSync(LOG, 'r'); } catch { return; } // no log yet
   try {
     const size = fs.fstatSync(fd).size;
-    if (size < offset) { known.clear(); offset = 0; } // log truncated/replaced
+    if (size < offset) { known.clear(); offset = 0; sawOpenPr = false; } // log truncated/replaced (e.g. /nightshift reset) → fresh tape
     if (size === offset) return;
     const buf = Buffer.alloc(size - offset);
     fs.readSync(fd, buf, 0, buf.length, offset);
@@ -205,8 +277,15 @@ function append(ev) {
 
 // Emit pr/ci deltas for one PR's current state (folded `known` suppresses no-ops).
 function emitPr(pr) {
-  const state = pr.state.toLowerCase(); // open | merged | closed
-  const ci = rollupCi(pr.statusCheckRollup);
+  let state = pr.state.toLowerCase(); // open | merged | closed (from gh)
+  // CI/review status from toast when available (session-scoped polling only),
+  // else gh's check rollup. If toast returns a status we don't map (closed,
+  // acknowledged, a new taxonomy word…), fall back to gh rather than dropping CI.
+  // Toast also reports 'merged', corroborating gh's state.
+  const td = flags.known ? toastInfo(pr.number) : null;
+  const ci = (td && toastCi(td)) || rollupCi(pr.statusCheckRollup);
+  const tbase = td && (((td.status || '') + '').toLowerCase().split(':')[0]);
+  if (tbase === 'merged' && state === 'open') state = 'merged';
   const k = known.get(pr.number) || {};
   if (k.state !== state) {
     append({ type: 'pr', number: pr.number, title: pr.title, url: pr.url, state });
@@ -218,27 +297,68 @@ function emitPr(pr) {
   }
 }
 
+// One poll. Returns the number of session PRs still OPEN (so a realtime worker can
+// retire itself once every surfaced PR is merged/closed). Repo-wide mode returns 0.
 function tick() {
   refreshKnown();
   if (flags.known) {
     // Session-scoped: refresh ONLY the PRs this tape surfaced. No repo-wide list,
     // so a repo with hundreds of open PRs can't flood a single session's board.
     const nums = [...sessionPrNumbers()];
-    if (!nums.length) { if (flags.once) process.exit(0); return; }
     for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr); }
-    return;
+    return nums.filter(n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || ''); }).length;
   }
   let prs;
   try { prs = ghPrs(); } catch (err) {
     console.error(`gh failed: ${String(err.message || err).split('\n')[0]}`);
     if (flags.once) process.exit(1);
-    return;
+    return 0;
   }
   for (const pr of prs) emitPr(pr);
+  return 0;
 }
 
-tick();
-if (!flags.once) {
-  console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG} (ctrl-c to stop)`);
-  setInterval(tick, INTERVAL);
+// One-shot (tests / immediate seed): poll once and exit.
+if (flags.once) { tick(); process.exit(0); }
+
+// Session-scoped realtime: self-detach ONE background worker per log (idempotent),
+// so the board updates without blocking /nightshift. The worker does an immediate
+// first tick (seeds now) then polls on --interval.
+if (flags.known && !flags.worker) {
+  const s = readState();
+  const cur = s[LOG];
+  if (cur && cur.pid && alivePid(cur.pid)) process.exit(0); // already polling this log
+  fs.mkdirSync(NS_HOME, { recursive: true });
+  const out = fs.openSync(path.join(NS_HOME, 'pr-poller.log'), 'a');
+  const child = spawn(process.execPath, [__filename, '--worker', '--known', '--log', LOG,
+    ...(flags.repo ? ['--repo', flags.repo] : []), '--interval', String(Math.round(INTERVAL / 1000))],
+    { detached: true, stdio: ['ignore', out, out] });
+  child.unref();
+  s[LOG] = { pid: child.pid, repo: flags.repo || null };
+  writeState(s);
+  process.exit(0);
 }
+
+// Worker / foreground interval loop.
+if (flags.worker) {
+  const cleanup = () => { const s = readState(); if (s[LOG] && s[LOG].pid === process.pid) { delete s[LOG]; writeState(s); } };
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+  process.on('exit', cleanup);
+}
+if (tick() > 0) sawOpenPr = true;
+console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG}`);
+let doneTicks = 0, lifeTicks = 0;
+const MAX_LIFE = Math.max(60, Math.round((4 * 3600 * 1000) / INTERVAL)); // ~4h orphan cap
+const timer = setInterval(() => {
+  lifeTicks++;
+  const openCount = tick();
+  if (openCount > 0) sawOpenPr = true;
+  if (flags.worker && flags.known) {
+    // Retire once the WORK is done — a PR was seen OPEN during THIS run and all are
+    // now merged/closed. Historical (already-merged) refs from a Continue'd tape
+    // don't count, so we keep polling for a PR created later. /nightshift off stops
+    // us; MAX_LIFE backstops a session abandoned without `off`.
+    doneTicks = (sawOpenPr && openCount === 0) ? doneTicks + 1 : 0;
+    if (doneTicks >= 6 || lifeTicks >= MAX_LIFE) { clearInterval(timer); process.exit(0); }
+  }
+}, INTERVAL);

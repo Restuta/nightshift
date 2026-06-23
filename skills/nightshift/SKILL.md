@@ -48,9 +48,9 @@ Branch on that:
 
 - **Already recording** (`LIVE` = `live`): don't ask, don't reset. For **Codex**,
   still run `node "$REPO/tools/codex-recorder.js" "$LOG"` (idempotent — it restarts
-  the recorder if it died). For **Claude**, refresh PRs (the `poll-github.js
-  --once --known` line from *Start*) so re-running `/nightshift` updates PR/CI.
-  Then skip to *Open the board*.
+  the recorder if it died). For **Claude**, re-run the PR/CI watcher line from
+  *Start* (idempotent — it no-ops if the worker is already live, restarts it if it
+  died). Then skip to *Open the board*.
 - **An existing tape, not currently recording** (`LIVE` = `off` and `EVENTS` >
   0): the tape is left over from an earlier session/run. **Ask the user and wait
   for their answer** — do not start recording until they choose:
@@ -65,6 +65,9 @@ Archives, never deletes — the board ignores `*.bak-*` so old tapes vanish from
 the switcher but stay on disk:
 ```sh
 [ -n "$CLAUDE_CODE_SESSION_ID" ] || node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
+# Stop the PR/CI watcher too — it's keyed by log path, so without this the live
+# worker survives the archive and self-retires on the empty fresh tape.
+node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 [ -s "$LOG" ] && mv "$LOG" "$LOG.bak-$(date +%s)"
 # Drop the per-session turn state so the fresh tape starts at turn 1 and doesn't
 # write a stale 'done' for the archived card. Both agents synthesize per-turn
@@ -79,13 +82,15 @@ the switcher but stay on disk:
 mkdir -p ~/.nightshift/active && touch ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 node "$REPO/tools/emit.js" session --phase start --agent claude --title "$(basename "$PWD")" --cwd "$PWD" --log "$LOG"
 ```
-Then refresh PRs (Codex gets PR/CI from its meter; Claude has none). Poll only the
-PRs THIS session has surfaced — **session-scoped, never the whole repo** — with gh
-as the fallback when toast-ci isn't installed for the org. Skip silently if it's
-not a GitHub repo or gh is missing:
+Then start the PR/CI watcher (Codex gets PR/CI from its meter; Claude has none).
+It polls only the PRs THIS session has surfaced — **session-scoped, never the whole
+repo** — using **toast review-ci** for status (fast, realtime, authoritative) with
+gh as the fallback when toast isn't installed. It self-detaches a background worker
+(near-realtime; retires itself once every PR is merged/closed) and seeds the board
+on its first tick. Skip silently if it's not a GitHub repo or gh is missing:
 ```sh
 RS=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
-  && [ -n "$RS" ] && node "$REPO/tools/poll-github.js" --once --known --repo "$RS" --log "$LOG"
+  && [ -n "$RS" ] && node "$REPO/tools/poll-github.js" --known --interval 15 --repo "$RS" --log "$LOG"
 ```
 
 **Codex** — start recording; `codex-recorder` picks the path automatically and
@@ -119,7 +124,8 @@ rm -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 # Codex (drop the marker so hooks stop recording, and stop the meter):
 rm -f ~/.nightshift/active/"$CODEX_THREAD_ID"
 node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
-# both:
+# both: stop the PR/CI watcher (no-op if none) and mark idle.
+node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 node "$REPO/tools/emit.js" session --phase idle --log "$LOG"
 ```
 Confirm recording is paused (the tape is kept).
