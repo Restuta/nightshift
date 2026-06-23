@@ -15,6 +15,11 @@ const path = require('path');
 
 const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
 
+// Folding for Claude's incremental Task tools (see tools/tasks-fold.js). Loaded
+// defensively — a missing/broken module must never take the hook down.
+let tasksFold = null;
+try { tasksFold = require(path.join(__dirname, '..', 'tools', 'tasks-fold.js')); } catch { /* optional */ }
+
 // Which agent produced this payload — read it from the transcript path, which
 // is namespaced (~/.codex/… vs ~/.claude/…); fall back to the Claude env var.
 function agentOf(h) {
@@ -82,6 +87,41 @@ function turnState(sid) {
 function saveTurn(sid, st) {
   fs.mkdirSync(TURNS, { recursive: true });
   fs.writeFileSync(path.join(TURNS, sid + '.json'), JSON.stringify(st));
+}
+
+// Live capture of Claude's task list (TaskCreate/TaskUpdate). Those tools aren't
+// in the hook matcher and Claude keeps the list only in the transcript, so we
+// tail the transcript on every firing PostToolUse/Stop instead: read the bytes
+// since last time, fold in any task changes, and emit the whole plan as a `todos`
+// snapshot attached to the open turn card. The /nightshift backfill seeds the
+// state file (and the initial offset) so we never replay a huge transcript here.
+const TASKS = path.join(NS_HOME, 'tasks');
+function syncClaudeTasks(hook, sid, append) {
+  if (!tasksFold || !sid) return;
+  const tp = hook.transcript_path;
+  if (!tp) return;
+  const f = path.join(TASKS, sid + '.json');
+  let state;
+  try { state = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { state = null; }
+  if (!state) {
+    // No backfill ran (e.g. NIGHTSHIFT env recording) — start at EOF so we don't
+    // replay history; new task ops still stream in from here.
+    let size = 0; try { size = fs.statSync(tp).size; } catch { /* none yet */ }
+    state = { ...tasksFold.emptyState(), offset: size };
+    fs.mkdirSync(TASKS, { recursive: true });
+    fs.writeFileSync(f, JSON.stringify(state));
+    return;
+  }
+  const { lines, offset } = tasksFold.readNewLines(tp, state.offset || 0);
+  let changed = false;
+  for (const ln of lines) if (tasksFold.applyLine(ln, state)) changed = true;
+  state.offset = offset;
+  fs.writeFileSync(f, JSON.stringify(state));
+  if (changed) {
+    const card = turnState(sid).card;
+    const ev = tasksFold.toTodos(state);
+    append(card ? { ...ev, item: card } : ev);
+  }
 }
 
 // Files an apply_patch command (Codex edits) touches.
@@ -217,6 +257,9 @@ function main() {
     // moves to "done" the moment the turn ends — no card stuck in "doing" until
     // the next prompt. Locally-attached repos keep their hand-emitted cards, so
     // leave those alone.
+    // Capture any last task change before the card is retired (a TaskUpdate with
+    // no following tool call would otherwise be missed until the next turn).
+    if (CENTRAL && agent === 'claude') { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
     if (CENTRAL && sid) {
       const st = turnState(sid);
       if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
@@ -275,6 +318,10 @@ function main() {
     const inp = hook.tool_input || {};
     const item = sid ? turnState(sid).card : null;
     const withItem = ev => (item ? { ...ev, item } : ev);
+
+    // Piggyback on this firing tool to pull in any Claude task-list changes
+    // (TaskCreate/TaskUpdate live only in the transcript, not in this payload).
+    if (CENTRAL && agent === 'claude') { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
 
     if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(tool) && inp.file_path) {
       append(withItem({ type: 'edit', path: path.relative(root, inp.file_path), tool }));

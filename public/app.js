@@ -215,9 +215,16 @@ async function initSessions() {
     if (age < 30 * 60e3) return '🟡';     // within 30 min — recent
     return '⚪';                           // older — stale
   };
-  // Worktree tapes share a title and even a cwd; the slug is the one reliable
-  // distinguisher. Strip the ~/Projects prefix for a readable, unique label.
-  const place = s => s.id.replace(/^Users-[^-]+-Projects-/, '') || s.title || s.id;
+  // Prefer the agent's own session name (Claude's customTitle, flowed into the
+  // tape as the title) — it's what the human knows the session by. Keep the
+  // worktree basename as a hint so sibling worktree tapes stay distinguishable.
+  // Fall back to the slug when there's no meaningful name (title == basename).
+  const place = s => {
+    const slug = s.id.replace(/^Users-[^-]+-Projects-/, '') || s.id;
+    const wt = s.cwd ? s.cwd.split('/').filter(Boolean).pop() : '';
+    if (s.title && wt && s.title !== wt) return `${s.title} · ${wt}`;
+    return slug || s.title || s.id;
+  };
   const sel = $('#session-select');
   if (list.length > 1) {
     sel.innerHTML = list.map(s =>
@@ -459,6 +466,8 @@ function cardEmoji(it) {
 const cardEls = new Map();
 const cols = Object.fromEntries(STATUSES.map(s => [s, $(`#cards-${s}`)]));
 const counts = Object.fromEntries(STATUSES.map(s => [s, $(`#count-${s}`)]));
+const colWraps = Object.fromEntries(STATUSES.map(s => [s, document.querySelector(`.col[data-status="${s}"]`)]));
+const pinnedCols = new Set();   // empty columns the user clicked open (session-only)
 
 // The corner timing on a card. Done: how long the work took. In progress: how
 // long it's been running, plus an "idle Xm" flag if nothing's updated it lately
@@ -616,6 +625,7 @@ function renderBoard(animate) {
       if (colEl.children[idx] !== el) colEl.insertBefore(el, colEl.children[idx] || null);
     });
     counts[s].textContent = byCol[s].length || '';
+    colWraps[s].classList.toggle('col-empty', byCol[s].length === 0 && !pinnedCols.has(s));
   }
 
   if (animate) {
@@ -983,6 +993,24 @@ subToggle('#activity-toggle', '#activity', 'ns-activity');
 let tapeCollapsed = false;
 try { tapeCollapsed = localStorage.getItem(TAPE_KEY) === '1'; } catch { /* private mode */ }
 setTape(tapeCollapsed);
+
+// Collapse empty columns to a rail; click the rail to expand (pin), click a
+// pinned-empty column's header to re-collapse. Only empty columns toggle —
+// a column with cards is always shown, and re-renders auto-expand it.
+$('#board').addEventListener('click', e => {
+  const col = e.target.closest('.col');
+  if (!col) return;
+  const s = col.dataset.status;
+  if (cols[s].children.length) return;            // has cards → not collapsible
+  if (col.classList.contains('col-empty')) {       // rail → expand + pin
+    pinnedCols.add(s);
+    col.classList.remove('col-empty');
+    if (s === 'inbox') $('#add-card-input').focus();
+  } else if (e.target.closest('.col-head')) {      // header → re-collapse
+    pinnedCols.delete(s);
+    col.classList.add('col-empty');
+  }
+});
 
 // ---------------------------------------------------------------- inbox →
 

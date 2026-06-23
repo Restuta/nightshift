@@ -48,9 +48,9 @@ Branch on that:
 
 - **Already recording** (`LIVE` = `live`): don't ask, don't reset. For **Codex**,
   still run `node "$REPO/tools/codex-recorder.js" "$LOG"` (idempotent — it restarts
-  the recorder if it died). For **Claude**, re-run the PR/CI watcher line from
-  *Start* (idempotent — it no-ops if the worker is already live, restarts it if it
-  died). Then skip to *Open the board*.
+  the recorder if it died). For **Claude**, re-run the PR/CI watcher line **and the
+  task backfill** from *Start* (both idempotent — the watcher no-ops if already live,
+  the backfill just refreshes the task snapshot). Then skip to *Open the board*.
 - **An existing tape, not currently recording** (`LIVE` = `off` and `EVENTS` >
   0): the tape is left over from an earlier session/run. **Ask the user and wait
   for their answer** — do not start recording until they choose:
@@ -74,6 +74,9 @@ node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 # cards now (Claude in central recordings), so clear whichever id this host has.
 [ -n "$CODEX_THREAD_ID" ] && rm -f ~/.nightshift/turns/"$CODEX_THREAD_ID".json
 [ -n "$CLAUDE_CODE_SESSION_ID" ] && rm -f ~/.nightshift/turns/"$CLAUDE_CODE_SESSION_ID".json
+# Drop the Claude task-list state too, so the fresh tape re-seeds from the
+# transcript instead of tailing from a stale byte offset.
+[ -n "$CLAUDE_CODE_SESSION_ID" ] && rm -f ~/.nightshift/tasks/"$CLAUDE_CODE_SESSION_ID".json
 ```
 
 ### Start
@@ -81,6 +84,13 @@ node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 ```sh
 mkdir -p ~/.nightshift/active && touch ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 node "$REPO/tools/emit.js" session --phase start --agent claude --title "$(basename "$PWD")" --cwd "$PWD" --log "$LOG"
+```
+Seed the plan: Claude's task tools (TaskCreate/TaskUpdate) live only in the
+transcript and aren't in the hook matcher, so backfill the current task list once
+— the board shows sub-statuses immediately, then the hook keeps it live by tailing
+the transcript on each tool call:
+```sh
+node "$REPO/tools/backfill-tasks.js" --log "$LOG" --sid "$CLAUDE_CODE_SESSION_ID" --cwd "$PWD" 2>/dev/null || true
 ```
 Then start the PR/CI watcher (Codex gets PR/CI from its meter; Claude has none).
 It polls only the PRs THIS session has surfaced — **session-scoped, never the whole
