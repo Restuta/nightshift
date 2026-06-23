@@ -137,12 +137,13 @@ function promptTitle(p) {
 // Anything else (view/list/checks) is left to the poller, which reads gh state.
 function parseGhPr(cmd, out) {
   if (/\bgh\s+pr\s+create\b/.test(cmd)) {
-    // Parse the created URL from STDOUT only — gh prints it there on success.
-    // (Matching the command too would let `--dry-run` or a body that quotes an
-    // existing PR URL record a PR that was never opened.) Store an absolute URL:
-    // the board uses ev.url directly, so a scheme-less one resolves under the
-    // nightshift host.
-    const m = (out || '').match(/(?:https?:\/\/)?(github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))/);
+    if (/--dry-run\b/.test(cmd)) return null; // prints the would-be PR, creates nothing
+    // gh prints the created PR URL as the LAST line of stdout on success. Match
+    // only that line (not the whole output / command) so a URL quoted in the PR
+    // body can't masquerade as a created PR. Store an absolute URL — the board
+    // uses ev.url directly, so a scheme-less one resolves under the nightshift host.
+    const last = (out || '').replace(/\s+$/, '').split('\n').pop() || '';
+    const m = last.match(/(?:https?:\/\/)?(github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))/);
     return m ? { type: 'pr', number: Number(m[2]), url: 'https://' + m[1], state: 'open' } : null;
   }
   if (/\bgh\s+pr\s+merge\b/.test(cmd)) {

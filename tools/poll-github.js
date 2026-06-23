@@ -78,13 +78,20 @@ const GH_BOOL = new Set([
 // `gh pr checks --interval 10` (no PR) and `gh pr list --limit 100` find nothing.
 function ghCmdPr(cmd) {
   const toks = (cmd || '').split(/\s+/);
-  for (let i = 0; i + 2 < toks.length; i++) {
-    if (toks[i] !== 'gh' || toks[i + 1] !== 'pr') continue;
-    if (!/^(view|checks|merge|close|reopen|ready|edit|diff|comment|review)$/.test(toks[i + 2])) continue;
-    for (let j = i + 3; j < toks.length; j++) {
-      const t = toks[j];
+  // a flag that consumes the next token as its value (separate-token form)
+  const valueFlag = (f, next) => !f.includes('=') && !GH_BOOL.has(f) && next != null && !next.startsWith('-');
+  for (let i = 0; i < toks.length; i++) {
+    if (toks[i] !== 'gh') continue;
+    // skip gh's global flags (e.g. `gh -R owner/repo pr view N`) to reach `pr`
+    let j = i + 1;
+    while (j < toks.length && toks[j].startsWith('-')) { if (valueFlag(toks[j], toks[j + 1])) j++; j++; }
+    if (toks[j] !== 'pr') continue;
+    const verb = toks[j + 1];
+    if (!/^(view|checks|merge|close|reopen|ready|edit|diff|comment|review)$/.test(verb || '')) continue;
+    for (let k = j + 2; k < toks.length; k++) {
+      const t = toks[k];
       if (t.startsWith('-')) {
-        if (!t.includes('=') && !GH_BOOL.has(t) && j + 1 < toks.length && !toks[j + 1].startsWith('-')) j++;
+        if (valueFlag(t, toks[k + 1])) k++;
         continue; // skip the flag (and its value, consumed above)
       }
       // First positional decides. A bare number is current-repo (the caller's
