@@ -104,6 +104,91 @@ function parseCommit(out) {
   };
 }
 
+// Some turns reach UserPromptSubmit but aren't human intent: background-task
+// notifications, system reminders, and the captured stdout of local `!` commands.
+// Those must not mint a card titled "<task-notification>". A slash command
+// (<command-name>…) IS the human asking for work, so it stays human (titled from
+// the command below).
+function isHumanPrompt(p) {
+  const t = (p || '').trimStart();
+  if (!t) return false;
+  return !/^<(task-notification|system-reminder|local-command)/.test(t);
+}
+
+// A readable card title from a prompt: a slash command becomes "/cmd args";
+// otherwise the first non-empty line, stripped of leading quote/markdown markers,
+// capped. Keeps "turn N" only as a last resort.
+function promptTitle(p) {
+  const s = p || '';
+  const name = s.match(/<command-name>\s*([\s\S]*?)\s*<\/command-name>/);
+  if (name) {
+    const args = s.match(/<command-args>\s*([\s\S]*?)\s*<\/command-args>/);
+    return `${name[1]}${args && args[1].trim() ? ' ' + args[1].trim() : ''}`.replace(/\s+/g, ' ').slice(0, 64).trim();
+  }
+  const line = s.split('\n').map(x => x.trim()).find(Boolean) || '';
+  return line.replace(/^["'>`*•\-\s]+/, '').slice(0, 64).trim();
+}
+
+// The `gh pr <verb>` a command runs, tolerant of flag PLACEMENT — gh accepts the
+// repo flag before or after `pr` (`gh -R o/r pr view`, `gh pr -R o/r view`), so we
+// can't rely on adjacency or regex. Tokenize: find gh → pr → the verb, skipping
+// flags (and a space-form flag's value, unless that value is itself the verb, so a
+// boolean flag right before the verb doesn't swallow it).
+const GH_VERBS = /^(create|merge|view|checks|checkout|close|reopen|ready|edit|diff|comment|review|list|status)$/;
+function ghPrVerb(cmd) {
+  const t = (cmd || '').split(/\s+/);
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    if (t[i].startsWith('-')) {
+      if (!t[i].includes('=') && t[i + 1] && !t[i + 1].startsWith('-') && !GH_VERBS.test(t[i + 1])) i++;
+      continue;
+    }
+    out.push(t[i]);
+  }
+  const k = out.indexOf('pr');
+  return k > 0 && out[k - 1] === 'gh' ? (out[k + 1] || null) : null;
+}
+
+// PRs the session itself touches via gh, so the board shows THIS session's PRs
+// (not the repo's hundreds). State must be a recorded FACT, never an assumption:
+//   - create: gh prints the new PR's URL on success → that's the number, state open.
+//   - merge:  the COMMAND running proves nothing (it also runs for --auto, blocked,
+//     or failed merges); only the success line "Merged pull request #N" is proof.
+// Anything else (view/list/checks) is left to the poller, which reads gh state.
+function parseGhPr(cmd, out) {
+  const verb = ghPrVerb(cmd);
+  // Strip quoted segments before flag checks so a flag named inside a title/body
+  // (e.g. --title "test --dry-run") isn't mistaken for a real flag.
+  const bare = (cmd || '').replace(/"[^"]*"|'[^']*'/g, '');
+  if (verb === 'create') {
+    if (/--dry-run\b/.test(bare)) return null; // prints the would-be PR, creates nothing
+    // gh prints the created PR URL as the LAST line of stdout on success. Match
+    // only that line (not the whole output / command) so a URL quoted in the PR
+    // body can't masquerade as a created PR. Store an absolute URL — the board
+    // uses ev.url directly, so a scheme-less one resolves under the nightshift host.
+    const last = (out || '').replace(/\s+$/, '').split('\n').pop() || '';
+    const m = last.match(/(?:https?:\/\/)?(github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))/);
+    return m ? { type: 'pr', number: Number(m[2]), url: 'https://' + m[1], state: 'open' } : null;
+  }
+  if (verb === 'merge') {
+    // gh's success line is "Merged pull request owner/repo#N (...)" (older builds
+    // omit owner/repo). Keep the owner/repo as a URL when present — a cross-repo
+    // merge must carry its repo, or the poller would re-scope the bare number to
+    // the current repo and record the wrong PR.
+    const m = (out || '').match(/Merged pull request\s+([\w.-]+\/[\w.-]+)?#(\d+)/i);
+    if (!m) return null;
+    const ev = { type: 'pr', number: Number(m[2]), state: 'merged' };
+    // Repo from the output if gh printed it, else from the command's -R/--repo —
+    // an older gh prints a bare "#N", and a repo-less merged event would let the
+    // poller re-scope a cross-repo merge to the current repo.
+    const rf = (cmd || '').match(/(?:--repo|-R)[=\s]+["']?([\w.-]+\/[\w.-]+)/);
+    const repo = m[1] || (rf && rf[1]);
+    if (repo) ev.url = `https://github.com/${repo}/pull/${m[2]}`;
+    return ev;
+  }
+  return null;
+}
+
 function main() {
   let input = '';
   try { input = fs.readFileSync(0, 'utf8'); } catch { return; }
@@ -153,14 +238,16 @@ function main() {
     // zero cards. A locally-attached repo (CENTRAL false) keeps emitting its own
     // PR-sized cards via emit.js, so we leave Claude alone there. Close the prior
     // turn, open a new one titled by the prompt.
-    const synth = sid && (CENTRAL || agent === 'codex');
+    // Skip card synthesis for harness-injected turns — they'd just litter the
+    // board with "<task-notification>" cards. The agent still does work in that
+    // turn; it attaches to the open card (or none), and Stop retires as usual.
+    const synth = sid && isHumanPrompt(hook.prompt) && (CENTRAL || agent === 'codex');
     if (synth) {
       const st = turnState(sid);
       if (st.card) append({ type: 'item', id: st.card, status: 'done' });
       st.turnN++;
       st.card = `turn-${st.turnN}`;
-      const title = (hook.prompt || '').trim().split('\n')[0].slice(0, 64).trim();
-      append({ type: 'item', id: st.card, title: title || `turn ${st.turnN}`, status: 'doing' });
+      append({ type: 'item', id: st.card, title: promptTitle(hook.prompt) || `turn ${st.turnN}`, status: 'doing' });
       append({ type: 'session', phase: 'resume', agent, session: sid });
       saveTurn(sid, st);
     } else {
@@ -207,8 +294,23 @@ function main() {
         const c = parseCommit(out);
         if (c) { append(withItem(c)); return; }
       }
-      const text = (inp.command || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-      if (text) append(withItem({ type: 'tool', tool: 'run', text }));
+      // Capture PRs only for Claude — a hook-mode Codex session's meter already
+      // emits pr events from the same rollout, so doing it here too would double
+      // them. Don't `return`: fall through to the activity event below so the
+      // session wakes (the reducer's pr case doesn't, but a tool event does — a
+      // gh pr run right after an approval prompt would otherwise stay in ATTENTION).
+      if (CENTRAL && agent === 'claude' && /\bgh\b[^\n]*\bpr\b/.test(inp.command || '')) {
+        const pr = parseGhPr(inp.command || '', out); // null unless it's a create/merge
+        if (pr) append(withItem(pr));
+      }
+      const full = (inp.command || '').replace(/\s+/g, ' ').trim();
+      if (full) {
+        const ev = { type: 'tool', tool: 'run', text: full.slice(0, 120) };
+        // The display text is truncated; for a gh pr command keep the full command
+        // too, so the PR poller can find a PR ref that sits past 120 chars.
+        if (full.length > 120 && /\bgh\b[^\n]*\bpr\b/.test(full)) ev.cmd = full.slice(0, 500);
+        append(withItem(ev));
+      }
     }
     return;
   }

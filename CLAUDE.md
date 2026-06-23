@@ -63,8 +63,10 @@ including the ones building it.
   implements Claude's hook contract (`~/.codex/hooks.json`; payload carries
   `session_id`, `transcript_path`, `cwd`, normalized `tool_name`), so recording
   is hook-based for both. `hooks/claude-hook.js` is a back-compat shim requiring
-  it. Synthesizes per-turn cards for Codex from `UserPromptSubmit`; maps
-  `apply_patch`→edit, `update_plan`→todos, `Bash`→commit/activity. Fail-open.
+  it. Synthesizes per-turn cards from `UserPromptSubmit` (Codex always, Claude in
+  central recordings) — skipping harness-injected turns like `<task-notification>`
+  so they don't litter the board; maps `apply_patch`→edit, `update_plan`→todos,
+  `Bash`→commit/activity and `gh pr create|merge`→pr. Fail-open.
 - `tools/install-codex.js` — Codex counterpart of the global install: symlinks
   the (shared) `/nightshift` skill into `~/.codex/skills/` and registers
   `agent-hook.js` in `~/.codex/hooks.json` behind a per-session pre-gate
@@ -78,6 +80,10 @@ including the ones building it.
   follows rotation within the same session id, resumes on restart.
 - `tools/poll-github.js` — records PR/CI facts as events via gh; folds the
   log's known state each tick and appends only deltas (stateless, idempotent).
+  `--known` polls only the PRs the tape itself surfaced (PR URLs, `#N` in card
+  titles, `gh pr` commands) instead of the whole repo — so one session's board
+  isn't flooded by a repo's hundreds of PRs. The `/nightshift` skill runs it
+  `--once --known` for Claude sessions (Codex gets PR/CI from its meter).
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
 
 ## Commands
