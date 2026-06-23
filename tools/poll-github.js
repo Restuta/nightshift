@@ -95,7 +95,7 @@ function urlRepo(s) {
 // the lowercased status, or null when toast isn't installed (→ gh fallback) or the
 // call fails. ENOENT is cached so we don't re-spawn a missing binary every tick.
 let toastOk = null;
-function toastStatus(n) {
+function toastInfo(n) {
   if (toastOk === false || !flags.repo) return null;
   // spawnSync, not execFileSync: toast exits non-zero when action is required
   // (a blocked/needs-fix PR exits 1) yet still prints valid JSON to stdout — we
@@ -104,20 +104,23 @@ function toastStatus(n) {
     { encoding: 'utf8', timeout: 15000 });
   if (r.error) { if (r.error.code === 'ENOENT') toastOk = false; return null; } // not installed → gh
   toastOk = true;
-  try { return (((JSON.parse(r.stdout || '') || {}).status || '') + '').toLowerCase() || null; }
+  try { const d = JSON.parse(r.stdout || ''); return d && typeof d === 'object' ? d : null; }
   catch { return null; } // exit 2 / no JSON → fall back to gh
 }
 
-// Map a toast review-ci status to the board's ci vocabulary. Toast uses
-// `base:sub_status` forms (e.g. degraded:stale), so classify on the base word.
-// Anything unrecognized returns null → the caller falls back to gh's rollup
-// rather than dropping the CI state.
-function toastCi(status) {
-  const base = (status || '').split(':')[0];
+// Map a toast review-ci result to the board's ci vocabulary. Classify on the base
+// status word (toast uses `base:sub_status` forms like degraded:stale). toast is a
+// GATING tool, so any action-required state (draft, unknown_reviewer, *_blocked,
+// needs_fix, degraded…) is `fail`, NOT a gh fallback — else a draft/blocked PR with
+// green checks would show ready. For an unrecognized word, a positive blocking
+// count still means fail; only genuinely indeterminate states return null (→ gh).
+function toastCi(d) {
+  const base = (((d && d.status) || '') + '').toLowerCase().split(':')[0];
   if (/^(ready|pass|passing|clean|merged)$/.test(base)) return 'pass';
-  if (/^(needs_fix|blocked|github_blocked|fail|failing|error|degraded)$/.test(base)) return 'fail';
   if (/^(pending|in_progress|active|running|blocking|awaiting_review|head_changed)$/.test(base)) return 'pending';
-  return null; // closed / acknowledged / unknown → let gh decide
+  if (/^(needs_fix|blocked|github_blocked|draft|unknown_reviewer|degraded|conflicting|dirty|unstable|fail|failing|error|action_required)$/.test(base)) return 'fail';
+  if (d && d.counts && d.counts.blocking_items > 0) return 'fail'; // unknown word but explicitly blocking
+  return null; // closed / indeterminate → let gh decide
 }
 
 // Boolean (value-less) flags for the gh pr verbs below. Every other `--flag`
@@ -229,13 +232,14 @@ function rollupCi(checks) {
 // on the next tick instead of being lost.
 const known = new Map(); // number → {state, ci}
 let offset = 0;
+let sawAnyPr = false; // true once the tape has surfaced at least one PR (reset on log replace)
 
 function refreshKnown() {
   let fd;
   try { fd = fs.openSync(LOG, 'r'); } catch { return; } // no log yet
   try {
     const size = fs.fstatSync(fd).size;
-    if (size < offset) { known.clear(); offset = 0; } // log truncated/replaced
+    if (size < offset) { known.clear(); offset = 0; sawAnyPr = false; } // log truncated/replaced (e.g. /nightshift reset) → fresh tape
     if (size === offset) return;
     const buf = Buffer.alloc(size - offset);
     fs.readSync(fd, buf, 0, buf.length, offset);
@@ -269,9 +273,10 @@ function emitPr(pr) {
   // else gh's check rollup. If toast returns a status we don't map (closed,
   // acknowledged, a new taxonomy word…), fall back to gh rather than dropping CI.
   // Toast also reports 'merged', corroborating gh's state.
-  const ts = flags.known ? toastStatus(pr.number) : null;
-  const ci = (ts && toastCi(ts)) || rollupCi(pr.statusCheckRollup);
-  if (ts === 'merged' && state === 'open') state = 'merged';
+  const td = flags.known ? toastInfo(pr.number) : null;
+  const ci = (td && toastCi(td)) || rollupCi(pr.statusCheckRollup);
+  const tbase = td && (((td.status || '') + '').toLowerCase().split(':')[0]);
+  if (tbase === 'merged' && state === 'open') state = 'merged';
   const k = known.get(pr.number) || {};
   if (k.state !== state) {
     append({ type: 'pr', number: pr.number, title: pr.title, url: pr.url, state });
@@ -285,7 +290,6 @@ function emitPr(pr) {
 
 // One poll. Returns the number of session PRs still OPEN (so a realtime worker can
 // retire itself once every surfaced PR is merged/closed). Repo-wide mode returns 0.
-let sawAnyPr = false; // true once the tape has surfaced at least one PR
 function tick() {
   refreshKnown();
   if (flags.known) {

@@ -65,6 +65,9 @@ Archives, never deletes — the board ignores `*.bak-*` so old tapes vanish from
 the switcher but stay on disk:
 ```sh
 [ -n "$CLAUDE_CODE_SESSION_ID" ] || node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
+# Stop the PR/CI watcher too — it's keyed by log path, so without this the live
+# worker survives the archive and self-retires on the empty fresh tape.
+node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 [ -s "$LOG" ] && mv "$LOG" "$LOG.bak-$(date +%s)"
 # Drop the per-session turn state so the fresh tape starts at turn 1 and doesn't
 # write a stale 'done' for the archived card. Both agents synthesize per-turn
