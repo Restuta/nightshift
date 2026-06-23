@@ -103,7 +103,7 @@ function ghCmdPr(cmd) {
       const num = t.match(/^#?(\d+)$/);
       if (num) return Number(num[1]);
       const u = t.match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/);
-      if (u) return (flags.repo && u[1] === flags.repo) ? Number(u[2]) : null;
+      if (u) return (flags.repo && u[1].toLowerCase() === flags.repo.toLowerCase()) ? Number(u[2]) : null;
       return null;
     }
   }
@@ -121,9 +121,10 @@ function sessionPrNumbers() {
   const set = new Set();
   let data; try { data = fs.readFileSync(LOG, 'utf8'); } catch { return set; }
   // A repo-less ref (bare #N / number) is current-repo. A repo-qualified ref
-  // counts only if it matches --repo; if the repo is unknown we can't verify, so
-  // it's skipped (never assumed current).
-  const sameRepo = r => r == null ? true : (flags.repo ? r === flags.repo : false);
+  // counts only if it matches --repo (case-insensitively — GitHub repo paths are);
+  // if the repo is unknown we can't verify, so it's skipped (never assumed current).
+  const lc = s => (s || '').toLowerCase();
+  const sameRepo = r => r == null ? true : (flags.repo ? lc(r) === lc(flags.repo) : false);
   const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)[=\s]+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   const HASH = /#(\d{1,6})\b/g; // single-digit PR refs (#4) are valid on new repos

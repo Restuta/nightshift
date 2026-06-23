@@ -157,8 +157,11 @@ function ghPrVerb(cmd) {
 // Anything else (view/list/checks) is left to the poller, which reads gh state.
 function parseGhPr(cmd, out) {
   const verb = ghPrVerb(cmd);
+  // Strip quoted segments before flag checks so a flag named inside a title/body
+  // (e.g. --title "test --dry-run") isn't mistaken for a real flag.
+  const bare = (cmd || '').replace(/"[^"]*"|'[^']*'/g, '');
   if (verb === 'create') {
-    if (/--dry-run\b/.test(cmd)) return null; // prints the would-be PR, creates nothing
+    if (/--dry-run\b/.test(bare)) return null; // prints the would-be PR, creates nothing
     // gh prints the created PR URL as the LAST line of stdout on success. Match
     // only that line (not the whole output / command) so a URL quoted in the PR
     // body can't masquerade as a created PR. Store an absolute URL — the board
@@ -175,7 +178,12 @@ function parseGhPr(cmd, out) {
     const m = (out || '').match(/Merged pull request\s+([\w.-]+\/[\w.-]+)?#(\d+)/i);
     if (!m) return null;
     const ev = { type: 'pr', number: Number(m[2]), state: 'merged' };
-    if (m[1]) ev.url = `https://github.com/${m[1]}/pull/${m[2]}`;
+    // Repo from the output if gh printed it, else from the command's -R/--repo —
+    // an older gh prints a bare "#N", and a repo-less merged event would let the
+    // poller re-scope a cross-repo merge to the current repo.
+    const rf = bare.match(/(?:--repo|-R)[=\s]+([\w.-]+\/[\w.-]+)/);
+    const repo = m[1] || (rf && rf[1]);
+    if (repo) ev.url = `https://github.com/${repo}/pull/${m[2]}`;
     return ev;
   }
   return null;
