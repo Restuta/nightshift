@@ -108,14 +108,16 @@ function toastStatus(n) {
   catch { return null; } // exit 2 / no JSON → fall back to gh
 }
 
-// Map a toast review-ci status to the board's ci vocabulary (same words the Codex
-// meter maps from the rollout): ready/merged = pass, *_blocked/needs_fix = fail,
-// pending/running = pending.
+// Map a toast review-ci status to the board's ci vocabulary. Toast uses
+// `base:sub_status` forms (e.g. degraded:stale), so classify on the base word.
+// Anything unrecognized returns null → the caller falls back to gh's rollup
+// rather than dropping the CI state.
 function toastCi(status) {
-  if (/^(ready|pass|passing|clean|merged)$/.test(status)) return 'pass';
-  if (/^(needs_fix|blocked|github_blocked|fail|failing|error)$/.test(status)) return 'fail';
-  if (/^(pending|in_progress|active|running|blocking)$/.test(status)) return 'pending';
-  return null;
+  const base = (status || '').split(':')[0];
+  if (/^(ready|pass|passing|clean|merged)$/.test(base)) return 'pass';
+  if (/^(needs_fix|blocked|github_blocked|fail|failing|error|degraded)$/.test(base)) return 'fail';
+  if (/^(pending|in_progress|active|running|blocking|awaiting_review|head_changed)$/.test(base)) return 'pending';
+  return null; // closed / acknowledged / unknown → let gh decide
 }
 
 // Boolean (value-less) flags for the gh pr verbs below. Every other `--flag`
@@ -264,9 +266,11 @@ function append(ev) {
 function emitPr(pr) {
   let state = pr.state.toLowerCase(); // open | merged | closed (from gh)
   // CI/review status from toast when available (session-scoped polling only),
-  // else gh's check rollup. Toast also reports 'merged', corroborating gh's state.
+  // else gh's check rollup. If toast returns a status we don't map (closed,
+  // acknowledged, a new taxonomy word…), fall back to gh rather than dropping CI.
+  // Toast also reports 'merged', corroborating gh's state.
   const ts = flags.known ? toastStatus(pr.number) : null;
-  const ci = ts ? toastCi(ts) : rollupCi(pr.statusCheckRollup);
+  const ci = (ts && toastCi(ts)) || rollupCi(pr.statusCheckRollup);
   if (ts === 'merged' && state === 'open') state = 'merged';
   const k = known.get(pr.number) || {};
   if (k.state !== state) {
@@ -281,12 +285,14 @@ function emitPr(pr) {
 
 // One poll. Returns the number of session PRs still OPEN (so a realtime worker can
 // retire itself once every surfaced PR is merged/closed). Repo-wide mode returns 0.
+let sawAnyPr = false; // true once the tape has surfaced at least one PR
 function tick() {
   refreshKnown();
   if (flags.known) {
     // Session-scoped: refresh ONLY the PRs this tape surfaced. No repo-wide list,
     // so a repo with hundreds of open PRs can't flood a single session's board.
     const nums = [...sessionPrNumbers()];
+    if (nums.length) sawAnyPr = true;
     for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr); }
     return nums.filter(n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || ''); }).length;
   }
@@ -329,13 +335,17 @@ if (flags.worker) {
 }
 tick();
 console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG}`);
-let emptyTicks = 0;
+let doneTicks = 0, lifeTicks = 0;
+const MAX_LIFE = Math.max(60, Math.round((4 * 3600 * 1000) / INTERVAL)); // ~4h orphan cap
 const timer = setInterval(() => {
+  lifeTicks++;
   const openCount = tick();
-  // A realtime worker retires itself once nothing is left to watch (all surfaced
-  // PRs merged/closed, or none yet) for several ticks — /nightshift off also stops it.
   if (flags.worker && flags.known) {
-    emptyTicks = openCount > 0 ? 0 : emptyTicks + 1;
-    if (emptyTicks >= 6) { clearInterval(timer); process.exit(0); }
+    // Retire once the WORK is done — PRs were surfaced and all are now merged/
+    // closed. Before any PR appears (a fresh session) keep polling: a PR may be
+    // created later. /nightshift off stops us; MAX_LIFE is a backstop for a
+    // session abandoned without `off`.
+    doneTicks = (sawAnyPr && openCount === 0) ? doneTicks + 1 : 0;
+    if (doneTicks >= 6 || lifeTicks >= MAX_LIFE) { clearInterval(timer); process.exit(0); }
   }
 }, INTERVAL);
