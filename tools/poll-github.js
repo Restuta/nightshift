@@ -77,8 +77,14 @@ function ghCmdPr(cmd) {
         if (!t.includes('=') && !GH_BOOL.has(t) && j + 1 < toks.length && !toks[j + 1].startsWith('-')) j++;
         continue; // skip the flag (and its value, consumed above)
       }
-      const m = t.match(/^#?(\d+)$/) || t.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)$/);
-      return m ? Number(m[1]) : null; // first positional decides; a branch name → no number
+      // First positional decides. A bare number is current-repo (the caller's
+      // --repo/-R check covers that); a PR URL carries its own repo, so drop it
+      // when it points at a different repo than --repo. A branch name → no number.
+      const num = t.match(/^#?(\d+)$/);
+      if (num) return Number(num[1]);
+      const u = t.match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/);
+      if (u) return (!flags.repo || u[1] === flags.repo) ? Number(u[2]) : null;
+      return null;
     }
   }
   return null;
