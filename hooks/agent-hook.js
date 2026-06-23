@@ -122,17 +122,21 @@ function promptTitle(p) {
 }
 
 // PRs the session itself touches via gh, so the board shows THIS session's PRs
-// (not the repo's hundreds). Only `create` / `merge` are authoritative about
-// state, and create prints the PR URL — that's where the number comes from.
-// view/list/checks are left to the poller, which refreshes accurately.
+// (not the repo's hundreds). State must be a recorded FACT, never an assumption:
+//   - create: gh prints the new PR's URL on success → that's the number, state open.
+//   - merge:  the COMMAND running proves nothing (it also runs for --auto, blocked,
+//     or failed merges); only the success line "Merged pull request #N" is proof.
+// Anything else (view/list/checks) is left to the poller, which reads gh state.
 function parseGhPr(cmd, out) {
-  let state = null;
-  if (/\bgh\s+pr\s+create\b/.test(cmd)) state = 'open';
-  else if (/\bgh\s+pr\s+merge\b/.test(cmd)) state = 'merged';
-  else return null;
-  const m = `${out}\n${cmd}`.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/);
-  if (!m) return null;
-  return { type: 'pr', number: Number(m[1]), url: m[0], state };
+  if (/\bgh\s+pr\s+create\b/.test(cmd)) {
+    const m = `${out}\n${cmd}`.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/);
+    return m ? { type: 'pr', number: Number(m[1]), url: m[0], state: 'open' } : null;
+  }
+  if (/\bgh\s+pr\s+merge\b/.test(cmd)) {
+    const m = (out || '').match(/Merged pull request #?(\d+)/i);
+    return m ? { type: 'pr', number: Number(m[1]), state: 'merged' } : null;
+  }
+  return null;
 }
 
 function main() {

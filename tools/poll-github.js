@@ -46,23 +46,34 @@ function ghPr(n) {
   catch { return null; }
 }
 
+// owner/repo for a github PR URL, or null.
+function urlRepo(s) {
+  const m = (s || '').match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/);
+  return m ? m[1] : null;
+}
+
 // The PR numbers THIS session actually surfaced, harvested from its own tape:
-// pr/ci events, PR URLs anywhere, `gh pr <verb> #N` commands, and #N in card
-// titles. Deliberately conservative — no bare numbers (branch/ticket ids like
-// "orba-768" would pull unrelated PRs). This is what scopes the poll.
+// pr/ci events, PR URLs, `gh pr <verb> #N` commands, and #N in card titles.
+// Deliberately conservative — no bare numbers (branch/ticket ids like "orba-768"
+// would pull unrelated PRs). A PR number is repo-relative, so a URL (or a pr
+// event with a URL) only counts when its owner/repo matches --repo; otherwise
+// `gh pr view <n> --repo current` would record the WRONG repo's PR #n. Bare #N /
+// command numbers carry no repo, so they're taken as the current repo.
 function sessionPrNumbers() {
   const set = new Set();
   let data; try { data = fs.readFileSync(LOG, 'utf8'); } catch { return set; }
-  const URL = /github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/g;
+  const sameRepo = r => !r || !flags.repo || r === flags.repo;
+  const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   const GH = /\bgh\s+pr\s+\w+\s+#?(\d+)/g;
   const HASH = /#(\d{2,6})\b/g;
   for (const line of data.split('\n')) {
     if (!line) continue;
     let ev; try { ev = JSON.parse(line); } catch { continue; }
-    if (ev.type === 'pr' && ev.number != null) set.add(Number(ev.number));
+    if (ev.type === 'pr' && ev.number != null && sameRepo(urlRepo(ev.url))) set.add(Number(ev.number));
     if (ev.type === 'ci' && ev.pr != null) set.add(Number(ev.pr));
-    const text = [ev.url, ev.text, ev.command, ev.message].filter(Boolean).join(' ');
-    let m; while ((m = URL.exec(text))) set.add(Number(m[1]));
+    const text = [ev.text, ev.command, ev.message].filter(Boolean).join(' ');
+    let m;
+    while ((m = URL.exec(text))) { if (sameRepo(m[1])) set.add(Number(m[2])); }
     while ((m = GH.exec(text))) set.add(Number(m[1]));
     if (ev.type === 'item' && ev.title) { while ((m = HASH.exec(ev.title))) set.add(Number(m[1])); }
   }
