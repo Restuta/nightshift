@@ -87,7 +87,7 @@ function ghCmdPr(cmd) {
     while (j < toks.length && toks[j].startsWith('-')) { if (valueFlag(toks[j], toks[j + 1])) j++; j++; }
     if (toks[j] !== 'pr') continue;
     const verb = toks[j + 1];
-    if (!/^(view|checks|merge|close|reopen|ready|edit|diff|comment|review)$/.test(verb || '')) continue;
+    if (!/^(view|checks|checkout|merge|close|reopen|ready|edit|diff|comment|review)$/.test(verb || '')) continue;
     for (let k = j + 2; k < toks.length; k++) {
       const t = toks[k];
       if (t.startsWith('-')) {
