@@ -104,20 +104,28 @@ function parseCommit(out) {
   };
 }
 
-// Harness-injected turns reach UserPromptSubmit too — background-task
-// notifications, system reminders, slash-command scaffolding — but they aren't
-// human intent and must not mint a card titled "<task-notification>". Treat a
-// prompt that opens with a known harness tag as non-human.
+// Some turns reach UserPromptSubmit but aren't human intent: background-task
+// notifications, system reminders, and the captured stdout of local `!` commands.
+// Those must not mint a card titled "<task-notification>". A slash command
+// (<command-name>…) IS the human asking for work, so it stays human (titled from
+// the command below).
 function isHumanPrompt(p) {
   const t = (p || '').trimStart();
   if (!t) return false;
-  return !/^<(task-notification|system-reminder|local-command|command-(name|message|args)|user-prompt-submit-hook|hook-)/.test(t);
+  return !/^<(task-notification|system-reminder|local-command)/.test(t);
 }
 
-// A readable card title from a prompt: first non-empty line, stripped of leading
-// quote/markdown markers, capped. Keeps "turn N" only as a last resort.
+// A readable card title from a prompt: a slash command becomes "/cmd args";
+// otherwise the first non-empty line, stripped of leading quote/markdown markers,
+// capped. Keeps "turn N" only as a last resort.
 function promptTitle(p) {
-  const line = (p || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+  const s = p || '';
+  const name = s.match(/<command-name>\s*([\s\S]*?)\s*<\/command-name>/);
+  if (name) {
+    const args = s.match(/<command-args>\s*([\s\S]*?)\s*<\/command-args>/);
+    return `${name[1]}${args && args[1].trim() ? ' ' + args[1].trim() : ''}`.replace(/\s+/g, ' ').slice(0, 64).trim();
+  }
+  const line = s.split('\n').map(x => x.trim()).find(Boolean) || '';
   return line.replace(/^["'>`*•\-\s]+/, '').slice(0, 64).trim();
 }
 

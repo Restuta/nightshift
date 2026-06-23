@@ -52,6 +52,26 @@ function urlRepo(s) {
   return m ? m[1] : null;
 }
 
+// The PR number a `gh pr <verb> … N` command targets. Only verbs that take a PR
+// argument (not list/create/status). Tolerates flags between the verb and the
+// positional (`gh pr view --json … 123`, `gh pr checks --watch 123`) and ignores
+// numbers embedded in flag values by taking the last bare number / #N / PR URL.
+function ghCmdPr(cmd) {
+  const toks = (cmd || '').split(/\s+/);
+  let best = null;
+  for (let i = 0; i + 2 < toks.length; i++) {
+    if (toks[i] !== 'gh' || toks[i + 1] !== 'pr') continue;
+    if (!/^(view|checks|merge|close|reopen|ready|edit|diff|comment|review)$/.test(toks[i + 2])) continue;
+    for (let j = i + 3; j < toks.length; j++) {
+      const t = toks[j];
+      if (t.startsWith('-')) continue; // a flag — not the PR positional
+      const m = t.match(/^#?(\d+)$/) || t.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)$/);
+      if (m) best = Number(m[1]);
+    }
+  }
+  return best;
+}
+
 // The PR numbers THIS session actually surfaced, harvested from its own tape:
 // pr/ci events, PR URLs, `gh pr <verb> #N` commands, and #N in card titles.
 // Deliberately conservative — no bare numbers (branch/ticket ids like "orba-768"
@@ -65,7 +85,6 @@ function sessionPrNumbers() {
   const sameRepo = r => !r || !flags.repo || r === flags.repo;
   const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)\s+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
-  const GH = /\bgh\s+pr\s+\w+\s+#?(\d+)/g;
   const HASH = /#(\d{2,6})\b/g;
   for (const line of data.split('\n')) {
     if (!line) continue;
@@ -76,11 +95,11 @@ function sessionPrNumbers() {
     // "Review https://github.com/o/r/pull/123".
     const text = [ev.text, ev.command, ev.message, ev.title].filter(Boolean).join(' ');
     let m; while ((m = URL.exec(text))) { if (sameRepo(m[1])) set.add(Number(m[2])); }
-    // `gh pr <verb> #N` commands — but skip a command explicitly aimed at another
-    // repo via --repo/-R, else its number would be re-scoped to the current repo.
+    // `gh pr <verb> N` commands — skip a command aimed at another repo via
+    // --repo/-R, else its number would be re-scoped to the current repo.
     for (const field of [ev.command, ev.text]) {
       if (!field || !sameRepo(cmdRepo(field))) continue;
-      let g; while ((g = GH.exec(field))) set.add(Number(g[1]));
+      const n = ghCmdPr(field); if (n != null) set.add(n);
     }
     // Bare #N in a human card title is a current-repo ref.
     if (ev.type === 'item' && ev.title) { while ((m = HASH.exec(ev.title))) set.add(Number(m[1])); }
