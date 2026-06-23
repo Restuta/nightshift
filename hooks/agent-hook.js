@@ -264,9 +264,14 @@ function main() {
         const c = parseCommit(out);
         if (c) { append(withItem(c)); return; }
       }
-      if (CENTRAL && /\bgh\s+pr\b/.test(inp.command || '')) {
+      // Capture PRs only for Claude — a hook-mode Codex session's meter already
+      // emits pr events from the same rollout, so doing it here too would double
+      // them. Don't `return`: fall through to the activity event below so the
+      // session wakes (the reducer's pr case doesn't, but a tool event does — a
+      // gh pr run right after an approval prompt would otherwise stay in ATTENTION).
+      if (CENTRAL && agent === 'claude' && /\bgh\s+pr\b/.test(inp.command || '')) {
         const pr = parseGhPr(inp.command || '', out);
-        if (pr) { append(withItem(pr)); return; }
+        if (pr) append(withItem(pr));
       }
       const text = (inp.command || '').replace(/\s+/g, ' ').trim().slice(0, 120);
       if (text) append(withItem({ type: 'tool', tool: 'run', text }));

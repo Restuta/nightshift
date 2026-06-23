@@ -59,6 +59,7 @@ const GH_BOOL = new Set([
   '-w', '--web', '--watch', '--fail-fast', '--required', '--comments', '--name-only',
   '--patch', '--auto', '--disable-auto', '-m', '--merge', '-r', '--rebase', '-s',
   '--squash', '-d', '--delete-branch', '--admin', '--undo', '--draft', '--dry-run',
+  '-a', '--approve', '-c', '--comment', '--request-changes', // gh pr review actions
 ]);
 
 // The PR number a `gh pr <verb> … N` command targets — the first positional PR
@@ -101,7 +102,7 @@ function sessionPrNumbers() {
   const set = new Set();
   let data; try { data = fs.readFileSync(LOG, 'utf8'); } catch { return set; }
   const sameRepo = r => !r || !flags.repo || r === flags.repo;
-  const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)\s+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
+  const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)[=\s]+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   const HASH = /#(\d{1,6})\b/g; // single-digit PR refs (#4) are valid on new repos
   for (const line of data.split('\n')) {
