@@ -104,6 +104,37 @@ function parseCommit(out) {
   };
 }
 
+// Harness-injected turns reach UserPromptSubmit too — background-task
+// notifications, system reminders, slash-command scaffolding — but they aren't
+// human intent and must not mint a card titled "<task-notification>". Treat a
+// prompt that opens with a known harness tag as non-human.
+function isHumanPrompt(p) {
+  const t = (p || '').trimStart();
+  if (!t) return false;
+  return !/^<(task-notification|system-reminder|local-command|command-(name|message|args)|user-prompt-submit-hook|hook-)/.test(t);
+}
+
+// A readable card title from a prompt: first non-empty line, stripped of leading
+// quote/markdown markers, capped. Keeps "turn N" only as a last resort.
+function promptTitle(p) {
+  const line = (p || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+  return line.replace(/^["'>`*•\-\s]+/, '').slice(0, 64).trim();
+}
+
+// PRs the session itself touches via gh, so the board shows THIS session's PRs
+// (not the repo's hundreds). Only `create` / `merge` are authoritative about
+// state, and create prints the PR URL — that's where the number comes from.
+// view/list/checks are left to the poller, which refreshes accurately.
+function parseGhPr(cmd, out) {
+  let state = null;
+  if (/\bgh\s+pr\s+create\b/.test(cmd)) state = 'open';
+  else if (/\bgh\s+pr\s+merge\b/.test(cmd)) state = 'merged';
+  else return null;
+  const m = `${out}\n${cmd}`.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/);
+  if (!m) return null;
+  return { type: 'pr', number: Number(m[1]), url: m[0], state };
+}
+
 function main() {
   let input = '';
   try { input = fs.readFileSync(0, 'utf8'); } catch { return; }
@@ -153,14 +184,16 @@ function main() {
     // zero cards. A locally-attached repo (CENTRAL false) keeps emitting its own
     // PR-sized cards via emit.js, so we leave Claude alone there. Close the prior
     // turn, open a new one titled by the prompt.
-    const synth = sid && (CENTRAL || agent === 'codex');
+    // Skip card synthesis for harness-injected turns — they'd just litter the
+    // board with "<task-notification>" cards. The agent still does work in that
+    // turn; it attaches to the open card (or none), and Stop retires as usual.
+    const synth = sid && isHumanPrompt(hook.prompt) && (CENTRAL || agent === 'codex');
     if (synth) {
       const st = turnState(sid);
       if (st.card) append({ type: 'item', id: st.card, status: 'done' });
       st.turnN++;
       st.card = `turn-${st.turnN}`;
-      const title = (hook.prompt || '').trim().split('\n')[0].slice(0, 64).trim();
-      append({ type: 'item', id: st.card, title: title || `turn ${st.turnN}`, status: 'doing' });
+      append({ type: 'item', id: st.card, title: promptTitle(hook.prompt) || `turn ${st.turnN}`, status: 'doing' });
       append({ type: 'session', phase: 'resume', agent, session: sid });
       saveTurn(sid, st);
     } else {
@@ -206,6 +239,10 @@ function main() {
       if (CENTRAL && /git\s+commit/.test(inp.command || '')) {
         const c = parseCommit(out);
         if (c) { append(withItem(c)); return; }
+      }
+      if (CENTRAL && /\bgh\s+pr\b/.test(inp.command || '')) {
+        const pr = parseGhPr(inp.command || '', out);
+        if (pr) { append(withItem(pr)); return; }
       }
       const text = (inp.command || '').replace(/\s+/g, ' ').trim().slice(0, 120);
       if (text) append(withItem({ type: 'tool', tool: 'run', text }));

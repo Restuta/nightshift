@@ -23,6 +23,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (argv[i] === '--limit') flags.limit = Number(argv[++i]);
   else if (argv[i] === '--repo') flags.repo = argv[++i];
   else if (argv[i] === '--log') flags.log = argv[++i];
+  else if (argv[i] === '--known') flags.known = true;
 }
 const posInt = (n, dflt) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt);
 const LOG = flags.log || path.join('.nightshift', 'events.jsonl');
@@ -34,6 +35,38 @@ function ghPrs() {
     '--json', 'number,title,url,state,statusCheckRollup'];
   if (flags.repo) args.push('--repo', flags.repo);
   return JSON.parse(execFileSync('gh', args, { encoding: 'utf8' }));
+}
+
+// One PR by number — used in --known mode so we touch only the PRs this session
+// surfaced, never the repo's hundreds. Returns null if it's not a PR / no access.
+function ghPr(n) {
+  const args = ['pr', 'view', String(n), '--json', 'number,title,url,state,statusCheckRollup'];
+  if (flags.repo) args.push('--repo', flags.repo);
+  try { return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
+  catch { return null; }
+}
+
+// The PR numbers THIS session actually surfaced, harvested from its own tape:
+// pr/ci events, PR URLs anywhere, `gh pr <verb> #N` commands, and #N in card
+// titles. Deliberately conservative — no bare numbers (branch/ticket ids like
+// "orba-768" would pull unrelated PRs). This is what scopes the poll.
+function sessionPrNumbers() {
+  const set = new Set();
+  let data; try { data = fs.readFileSync(LOG, 'utf8'); } catch { return set; }
+  const URL = /github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/g;
+  const GH = /\bgh\s+pr\s+\w+\s+#?(\d+)/g;
+  const HASH = /#(\d{2,6})\b/g;
+  for (const line of data.split('\n')) {
+    if (!line) continue;
+    let ev; try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type === 'pr' && ev.number != null) set.add(Number(ev.number));
+    if (ev.type === 'ci' && ev.pr != null) set.add(Number(ev.pr));
+    const text = [ev.url, ev.text, ev.command, ev.message].filter(Boolean).join(' ');
+    let m; while ((m = URL.exec(text))) set.add(Number(m[1]));
+    while ((m = GH.exec(text))) set.add(Number(m[1]));
+    if (ev.type === 'item' && ev.title) { while ((m = HASH.exec(ev.title))) set.add(Number(m[1])); }
+  }
+  return set;
 }
 
 // Collapse a statusCheckRollup array to one ci status; null when there are no
@@ -88,31 +121,42 @@ function append(ev) {
   console.log(JSON.stringify(ev));
 }
 
+// Emit pr/ci deltas for one PR's current state (folded `known` suppresses no-ops).
+function emitPr(pr) {
+  const state = pr.state.toLowerCase(); // open | merged | closed
+  const ci = rollupCi(pr.statusCheckRollup);
+  const k = known.get(pr.number) || {};
+  if (k.state !== state) {
+    append({ type: 'pr', number: pr.number, title: pr.title, url: pr.url, state });
+    known.set(pr.number, { ...known.get(pr.number), state });
+  }
+  if (ci != null && k.ci !== ci) {
+    append({ type: 'ci', pr: pr.number, status: ci });
+    known.set(pr.number, { ...known.get(pr.number), ci });
+  }
+}
+
 function tick() {
+  refreshKnown();
+  if (flags.known) {
+    // Session-scoped: refresh ONLY the PRs this tape surfaced. No repo-wide list,
+    // so a repo with hundreds of open PRs can't flood a single session's board.
+    const nums = [...sessionPrNumbers()];
+    if (!nums.length) { if (flags.once) process.exit(0); return; }
+    for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr); }
+    return;
+  }
   let prs;
   try { prs = ghPrs(); } catch (err) {
     console.error(`gh failed: ${String(err.message || err).split('\n')[0]}`);
     if (flags.once) process.exit(1);
     return;
   }
-  refreshKnown();
-  for (const pr of prs) {
-    const state = pr.state.toLowerCase(); // open | merged | closed
-    const ci = rollupCi(pr.statusCheckRollup);
-    const k = known.get(pr.number) || {};
-    if (k.state !== state) {
-      append({ type: 'pr', number: pr.number, title: pr.title, url: pr.url, state });
-      known.set(pr.number, { ...known.get(pr.number), state });
-    }
-    if (ci != null && k.ci !== ci) {
-      append({ type: 'ci', pr: pr.number, status: ci });
-      known.set(pr.number, { ...known.get(pr.number), ci });
-    }
-  }
+  for (const pr of prs) emitPr(pr);
 }
 
 tick();
 if (!flags.once) {
-  console.error(`polling every ${INTERVAL / 1000}s (limit ${LIMIT} PRs) → ${LOG} (ctrl-c to stop)`);
+  console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG} (ctrl-c to stop)`);
   setInterval(tick, INTERVAL);
 }
