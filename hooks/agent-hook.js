@@ -181,7 +181,7 @@ function parseGhPr(cmd, out) {
     // Repo from the output if gh printed it, else from the command's -R/--repo —
     // an older gh prints a bare "#N", and a repo-less merged event would let the
     // poller re-scope a cross-repo merge to the current repo.
-    const rf = bare.match(/(?:--repo|-R)[=\s]+([\w.-]+\/[\w.-]+)/);
+    const rf = (cmd || '').match(/(?:--repo|-R)[=\s]+["']?([\w.-]+\/[\w.-]+)/);
     const repo = m[1] || (rf && rf[1]);
     if (repo) ev.url = `https://github.com/${repo}/pull/${m[2]}`;
     return ev;
@@ -303,8 +303,14 @@ function main() {
         const pr = parseGhPr(inp.command || '', out); // null unless it's a create/merge
         if (pr) append(withItem(pr));
       }
-      const text = (inp.command || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-      if (text) append(withItem({ type: 'tool', tool: 'run', text }));
+      const full = (inp.command || '').replace(/\s+/g, ' ').trim();
+      if (full) {
+        const ev = { type: 'tool', tool: 'run', text: full.slice(0, 120) };
+        // The display text is truncated; for a gh pr command keep the full command
+        // too, so the PR poller can find a PR ref that sits past 120 chars.
+        if (full.length > 120 && /\bgh\b[^\n]*\bpr\b/.test(full)) ev.cmd = full.slice(0, 500);
+        append(withItem(ev));
+      }
     }
     return;
   }

@@ -125,7 +125,7 @@ function sessionPrNumbers() {
   // if the repo is unknown we can't verify, so it's skipped (never assumed current).
   const lc = s => (s || '').toLowerCase();
   const sameRepo = r => r == null ? true : (flags.repo ? lc(r) === lc(flags.repo) : false);
-  const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)[=\s]+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
+  const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)[=\s]+["']?([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   const HASH = /#(\d{1,6})\b/g; // single-digit PR refs (#4) are valid on new repos
   for (const line of data.split('\n')) {
@@ -138,8 +138,10 @@ function sessionPrNumbers() {
     const text = [ev.text, ev.command, ev.message, ev.title].filter(Boolean).join(' ');
     let m; while ((m = URL.exec(text))) { if (sameRepo(m[1])) set.add(Number(m[2])); }
     // `gh pr <verb> N` commands — skip a command aimed at another repo via
-    // --repo/-R, else its number would be re-scoped to the current repo.
-    for (const field of [ev.command, ev.text]) {
+    // --repo/-R, else its number would be re-scoped to the current repo. Prefer
+    // ev.cmd (the full, untruncated command the hook stores for gh pr lines) so a
+    // PR ref past the 120-char display truncation in ev.text isn't lost.
+    for (const field of [ev.command, ev.cmd, ev.text]) {
       if (!field || !sameRepo(cmdRepo(field))) continue;
       const n = ghCmdPr(field); if (n != null) set.add(n);
     }
