@@ -52,24 +52,36 @@ function urlRepo(s) {
   return m ? m[1] : null;
 }
 
-// The PR number a `gh pr <verb> … N` command targets. Only verbs that take a PR
-// argument (not list/create/status). Tolerates flags between the verb and the
-// positional (`gh pr view --json … 123`, `gh pr checks --watch 123`) and ignores
-// numbers embedded in flag values by taking the last bare number / #N / PR URL.
+// Boolean (value-less) flags for the gh pr verbs below. Every other `--flag`
+// consumes the next token as its value, so we skip that token — otherwise a
+// numeric value like `--interval 10` would be mistaken for the PR positional.
+const GH_BOOL = new Set([
+  '-w', '--web', '--watch', '--fail-fast', '--required', '--comments', '--name-only',
+  '--patch', '--auto', '--disable-auto', '-m', '--merge', '-r', '--rebase', '-s',
+  '--squash', '-d', '--delete-branch', '--admin', '--undo', '--draft', '--dry-run',
+]);
+
+// The PR number a `gh pr <verb> … N` command targets — the first positional PR
+// ref (number, #N, or PR URL) after the verb. Only verbs that take a PR argument
+// (not list/create/status). Flags between the verb and the positional are skipped
+// along with their values, so `gh pr view --json … 123` finds 123 while
+// `gh pr checks --interval 10` (no PR) and `gh pr list --limit 100` find nothing.
 function ghCmdPr(cmd) {
   const toks = (cmd || '').split(/\s+/);
-  let best = null;
   for (let i = 0; i + 2 < toks.length; i++) {
     if (toks[i] !== 'gh' || toks[i + 1] !== 'pr') continue;
     if (!/^(view|checks|merge|close|reopen|ready|edit|diff|comment|review)$/.test(toks[i + 2])) continue;
     for (let j = i + 3; j < toks.length; j++) {
       const t = toks[j];
-      if (t.startsWith('-')) continue; // a flag — not the PR positional
+      if (t.startsWith('-')) {
+        if (!t.includes('=') && !GH_BOOL.has(t) && j + 1 < toks.length && !toks[j + 1].startsWith('-')) j++;
+        continue; // skip the flag (and its value, consumed above)
+      }
       const m = t.match(/^#?(\d+)$/) || t.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)$/);
-      if (m) best = Number(m[1]);
+      return m ? Number(m[1]) : null; // first positional decides; a branch name → no number
     }
   }
-  return best;
+  return null;
 }
 
 // The PR numbers THIS session actually surfaced, harvested from its own tape:
@@ -85,7 +97,7 @@ function sessionPrNumbers() {
   const sameRepo = r => !r || !flags.repo || r === flags.repo;
   const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)\s+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
-  const HASH = /#(\d{2,6})\b/g;
+  const HASH = /#(\d{1,6})\b/g; // single-digit PR refs (#4) are valid on new repos
   for (const line of data.split('\n')) {
     if (!line) continue;
     let ev; try { ev = JSON.parse(line); } catch { continue; }
