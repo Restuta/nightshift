@@ -71,7 +71,9 @@ function sessionPrNumbers() {
     let ev; try { ev = JSON.parse(line); } catch { continue; }
     if (ev.type === 'pr' && ev.number != null && sameRepo(urlRepo(ev.url))) set.add(Number(ev.number));
     if (ev.type === 'ci' && ev.pr != null) set.add(Number(ev.pr));
-    const text = [ev.text, ev.command, ev.message].filter(Boolean).join(' ');
+    // Include card titles: a session often surfaces a PR as a prompt/title like
+    // "Review https://github.com/o/r/pull/123" (URL) or "gates #436" (bare ref).
+    const text = [ev.text, ev.command, ev.message, ev.title].filter(Boolean).join(' ');
     let m;
     while ((m = URL.exec(text))) { if (sameRepo(m[1])) set.add(Number(m[2])); }
     while ((m = GH.exec(text))) set.add(Number(m[1]));
