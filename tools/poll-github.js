@@ -36,7 +36,9 @@ for (let i = 0; i < argv.length; i++) {
   else if (argv[i] === '--worker') flags.worker = true;
 }
 const posInt = (n, dflt) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt);
-const LOG = flags.log || path.join('.nightshift', 'events.jsonl');
+// Absolute, so the worker registry key is cwd-independent — two repos invoking
+// with a relative --log must not collide (dedupe/--stop hitting the wrong worker).
+const LOG = path.resolve(flags.log || path.join('.nightshift', 'events.jsonl'));
 const INTERVAL = posInt(flags.interval, 30) * 1000;
 const LIMIT = posInt(flags.limit, 100);
 
@@ -232,14 +234,14 @@ function rollupCi(checks) {
 // on the next tick instead of being lost.
 const known = new Map(); // number → {state, ci}
 let offset = 0;
-let sawAnyPr = false; // true once the tape has surfaced at least one PR (reset on log replace)
+let sawOpenPr = false; // true once a PR was seen OPEN during THIS run (reset on log replace)
 
 function refreshKnown() {
   let fd;
   try { fd = fs.openSync(LOG, 'r'); } catch { return; } // no log yet
   try {
     const size = fs.fstatSync(fd).size;
-    if (size < offset) { known.clear(); offset = 0; sawAnyPr = false; } // log truncated/replaced (e.g. /nightshift reset) → fresh tape
+    if (size < offset) { known.clear(); offset = 0; sawOpenPr = false; } // log truncated/replaced (e.g. /nightshift reset) → fresh tape
     if (size === offset) return;
     const buf = Buffer.alloc(size - offset);
     fs.readSync(fd, buf, 0, buf.length, offset);
@@ -296,7 +298,6 @@ function tick() {
     // Session-scoped: refresh ONLY the PRs this tape surfaced. No repo-wide list,
     // so a repo with hundreds of open PRs can't flood a single session's board.
     const nums = [...sessionPrNumbers()];
-    if (nums.length) sawAnyPr = true;
     for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr); }
     return nums.filter(n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || ''); }).length;
   }
@@ -337,19 +338,20 @@ if (flags.worker) {
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
   process.on('exit', cleanup);
 }
-tick();
+if (tick() > 0) sawOpenPr = true;
 console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG}`);
 let doneTicks = 0, lifeTicks = 0;
 const MAX_LIFE = Math.max(60, Math.round((4 * 3600 * 1000) / INTERVAL)); // ~4h orphan cap
 const timer = setInterval(() => {
   lifeTicks++;
   const openCount = tick();
+  if (openCount > 0) sawOpenPr = true;
   if (flags.worker && flags.known) {
-    // Retire once the WORK is done — PRs were surfaced and all are now merged/
-    // closed. Before any PR appears (a fresh session) keep polling: a PR may be
-    // created later. /nightshift off stops us; MAX_LIFE is a backstop for a
-    // session abandoned without `off`.
-    doneTicks = (sawAnyPr && openCount === 0) ? doneTicks + 1 : 0;
+    // Retire once the WORK is done — a PR was seen OPEN during THIS run and all are
+    // now merged/closed. Historical (already-merged) refs from a Continue'd tape
+    // don't count, so we keep polling for a PR created later. /nightshift off stops
+    // us; MAX_LIFE backstops a session abandoned without `off`.
+    doneTicks = (sawOpenPr && openCount === 0) ? doneTicks + 1 : 0;
     if (doneTicks >= 6 || lifeTicks >= MAX_LIFE) { clearInterval(timer); process.exit(0); }
   }
 }, INTERVAL);
