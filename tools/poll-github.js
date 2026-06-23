@@ -63,6 +63,7 @@ function sessionPrNumbers() {
   const set = new Set();
   let data; try { data = fs.readFileSync(LOG, 'utf8'); } catch { return set; }
   const sameRepo = r => !r || !flags.repo || r === flags.repo;
+  const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)\s+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   const GH = /\bgh\s+pr\s+\w+\s+#?(\d+)/g;
   const HASH = /#(\d{2,6})\b/g;
@@ -71,12 +72,17 @@ function sessionPrNumbers() {
     let ev; try { ev = JSON.parse(line); } catch { continue; }
     if (ev.type === 'pr' && ev.number != null && sameRepo(urlRepo(ev.url))) set.add(Number(ev.number));
     if (ev.type === 'ci' && ev.pr != null) set.add(Number(ev.pr));
-    // Include card titles: a session often surfaces a PR as a prompt/title like
-    // "Review https://github.com/o/r/pull/123" (URL) or "gates #436" (bare ref).
+    // PR URLs (repo-scoped) anywhere, incl. card titles like
+    // "Review https://github.com/o/r/pull/123".
     const text = [ev.text, ev.command, ev.message, ev.title].filter(Boolean).join(' ');
-    let m;
-    while ((m = URL.exec(text))) { if (sameRepo(m[1])) set.add(Number(m[2])); }
-    while ((m = GH.exec(text))) set.add(Number(m[1]));
+    let m; while ((m = URL.exec(text))) { if (sameRepo(m[1])) set.add(Number(m[2])); }
+    // `gh pr <verb> #N` commands — but skip a command explicitly aimed at another
+    // repo via --repo/-R, else its number would be re-scoped to the current repo.
+    for (const field of [ev.command, ev.text]) {
+      if (!field || !sameRepo(cmdRepo(field))) continue;
+      let g; while ((g = GH.exec(field))) set.add(Number(g[1]));
+    }
+    // Bare #N in a human card title is a current-repo ref.
     if (ev.type === 'item' && ev.title) { while ((m = HASH.exec(ev.title))) set.add(Number(m[1])); }
   }
   return set;

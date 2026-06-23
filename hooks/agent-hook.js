@@ -139,9 +139,14 @@ function parseGhPr(cmd, out) {
   }
   if (/\bgh\s+pr\s+merge\b/.test(cmd)) {
     // gh's success line is "Merged pull request owner/repo#N (...)" (older builds
-    // omit the owner/repo); allow that optional prefix before #N.
-    const m = (out || '').match(/Merged pull request\s+(?:[\w.\-/]+)?#(\d+)/i);
-    return m ? { type: 'pr', number: Number(m[1]), state: 'merged' } : null;
+    // omit owner/repo). Keep the owner/repo as a URL when present — a cross-repo
+    // merge must carry its repo, or the poller would re-scope the bare number to
+    // the current repo and record the wrong PR.
+    const m = (out || '').match(/Merged pull request\s+([\w.-]+\/[\w.-]+)?#(\d+)/i);
+    if (!m) return null;
+    const ev = { type: 'pr', number: Number(m[2]), state: 'merged' };
+    if (m[1]) ev.url = `https://github.com/${m[1]}/pull/${m[2]}`;
+    return ev;
   }
   return null;
 }
