@@ -86,9 +86,12 @@ function ghCmdPr(cmd) {
     let j = i + 1;
     while (j < toks.length && toks[j].startsWith('-')) { if (valueFlag(toks[j], toks[j + 1])) j++; j++; }
     if (toks[j] !== 'pr') continue;
-    const verb = toks[j + 1];
+    // skip flags between `pr` and the verb too (`gh pr -R owner/repo view N`)
+    let v = j + 1;
+    while (v < toks.length && toks[v].startsWith('-')) { if (valueFlag(toks[v], toks[v + 1])) v++; v++; }
+    const verb = toks[v];
     if (!/^(view|checks|checkout|merge|close|reopen|ready|edit|diff|comment|review)$/.test(verb || '')) continue;
-    for (let k = j + 2; k < toks.length; k++) {
+    for (let k = v + 1; k < toks.length; k++) {
       const t = toks[k];
       if (t.startsWith('-')) {
         if (valueFlag(t, toks[k + 1])) k++;

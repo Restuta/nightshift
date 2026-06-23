@@ -129,6 +129,26 @@ function promptTitle(p) {
   return line.replace(/^["'>`*•\-\s]+/, '').slice(0, 64).trim();
 }
 
+// The `gh pr <verb>` a command runs, tolerant of flag PLACEMENT — gh accepts the
+// repo flag before or after `pr` (`gh -R o/r pr view`, `gh pr -R o/r view`), so we
+// can't rely on adjacency or regex. Tokenize: find gh → pr → the verb, skipping
+// flags (and a space-form flag's value, unless that value is itself the verb, so a
+// boolean flag right before the verb doesn't swallow it).
+const GH_VERBS = /^(create|merge|view|checks|checkout|close|reopen|ready|edit|diff|comment|review|list|status)$/;
+function ghPrVerb(cmd) {
+  const t = (cmd || '').split(/\s+/);
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    if (t[i].startsWith('-')) {
+      if (!t[i].includes('=') && t[i + 1] && !t[i + 1].startsWith('-') && !GH_VERBS.test(t[i + 1])) i++;
+      continue;
+    }
+    out.push(t[i]);
+  }
+  const k = out.indexOf('pr');
+  return k > 0 && out[k - 1] === 'gh' ? (out[k + 1] || null) : null;
+}
+
 // PRs the session itself touches via gh, so the board shows THIS session's PRs
 // (not the repo's hundreds). State must be a recorded FACT, never an assumption:
 //   - create: gh prints the new PR's URL on success → that's the number, state open.
@@ -136,10 +156,8 @@ function promptTitle(p) {
 //     or failed merges); only the success line "Merged pull request #N" is proof.
 // Anything else (view/list/checks) is left to the poller, which reads gh state.
 function parseGhPr(cmd, out) {
-  // The caller already confirmed a `gh … pr create|merge` invocation; match the
-  // subcommand without requiring `gh pr` to be adjacent, so gh's global repo flag
-  // (`gh -R owner/repo pr create …`) is tolerated.
-  if (/\bpr\s+create\b/.test(cmd)) {
+  const verb = ghPrVerb(cmd);
+  if (verb === 'create') {
     if (/--dry-run\b/.test(cmd)) return null; // prints the would-be PR, creates nothing
     // gh prints the created PR URL as the LAST line of stdout on success. Match
     // only that line (not the whole output / command) so a URL quoted in the PR
@@ -149,7 +167,7 @@ function parseGhPr(cmd, out) {
     const m = last.match(/(?:https?:\/\/)?(github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))/);
     return m ? { type: 'pr', number: Number(m[2]), url: 'https://' + m[1], state: 'open' } : null;
   }
-  if (/\bpr\s+merge\b/.test(cmd)) {
+  if (verb === 'merge') {
     // gh's success line is "Merged pull request owner/repo#N (...)" (older builds
     // omit owner/repo). Keep the owner/repo as a URL when present — a cross-repo
     // merge must carry its repo, or the poller would re-scope the bare number to
@@ -273,8 +291,8 @@ function main() {
       // them. Don't `return`: fall through to the activity event below so the
       // session wakes (the reducer's pr case doesn't, but a tool event does — a
       // gh pr run right after an approval prompt would otherwise stay in ATTENTION).
-      if (CENTRAL && agent === 'claude' && /\bgh\b[^\n]*\bpr\s+(?:create|merge)\b/.test(inp.command || '')) {
-        const pr = parseGhPr(inp.command || '', out);
+      if (CENTRAL && agent === 'claude' && /\bgh\b[^\n]*\bpr\b/.test(inp.command || '')) {
+        const pr = parseGhPr(inp.command || '', out); // null unless it's a create/merge
         if (pr) append(withItem(pr));
       }
       const text = (inp.command || '').replace(/\s+/g, ' ').trim().slice(0, 120);
