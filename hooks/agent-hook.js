@@ -129,8 +129,11 @@ function promptTitle(p) {
 // Anything else (view/list/checks) is left to the poller, which reads gh state.
 function parseGhPr(cmd, out) {
   if (/\bgh\s+pr\s+create\b/.test(cmd)) {
-    const m = `${out}\n${cmd}`.match(/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/);
-    return m ? { type: 'pr', number: Number(m[1]), url: m[0], state: 'open' } : null;
+    // gh prints the full https URL; match it scheme-optional but always store an
+    // absolute URL — the board uses ev.url directly as the link target, so a
+    // scheme-less "github.com/…" would resolve under the nightshift host.
+    const m = `${out}\n${cmd}`.match(/(?:https?:\/\/)?(github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))/);
+    return m ? { type: 'pr', number: Number(m[2]), url: 'https://' + m[1], state: 'open' } : null;
   }
   if (/\bgh\s+pr\s+merge\b/.test(cmd)) {
     const m = (out || '').match(/Merged pull request #?(\d+)/i);
