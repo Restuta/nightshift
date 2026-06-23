@@ -30,6 +30,15 @@ const LOG = flags.log || path.join('.nightshift', 'events.jsonl');
 const INTERVAL = posInt(flags.interval, 30) * 1000;
 const LIMIT = posInt(flags.limit, 100);
 
+// --known scopes refs to a repo. Resolve the cwd's repo when --repo wasn't given,
+// so `gh pr view <n>` and the repo filter agree. If it can't be resolved, repo-
+// qualified refs (URLs, -R commands) are skipped rather than assumed current —
+// recording another repo's PR #n as ours would corrupt the tape.
+if (flags.known && !flags.repo) {
+  try { flags.repo = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner'], { encoding: 'utf8' })).nameWithOwner; }
+  catch { /* leave unset → repo-qualified refs are skipped below */ }
+}
+
 function ghPrs() {
   const args = ['pr', 'list', '--state', 'all', '--limit', String(LIMIT),
     '--json', 'number,title,url,state,statusCheckRollup'];
@@ -84,7 +93,7 @@ function ghCmdPr(cmd) {
       const num = t.match(/^#?(\d+)$/);
       if (num) return Number(num[1]);
       const u = t.match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/);
-      if (u) return (!flags.repo || u[1] === flags.repo) ? Number(u[2]) : null;
+      if (u) return (flags.repo && u[1] === flags.repo) ? Number(u[2]) : null;
       return null;
     }
   }
@@ -101,7 +110,10 @@ function ghCmdPr(cmd) {
 function sessionPrNumbers() {
   const set = new Set();
   let data; try { data = fs.readFileSync(LOG, 'utf8'); } catch { return set; }
-  const sameRepo = r => !r || !flags.repo || r === flags.repo;
+  // A repo-less ref (bare #N / number) is current-repo. A repo-qualified ref
+  // counts only if it matches --repo; if the repo is unknown we can't verify, so
+  // it's skipped (never assumed current).
+  const sameRepo = r => r == null ? true : (flags.repo ? r === flags.repo : false);
   const cmdRepo = s => { const m = (s || '').match(/(?:--repo|-R)[=\s]+([\w.-]+\/[\w.-]+)/); return m ? m[1] : null; };
   const URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   const HASH = /#(\d{1,6})\b/g; // single-digit PR refs (#4) are valid on new repos
