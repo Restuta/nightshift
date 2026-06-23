@@ -49,14 +49,21 @@ const alivePid = pid => { try { process.kill(pid, 0); return true; } catch { ret
 const readState = () => { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } };
 const writeState = s => { fs.mkdirSync(NS_HOME, { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s) + '\n'); };
 
+const sleepMs = ms => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB */ } };
 if (flags.status) { const e = readState()[LOG]; process.stdout.write(e && e.pid && alivePid(e.pid) ? 'live\n' : 'off\n'); process.exit(0); }
 if (flags.stop) {
-  const s = readState();
-  for (const [key, e] of Object.entries(s)) {
+  // Kill, then WAIT for the worker to actually exit before returning — reset/off
+  // rotates $LOG right after, and a worker still inside a synchronous gh/toast poll
+  // would otherwise wake up and append stale PR/CI events into the fresh tape.
+  for (const [key, e] of Object.entries(readState())) {
     if (flags.log && key !== LOG) continue;
-    if (e && e.pid && alivePid(e.pid)) { try { process.kill(e.pid); } catch { /* gone */ } }
-    delete s[key];
+    if (!(e && e.pid && alivePid(e.pid))) continue;
+    try { process.kill(e.pid, 'SIGTERM'); } catch { /* gone */ }
+    for (let i = 0; i < 20 && alivePid(e.pid); i++) sleepMs(100);        // up to ~2s graceful
+    if (alivePid(e.pid)) { try { process.kill(e.pid, 'SIGKILL'); } catch { /* gone */ } for (let i = 0; i < 20 && alivePid(e.pid); i++) sleepMs(50); }
   }
+  const s = readState(); // re-read: workers' own SIGTERM cleanup ran during the wait
+  for (const k of Object.keys(s)) { if (!flags.log || k === LOG) delete s[k]; }
   writeState(s);
   process.exit(0);
 }
@@ -118,7 +125,7 @@ function toastInfo(n) {
 // count still means fail; only genuinely indeterminate states return null (→ gh).
 function toastCi(d) {
   const base = (((d && d.status) || '') + '').toLowerCase().split(':')[0];
-  if (/^(ready|pass|passing|clean|merged)$/.test(base)) return 'pass';
+  if (/^(ready|pass|passing|clean|merged|acknowledged)$/.test(base)) return 'pass';
   if (/^(pending|in_progress|active|running|blocking|awaiting_review|head_changed)$/.test(base)) return 'pending';
   if (/^(needs_fix|blocked|github_blocked|draft|unknown_reviewer|degraded|conflicting|dirty|unstable|fail|failing|error|action_required)$/.test(base)) return 'fail';
   if (d && d.counts && d.counts.blocking_items > 0) return 'fail'; // unknown word but explicitly blocking
