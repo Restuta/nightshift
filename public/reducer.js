@@ -169,6 +169,10 @@ export function reduce(state, ev) {
         return {
           text: td.text, done: status === 'completed', status,
           startedAt: tm && tm.startedAt, doneAt: tm && tm.doneAt, firstSeenAt: tm && tm.firstSeenAt,
+          // Real duration carried by the producer (task tools) wins over the
+          // snapshot-delta estimate — a backfill folds the whole plan at once, so
+          // the delta would read 0.
+          elapsedMs: td.elapsedMs,
         };
       });
       state.todos = todos;

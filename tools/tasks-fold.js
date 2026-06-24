@@ -23,6 +23,10 @@ function applyLine(ev, state) {
   const msg = ev.message;
   if (!msg || !Array.isArray(msg.content)) return false;
   if (!state.pending) state.pending = {};
+  // Every transcript line is timestamped, so we record when each task was created /
+  // started / finished and can surface a REAL per-step duration — otherwise a
+  // backfill (all tasks folded into one snapshot) would show 0s for everything.
+  const ts = ev.timestamp ? Date.parse(ev.timestamp) : null;
   let changed = false;
   for (const b of msg.content) {
     if (!b) continue;
@@ -31,7 +35,14 @@ function applyLine(ev, state) {
     } else if (b.type === 'tool_use' && b.name === 'TaskUpdate' && b.input) {
       const t = state.tasks.find(x => x.id === String(b.input.taskId));
       if (t) {
-        if (b.input.status && t.status !== b.input.status) { t.status = b.input.status; changed = true; }
+        if (b.input.status && t.status !== b.input.status) {
+          if (b.input.status === 'in_progress' && t.startedAt == null) t.startedAt = ts;
+          if (b.input.status === 'completed' && t.doneAt == null) {
+            t.doneAt = ts;
+            if (t.startedAt == null) t.startedAt = t.createdAt;  // never marked in_progress → measure from create
+          }
+          t.status = b.input.status; changed = true;
+        }
         if (b.input.subject && t.subject !== b.input.subject) { t.subject = b.input.subject; changed = true; }
       }
     } else if (b.type === 'tool_result' && b.tool_use_id != null && state.pending[b.tool_use_id] !== undefined) {
@@ -39,7 +50,7 @@ function applyLine(ev, state) {
       const txt = typeof b.content === 'string' ? b.content : JSON.stringify(b.content || '');
       const m = /#(\d+)/.exec(txt);
       const id = m ? m[1] : String(state.tasks.reduce((a, t) => Math.max(a, +t.id || 0), 0) + 1);
-      state.tasks.push({ id, subject: state.pending[b.tool_use_id], status: 'pending' });
+      state.tasks.push({ id, subject: state.pending[b.tool_use_id], status: 'pending', createdAt: ts });
       delete state.pending[b.tool_use_id];
       changed = true;
     }
@@ -54,7 +65,13 @@ function toTodos(state) {
     type: 'todos',
     todos: state.tasks
       .filter(t => t.status !== 'deleted')
-      .map(t => ({ text: t.subject, done: t.status === 'completed', status: t.status || 'pending' })),
+      .map(t => {
+        const todo = { text: t.subject, done: t.status === 'completed', status: t.status || 'pending' };
+        // Real duration for a finished step, from the transcript timestamps.
+        const start = t.startedAt != null ? t.startedAt : t.createdAt;
+        if (todo.done && t.doneAt != null && start != null) todo.elapsedMs = Math.max(0, t.doneAt - start);
+        return todo;
+      }),
   };
 }
 

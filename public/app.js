@@ -483,11 +483,17 @@ function cardTiming(el) {
 // Per-plan-step timing: a done step shows how long it took; the running step
 // shows how long it's been in progress.
 function stepTime(t, isNow) {
-  if (t.done && t.doneAt) {
-    const s = t.startedAt || t.firstSeenAt;
-    return s ? ageText(Math.max(0, t.doneAt - s)) : '';
+  if (t.done) {
+    // Prefer the producer's real duration; fall back to the snapshot-delta estimate.
+    const d = t.elapsedMs != null
+      ? t.elapsedMs
+      : (t.doneAt && (t.startedAt || t.firstSeenAt) ? Math.max(0, t.doneAt - (t.startedAt || t.firstSeenAt)) : 0);
+    return d >= 1000 ? ageText(d) : '';   // hide 0s — a backfilled step we have no real timing for
   }
-  if (isNow && t.startedAt) return ageText(Math.max(0, vtNow() - t.startedAt));
+  if (isNow && t.startedAt) {
+    const d = Math.max(0, vtNow() - t.startedAt);
+    return d >= 1000 ? ageText(d) : '';
+  }
   return '';
 }
 
@@ -570,8 +576,12 @@ function updateCard(el, it, animate, activeId) {
     // ever-growing timer (that's what made a finished card look still-working).
     const cardDone = it.status === 'done';
     const firstOpen = it.todos.findIndex(t => !t.done);
+    const hasInProgress = it.todos.some(t => t.status === 'in_progress');
     R.tlist.innerHTML = it.todos.map((t, i) => {
-      const now = !cardDone && (t.status === 'in_progress' || (t.status == null && i === firstOpen));
+      // The live step: an explicit in_progress one, or — when the agent marks none
+      // (Claude's task tools often go pending → completed) — the first open step on
+      // the active card, so the current work always looks live, not dead.
+      const now = !cardDone && (t.status === 'in_progress' || (!hasInProgress && i === firstOpen));
       const cls = t.done ? 'done' : now ? 'now' : cardDone ? 'unfinished' : '';
       const tm = stepTime(t, now);
       return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}</li>`;
