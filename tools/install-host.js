@@ -133,6 +133,24 @@ if (REMOVE) {
 }
 
 if (!fs.existsSync(forwarder)) fail(`forwarder not found: ${forwarder}`);
+
+// Don't fight an existing :80. Most commonly that's Portless (the .localhost
+// HTTPS proxy) — in which case the right move is its own alias, not our daemon,
+// which would crash-loop trying to bind a taken port.
+try {
+  const who = execFileSync('lsof', ['-nP', '-iTCP:80', '-sTCP:LISTEN'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  if (who) {
+    const portless = /portless/i.test(who) || who.split('\n').length > 1;
+    fail(
+      `port 80 is already in use:\n${who}\n\n` +
+      (portless
+        ? 'Looks like Portless owns :80. Register the board with it instead (no sudo):\n' +
+          '  portless alias nightshift <board-port>\n  then open https://nightshift.localhost'
+        : 'Stop whatever holds :80, or use the host without a daemon.')
+    );
+  }
+} catch { /* lsof missing or nothing listening — proceed */ }
+
 writeHosts(true);
 fs.writeFileSync(PLIST, plistXml());
 try { fs.chmodSync(PLIST, 0o644); } catch { /* best effort */ }

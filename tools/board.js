@@ -55,9 +55,26 @@ function openUrl(url) {
   try { execFile(cmd, a, () => {}); } catch { /* best effort */ }
 }
 
-// If `sudo node tools/install-host.js` set up the portless host, a root daemon
-// forwards :80 → this board, so open the pretty URL with no port. Otherwise fall
-// back to localhost:<port>.
+// Prefer a pretty, no-port-to-type URL when one is available, in order:
+//   1. Portless (the .localhost HTTPS proxy) has a static alias for our port —
+//      read straight from its state files, no CLI. This is the macOS norm here.
+//   2. `sudo node tools/install-host.js` installed our own host → daemon forwards
+//      :80 to the board (install.json.host).
+//   3. plain http://localhost:<port>.
+function portlessUrl(port) {
+  try {
+    const pl = path.join(os.homedir(), '.portless');
+    const routes = JSON.parse(fs.readFileSync(path.join(pl, 'routes.json'), 'utf8'));
+    const route = routes.find(r => r.port === port && /(^|\.)nightshift\.localhost$/.test(r.hostname));
+    if (!route) return null;
+    const pport = fs.readFileSync(path.join(pl, 'proxy.port'), 'utf8').trim();
+    const tls = fs.readFileSync(path.join(pl, 'proxy.tls'), 'utf8').trim() === '1';
+    const scheme = tls ? 'https' : 'http';
+    const bare = (tls && pport === '443') || (!tls && pport === '80');
+    return `${scheme}://${route.hostname}${bare ? '' : ':' + pport}/`;
+  } catch { return null; }
+}
+
 function installedHost() {
   try { return JSON.parse(fs.readFileSync(path.join(nsHome, 'install.json'), 'utf8')).host || null; }
   catch { return null; }
@@ -65,7 +82,7 @@ function installedHost() {
 
 function urlFor(port) {
   const host = installedHost();
-  const base = host ? `http://${host}/` : `http://localhost:${port}/`;
+  const base = portlessUrl(port) || (host ? `http://${host}/` : `http://localhost:${port}/`);
   return base + (session ? `?session=${encodeURIComponent(session)}` : '');
 }
 
