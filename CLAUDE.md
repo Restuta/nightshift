@@ -60,7 +60,17 @@ including the ones building it.
   cwd, so the skill emits to / tails the right file.
 - `tools/board.js` — ensures one detached board server is running (serving
   `~/.nightshift/sessions`), reused across sessions via `~/.nightshift/board.json`;
-  prints the URL and, with `--open`, opens the browser at `?session=<slug>`.
+  prints the URL and, with `--open`, opens the browser at `?session=<slug>`. Emits
+  the portless `http://<host>` URL instead of `localhost:<port>` when a host is
+  installed (see below).
+- `tools/install-host.js` + `tools/forward80.js` — optional portless URL.
+  `sudo node tools/install-host.js` maps `nightshift.local` → loopback in
+  `/etc/hosts` and installs a root LaunchDaemon (`com.nightshift.proxy`) running
+  `forward80.js`, which forwards `127.0.0.1:80` → the board's live port (read from
+  `board.json` per connection, so it follows restarts). A forwarder — not the
+  board on :80 — so the board stays unprivileged and keeps owning its log writes
+  (root writing logs would lock out the user-level hooks). Records `host` in
+  `install.json`; `--remove` reverses /etc/hosts, the daemon, and the flag.
 - `hooks/agent-hook.js` — single hook entrypoint for BOTH agents. Codex
   implements Claude's hook contract (`~/.codex/hooks.json`; payload carries
   `session_id`, `transcript_path`, `cwd`, normalized `tool_name`), so recording

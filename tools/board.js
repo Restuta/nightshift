@@ -55,8 +55,18 @@ function openUrl(url) {
   try { execFile(cmd, a, () => {}); } catch { /* best effort */ }
 }
 
+// If `sudo node tools/install-host.js` set up the portless host, a root daemon
+// forwards :80 → this board, so open the pretty URL with no port. Otherwise fall
+// back to localhost:<port>.
+function installedHost() {
+  try { return JSON.parse(fs.readFileSync(path.join(nsHome, 'install.json'), 'utf8')).host || null; }
+  catch { return null; }
+}
+
 function urlFor(port) {
-  return `http://localhost:${port}/${session ? `?session=${encodeURIComponent(session)}` : ''}`;
+  const host = installedHost();
+  const base = host ? `http://${host}/` : `http://localhost:${port}/`;
+  return base + (session ? `?session=${encodeURIComponent(session)}` : '');
 }
 
 function done(port) {
