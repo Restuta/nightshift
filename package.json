@@ -6,6 +6,7 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/*.test.mjs",
     "demo": "node demo/generate.js && node server.js --log demo/events.jsonl",
     "import": "node tools/import-transcript.js",
     "attach": "node tools/attach.js",

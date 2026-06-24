@@ -1,0 +1,4 @@
+{
+  "type": "module",
+  "//": "public/ is browser ES modules (loaded via <script type=module>). Marking the subtree lets Node import reducer.js for tests without making the CJS server/hooks ESM."
+}

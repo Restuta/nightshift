@@ -71,6 +71,16 @@ function activeDoingItem(state) {
   return best;
 }
 
+// True when a card has a linked PR that hasn't merged/closed yet. A turn
+// boundary (Stop / next prompt) marks a card 'done', but if its PR is still
+// open the work hasn't actually shipped — defer 'done' to the PR lifecycle.
+function prStillOpen(state, it) {
+  if (!it.pr || it.pr.number == null) return false;
+  const pr = state.prs.get(it.pr.number);
+  const prState = (pr && pr.state) || it.pr.state;
+  return prState === 'open';
+}
+
 // Events usually arrive unattributed (hooks don't know which card they belong
 // to). Explicit `ev.item` wins; PR/CI events match by PR number; otherwise the
 // most recently touched item in `doing` takes them.
@@ -142,7 +152,13 @@ export function reduce(state, ev) {
         state.items.set(ev.id, it);
       }
       if (ev.title != null) it.title = ev.title;
-      if (ev.status != null && STATUSES.includes(ev.status)) it.status = ev.status;
+      if (ev.status != null && STATUSES.includes(ev.status)) {
+        // A card can't be 'done' while its PR is still open — its CI may still
+        // be running. Park it in 'pr'; the PR's own merge/close (handled below,
+        // matched by number) carries it to 'done'. Without this a turn jumps to
+        // Done the instant the agent stops talking, mid-flight work and all.
+        it.status = (ev.status === 'done' && prStillOpen(state, it)) ? 'pr' : ev.status;
+      }
       if (ev.note != null) it.note = ev.note;
       if (ev.emoji != null) it.emoji = ev.emoji;
       it.touchedAt = ev.t;
@@ -226,13 +242,27 @@ export function reduce(state, ev) {
         pr.t = ev.t;
         state.prs.set(ev.number, pr);
       }
-      // Only move a card when a PR is explicitly linked to one (ev.item) —
-      // don't hijack Codex's per-turn cards via the attribution heuristic.
-      const it = ev.item ? state.items.get(ev.item) : null;
+      // Resolve the owning card: an explicit ev.item link (set when the PR is
+      // opened), or any card that already claimed this number — so a later
+      // poller event with no item (the merge/close) still reaches the card that
+      // opened the PR and can finish it. Matching only cards that already own
+      // the number means the attribution heuristic never hijacks an unrelated
+      // card (the original ev.item-only concern).
+      let it = ev.item ? state.items.get(ev.item) : null;
+      if (!it && ev.number != null) {
+        for (const c of state.items.values()) {
+          if (c.pr && c.pr.number === ev.number) { it = c; break; }
+        }
+      }
       if (it) {
-        it.pr = { number: ev.number, state: ev.state || 'open', url: ev.url || null, title: ev.title || null };
-        if (ev.state === 'open' && (it.status === 'inbox' || it.status === 'doing')) it.status = 'pr';
-        if (ev.state === 'merged') it.status = 'done';
+        it.pr = {
+          number: ev.number,
+          state: ev.state || (it.pr && it.pr.state) || 'open',
+          url: ev.url || (it.pr && it.pr.url) || null,
+          title: ev.title || (it.pr && it.pr.title) || null,
+        };
+        if (it.pr.state === 'open' && (it.status === 'inbox' || it.status === 'doing')) it.status = 'pr';
+        if (it.pr.state === 'merged' || it.pr.state === 'closed') it.status = 'done';
         it.touchedAt = ev.t;
       }
       break;
