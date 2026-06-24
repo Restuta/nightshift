@@ -49,7 +49,9 @@ including the ones building it.
   authoritative per-session decision from the payload's `session_id`. Events go
   to central per-project logs under `~/.nightshift/sessions/` (no per-repo files,
   no git config); central mode captures commits from Bash output so attached
-  projects aren't double-counted. `--remove` undoes it all.
+  projects aren't double-counted. Under a global install, a stray local
+  `.nightshift/` in some OTHER repo is ignored (recording stays central, where the
+  board looks) — only the nightshift repo itself records locally. `--remove` undoes it all.
 - `skills/nightshift/SKILL.md` — the `/nightshift` skill (symlinked into
   `~/.claude/skills/` by the installer, so repo edits are live without a
   reinstall): toggles the per-session marker, emits the opening event, opens the
@@ -63,8 +65,9 @@ including the ones building it.
   implements Claude's hook contract (`~/.codex/hooks.json`; payload carries
   `session_id`, `transcript_path`, `cwd`, normalized `tool_name`), so recording
   is hook-based for both. `hooks/claude-hook.js` is a back-compat shim requiring
-  it. Synthesizes per-turn cards from `UserPromptSubmit` (Codex always, Claude in
-  central recordings) — skipping harness-injected turns like `<task-notification>`
+  it. Synthesizes per-turn cards from `UserPromptSubmit` (Codex always, Claude
+  everywhere except the nightshift repo itself, which self-curates via emit.js —
+  central or locally-attached) — skipping harness-injected turns like `<task-notification>`
   so they don't litter the board; maps `apply_patch`→edit, `update_plan`→todos,
   `TodoWrite`→todos, `Bash`→commit/activity and `gh pr create|merge`→pr. Claude's
   newer task tools (`TaskCreate`/`TaskUpdate`) live only in the transcript and

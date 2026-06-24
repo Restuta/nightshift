@@ -40,15 +40,29 @@ function isSubagent(h) {
   return false;
 }
 
+// The nightshift repo recorded by a global install (from ~/.nightshift/install.json),
+// or null if there's no global install. The one repo that records locally + curates
+// its own board.
+function installRepo() {
+  try { return JSON.parse(fs.readFileSync(path.join(NS_HOME, 'install.json'), 'utf8')).repo || null; }
+  catch { return null; }
+}
+
 // Where this project's events go (resolved from the SESSION's cwd, which the
 // payload carries — the hook process's own cwd is not the project dir for Codex):
 //   1. $NIGHTSHIFT_LOG                          — explicit override
-//   2. <root>/.nightshift/events.jsonl          — if attached (dir exists)
+//   2. <root>/.nightshift/events.jsonl          — local-attached mode (dir exists)
 //   3. ~/.nightshift/sessions/<slug>.jsonl      — central, for global install
-function resolveLog(root) {
+// Under a global install the local dir is honored ONLY for the nightshift repo
+// itself; a stray .nightshift/ in any other repo is ignored, because the global
+// board serves ~/.nightshift/sessions and would never show a local log (it'd look
+// empty). Without a global install, the local dir is the attach.js embed use case.
+function resolveLog(root, repo, self) {
   if (process.env.NIGHTSHIFT_LOG) return { log: process.env.NIGHTSHIFT_LOG, central: false };
   const localDir = path.join(root, '.nightshift');
-  if (fs.existsSync(localDir)) return { log: path.join(localDir, 'events.jsonl'), central: false };
+  if (fs.existsSync(localDir) && (self || !repo)) {
+    return { log: path.join(localDir, 'events.jsonl'), central: false };
+  }
   const slug = root.replace(/^\/+/, '').replace(/[^A-Za-z0-9._-]+/g, '-') || 'session';
   return { log: path.join(NS_HOME, 'sessions', `${slug}.jsonl`), central: true };
 }
@@ -240,7 +254,15 @@ function main() {
   try { hook = JSON.parse(input); } catch { return; }
 
   const root = process.env.CLAUDE_PROJECT_DIR || hook.cwd || process.cwd();
-  const { log: LOG, central: CENTRAL } = resolveLog(root);
+  // The nightshift repo hand-curates its own board via tools/emit.js, so there we
+  // must NOT auto-synthesize per-turn cards or capture its task list (it would
+  // double up), and it keeps recording to its own local log. Every OTHER recorded
+  // Claude session — central OR locally-attached — gets the full card + plan
+  // treatment. SELF = "is this session running in the nightshift repo itself" —
+  // keyed off where THIS hook lives (robust even without a global install), not on
+  // install.json. It also decides local-vs-central below.
+  const SELF = path.resolve(root) === path.resolve(__dirname, '..');
+  const { log: LOG, central: CENTRAL } = resolveLog(root, installRepo(), SELF);
 
   if (!recording(hook, CENTRAL)) return; // central session that hasn't opted in
   if (isSubagent(hook)) return;          // a subagent thread — not the parent's tape
@@ -263,8 +285,8 @@ function main() {
     // leave those alone.
     // Capture any last task change before the card is retired (a TaskUpdate with
     // no following tool call would otherwise be missed until the next turn).
-    if (CENTRAL && agent === 'claude') { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
-    if (CENTRAL && sid) {
+    if (agent === 'claude' && !SELF) { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
+    if (!SELF && sid) {
       const st = turnState(sid);
       if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
     }
@@ -279,16 +301,15 @@ function main() {
 
   if (name === 'UserPromptSubmit') {
     // Synthesize one card per prompt whenever there's no hand-curated intent
-    // layer to defer to: always for Codex (it has no intent layer at all), and
-    // for Claude in CENTRAL recordings — a globally-recorded session (e.g. some
-    // other repo) that won't call emit.js itself, so without this its board has
-    // zero cards. A locally-attached repo (CENTRAL false) keeps emitting its own
-    // PR-sized cards via emit.js, so we leave Claude alone there. Close the prior
+    // layer to defer to: always for Codex (it has no intent layer at all), and for
+    // Claude everywhere EXCEPT the nightshift repo itself (which curates its board
+    // via emit.js — see SELF). Any other Claude session, central or locally-attached,
+    // won't call emit.js, so without this its board has zero cards. Close the prior
     // turn, open a new one titled by the prompt.
     // Skip card synthesis for harness-injected turns — they'd just litter the
     // board with "<task-notification>" cards. The agent still does work in that
     // turn; it attaches to the open card (or none), and Stop retires as usual.
-    const synth = sid && isHumanPrompt(hook.prompt) && (CENTRAL || agent === 'codex');
+    const synth = sid && isHumanPrompt(hook.prompt) && (agent === 'codex' || !SELF);
     if (synth) {
       const st = turnState(sid);
       if (st.card) append({ type: 'item', id: st.card, status: 'done' });
@@ -297,6 +318,16 @@ function main() {
       append({ type: 'item', id: st.card, title: promptTitle(hook.prompt) || `turn ${st.turnN}`, status: 'doing' });
       append({ type: 'session', phase: 'resume', agent, session: sid });
       saveTurn(sid, st);
+      // Show the current task plan on the fresh card right away (Claude) — so the
+      // active card carries its checklist from the start of the turn, not only
+      // after the next task change. Pulled from the state the transcript tail keeps.
+      if (tasksFold && agent === 'claude') {
+        try {
+          const ts = JSON.parse(fs.readFileSync(path.join(TASKS, sid + '.json'), 'utf8'));
+          const todos = tasksFold.toTodos(ts);
+          if (todos.todos.length) append({ ...todos, item: st.card });
+        } catch { /* no task state yet */ }
+      }
     } else {
       append({ type: 'session', phase: 'resume', agent, session: sid });
     }
@@ -325,7 +356,7 @@ function main() {
 
     // Piggyback on this firing tool to pull in any Claude task-list changes
     // (TaskCreate/TaskUpdate live only in the transcript, not in this payload).
-    if (CENTRAL && agent === 'claude') { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
+    if (agent === 'claude' && !SELF) { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
 
     if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(tool) && inp.file_path) {
       append(withItem({ type: 'edit', path: path.relative(root, inp.file_path), tool }));
