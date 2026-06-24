@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nightshift · plan display options</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#070a13; --lane:#0c101c; --card:#131927; --card2:#171e30;
+  --line:#222b42; --line-soft:#18202f; --ink:#e6eaf2; --dim:#8b93a8; --faint:#5d6781;
+  --yellow:#d29922; --green:#4cb782; --red:#eb6e64; --blue:#4ea7fc; --merged:#a371f7;
+  --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:var(--sans);color:var(--ink);font-size:13px;
+  background:radial-gradient(1100px 460px at 70% -12%,rgba(20,29,56,.4),transparent 70%),var(--bg);
+  min-height:100vh;padding:30px 26px 60px;-webkit-font-smoothing:antialiased;
+}
+.head{max-width:1400px;margin:0 auto 22px}
+.kicker{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+h1{font-size:22px;font-weight:600;letter-spacing:-.01em;margin:6px 0 6px}
+.head p{color:var(--dim);max-width:760px;line-height:1.5}
+.head b{color:var(--ink);font-weight:500}
+
+.grid{max-width:1400px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.opt{background:var(--lane);border:1px solid var(--line-soft);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.opt-head{padding:15px 16px 13px;border-bottom:1px solid var(--line-soft)}
+.opt-tag{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--blue);margin-bottom:7px}
+.opt-tag .dot{width:7px;height:7px;border-radius:50%;background:var(--blue)}
+.opt-a .opt-tag{color:var(--green)} .opt-a .dot{background:var(--green)}
+.opt-b .opt-tag{color:var(--yellow)} .opt-b .dot{background:var(--yellow)}
+.opt-c .opt-tag{color:var(--merged)} .opt-c .dot{background:var(--merged)}
+.opt-head h2{font-size:14px;font-weight:600;margin-bottom:5px}
+.opt-head .desc{color:var(--dim);font-size:12px;line-height:1.45}
+.stage{padding:14px 14px 16px;flex:1;display:flex;flex-direction:column;gap:10px}
+.stage .frame-label{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin:2px 2px -2px}
+
+/* cards */
+.card{background:var(--card);border:1px solid var(--line-soft);border-radius:8px;padding:10px 11px}
+.card.active{border-left:2px solid var(--blue);box-shadow:0 0 0 1px #4ea7fc22}
+.card .cid{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.card .cid .id{font-family:var(--mono);font-size:10px;letter-spacing:.03em;text-transform:uppercase;color:var(--faint)}
+.card .cid .age{font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.card .title{font-size:12.5px;font-weight:500;line-height:1.4}
+.pills{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.pill{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border:1px solid var(--line);border-radius:99px;font-size:10.5px;color:var(--dim)}
+.pill b{font-family:var(--mono);font-weight:500;font-size:10px}
+.pill .a{color:var(--green)} .pill .d{color:var(--red)}
+.pill.pr{color:var(--merged);border-color:#a371f733}
+.pill.pr .dot{width:6px;height:6px;border-radius:50%;background:var(--merged)}
+.muted{color:var(--faint);font-size:11px;font-style:italic;padding:2px 2px}
+
+/* plan list */
+.plan{margin-top:9px}
+.plan.standalone{margin-top:0}
+.plan .pl-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}
+.plan .pl-head .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.plan .frac{font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+.bar{height:3px;background:#1b2236;border-radius:2px;overflow:hidden;margin-bottom:9px}
+.bar i{display:block;height:100%;background:var(--green);border-radius:2px}
+ul{list-style:none}
+.t{display:flex;gap:8px;align-items:flex-start;padding:3px 0;font-size:11.5px;line-height:1.35}
+.t .mk{flex:none;width:12px;height:12px;border-radius:50%;margin-top:1px;border:1.4px solid var(--faint)}
+.t.done .mk{background:var(--green);border-color:var(--green);opacity:.8}
+.t.now .mk{border-color:var(--yellow);border-style:dashed}
+.t.done span{color:var(--faint);text-decoration:line-through;text-decoration-color:#5d678166}
+.t.now span{color:var(--ink)}
+.t span{color:var(--dim)}
+.collapsed{font-size:10.5px;color:var(--faint);font-family:var(--mono);padding:4px 0 2px;display:flex;align-items:center;gap:6px}
+.collapsed::before{content:'';flex:1;height:1px;background:var(--line-soft)}
+.collapsed::after{content:'';flex:1;height:1px;background:var(--line-soft)}
+
+/* sidebar panel (option A) */
+.panel{background:var(--card);border:1px solid var(--line-soft);border-radius:8px;padding:11px 12px}
+.panel .ph{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin-bottom:9px;display:flex;justify-content:space-between}
+.prrow{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:11px}
+.prrow .num{font-family:var(--mono);font-size:10px;color:var(--faint);width:34px}
+.prrow .st{width:7px;height:7px;border-radius:50%;background:var(--merged);flex:none}
+.prrow .ti{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.foot{max-width:1400px;margin:20px auto 0;display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.pro{padding:0 4px}
+.pro .row{display:flex;gap:8px;font-size:11.5px;line-height:1.5;color:var(--dim);padding:2px 0}
+.pro .row .s{flex:none;width:13px}
+.pro .plus{color:var(--green)} .pro .minus{color:var(--red)}
+.pick{max-width:1400px;margin:26px auto 0;text-align:center;color:var(--dim);font-size:13px}
+.pick b{color:var(--ink)}
+.key{font-family:var(--mono);background:var(--card);border:1px solid var(--line);border-radius:5px;padding:2px 8px;color:var(--ink)}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <div class="kicker">nightshift · decision</div>
+  <h1>How should the plan show on the board?</h1>
+  <p>The agent keeps <b>one cumulative to-do list</b> for the whole session — right now it's
+  16 items, 14 done across earlier phases, 2 still open. The board pins that whole list to
+  the active turn (turn-9), which is why turn-9 looked like it had "a bunch of old items."
+  Here are three ways to render it, using your real session data. Pick one.</p>
+</div>
+
+<div class="grid">
+
+  <!-- OPTION A -->
+  <section class="opt opt-a">
+    <div class="opt-head">
+      <div class="opt-tag"><i class="dot"></i>OPTION A</div>
+      <h2>Session-level plan panel</h2>
+      <div class="desc">The plan leaves the cards entirely and lives in the sidebar, next to PRs.
+      Turn cards show only their own prompt + edits + PRs.</div>
+    </div>
+    <div class="stage">
+      <div class="frame-label">turns</div>
+      <div class="card active">
+        <div class="cid"><span class="id">turn-9</span><span class="age">now</span></div>
+        <div class="title">ok work on the next phase then, get it done, report findings</div>
+        <div class="pills">
+          <span class="pill"><b class="a">+418</b> <b class="d">−96</b></span>
+          <span class="pill pr"><i class="dot"></i><b>#386 merged</b></span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="cid"><span class="id">turn-8</span><span class="age">38m</span></div>
+        <div class="title">maybe I am dense but I struggle to see the clear progress…</div>
+        <div class="pills"><span class="pill pr"><i class="dot"></i><b>#383 merged</b></span></div>
+      </div>
+      <div class="frame-label">sidebar</div>
+      <div class="panel">
+        <div class="ph"><span>Plan</span><span class="frac">14 / 16</span></div>
+        <div class="bar"><i style="width:87.5%"></i></div>
+        <ul>
+          <li class="t done"><i class="mk"></i><span>Assess GRADE evidence-grading engine</span></li>
+          <li class="t done"><i class="mk"></i><span>PR A: flag /creators out of public surface</span></li>
+          <li class="t done"><i class="mk"></i><span>Run benchmark (Opus 4.8) on gold set</span></li>
+          <li class="t now"><i class="mk"></i><span>PR C: fix release-ready gate semantics</span></li>
+          <li class="t now"><i class="mk"></i><span>Write head-to-head scoreboard + fold into report</span></li>
+        </ul>
+        <div class="collapsed">11 more done</div>
+      </div>
+      <div class="panel">
+        <div class="ph"><span>Pull requests</span><span class="frac">5 merged</span></div>
+        <div class="prrow"><span class="num">#386</span><i class="st"></i><span class="ti">Run evidence-pipeline benchmark</span></div>
+        <div class="prrow"><span class="num">#383</span><i class="st"></i><span class="ti">Report: done/next/future tracking</span></div>
+        <div class="prrow"><span class="num">#382</span><i class="st"></i><span class="ti">Bring systems-review current</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- OPTION B -->
+  <section class="opt opt-b">
+    <div class="opt-head">
+      <div class="opt-tag"><i class="dot"></i>OPTION B</div>
+      <h2>Hide done items on cards</h2>
+      <div class="desc">Plan stays on the active card, but only open items show — the long-completed
+      ones are collapsed. Smallest change.</div>
+    </div>
+    <div class="stage">
+      <div class="frame-label">turns</div>
+      <div class="card active">
+        <div class="cid"><span class="id">turn-9</span><span class="age">now</span></div>
+        <div class="title">ok work on the next phase then, get it done, report findings</div>
+        <div class="pills">
+          <span class="pill"><b class="a">+418</b> <b class="d">−96</b></span>
+          <span class="pill pr"><i class="dot"></i><b>#386 merged</b></span>
+        </div>
+        <div class="plan">
+          <div class="pl-head"><span class="lbl">Plan</span><span class="frac">14 / 16</span></div>
+          <div class="bar"><i style="width:87.5%"></i></div>
+          <ul>
+            <li class="t now"><i class="mk"></i><span>PR C: fix release-ready gate semantics</span></li>
+            <li class="t now"><i class="mk"></i><span>Write head-to-head scoreboard + fold into report</span></li>
+          </ul>
+          <div class="collapsed">14 completed hidden</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="cid"><span class="id">turn-8</span><span class="age">38m</span></div>
+        <div class="title">maybe I am dense but I struggle to see the clear progress…</div>
+        <div class="pills"><span class="pill pr"><i class="dot"></i><b>#383 merged</b></span></div>
+      </div>
+      <div class="card">
+        <div class="cid"><span class="id">turn-7</span><span class="age">1h 2m</span></div>
+        <div class="title">update u.bul.sh/a/rh-pipeline-report with what shipped</div>
+        <div class="pills"><span class="pill pr"><i class="dot"></i><b>#382 merged</b></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- OPTION C -->
+  <section class="opt opt-c">
+    <div class="opt-head">
+      <div class="opt-tag"><i class="dot"></i>OPTION C</div>
+      <h2>Per-turn delta</h2>
+      <div class="desc">Each card shows only the items that changed during that turn — what it
+      started or finished. Most precise, most moving parts.</div>
+    </div>
+    <div class="stage">
+      <div class="frame-label">turns</div>
+      <div class="card active">
+        <div class="cid"><span class="id">turn-9</span><span class="age">now</span></div>
+        <div class="title">ok work on the next phase then, get it done, report findings</div>
+        <div class="pills">
+          <span class="pill"><b class="a">+418</b> <b class="d">−96</b></span>
+          <span class="pill pr"><i class="dot"></i><b>#386 merged</b></span>
+        </div>
+        <div class="plan">
+          <div class="pl-head"><span class="lbl">This turn</span></div>
+          <ul>
+            <li class="t done"><i class="mk"></i><span>Run benchmark (Opus 4.8) on gold set</span></li>
+            <li class="t done"><i class="mk"></i><span>Verify citations + score the run</span></li>
+            <li class="t now"><i class="mk"></i><span>Write head-to-head scoreboard</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="card">
+        <div class="cid"><span class="id">turn-8</span><span class="age">38m</span></div>
+        <div class="title">maybe I am dense but I struggle to see the clear progress…</div>
+        <div class="pills"><span class="pill pr"><i class="dot"></i><b>#383 merged</b></span></div>
+        <div class="plan">
+          <div class="pl-head"><span class="lbl">This turn</span></div>
+          <ul>
+            <li class="t done"><i class="mk"></i><span>Map data state, ingestion cost &amp; blind spots</span></li>
+            <li class="t done"><i class="mk"></i><span>Compile HTML report + /discuss with codex</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="foot">
+  <div class="pro opt-a">
+    <div class="row"><span class="s plus">+</span> Nothing session-scoped lives on a turn — kills the whole class of bug.</div>
+    <div class="row"><span class="s plus">+</span> One obvious home for "where's the plan at?"</div>
+    <div class="row"><span class="s minus">–</span> New sidebar panel to build; cards get quieter.</div>
+  </div>
+  <div class="pro opt-b">
+    <div class="row"><span class="s plus">+</span> Tiny change; removes exactly the clutter you flagged.</div>
+    <div class="row"><span class="s minus">–</span> Plan still tied to one turn — "where it lives" can still feel arbitrary.</div>
+  </div>
+  <div class="pro opt-c">
+    <div class="row"><span class="s plus">+</span> Each turn reads like a changelog of itself.</div>
+    <div class="row"><span class="s minus">–</span> Relies on per-item timing heuristics — the same machinery that's misfired before.</div>
+  </div>
+</div>
+
+<div class="pick">
+  Tell me <b>A</b>, <b>B</b>, or <b>C</b> — or mix (e.g. "A, and keep a one-line plan summary on the active card").
+</div>
+
+</body>
+</html>

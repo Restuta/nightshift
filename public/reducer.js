@@ -42,9 +42,9 @@ export function initialState() {
   return {
     session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null },
     items: new Map(),
-    todos: [],
-    todosSig: null,    // signature of the current plan — to ignore unchanged re-emits
-    planItemId: null,  // card the current plan belongs to (the one that last advanced it)
+    todos: [],            // full current plan (session-scoped) → the sidebar Plan panel
+    stepTimes: new Map(), // step text → {firstSeenAt, startedAt, doneAt}
+    todoPrev: new Map(),  // step text → status at the previous snapshot (for per-turn deltas)
     files: new Map(), // path → {edits, lastAt} — churn signal
     prs: new Map(),   // pr number → {number, state, url, title, ci, openedAt} — the PR panel
     feed: [],
@@ -148,7 +148,7 @@ export function reduce(state, ev) {
         it = {
           id: ev.id, title: '', status: 'inbox', note: null, emoji: null,
           add: 0, del: 0, commits: 0, edits: 0, activeMs: 0,
-          todos: null, pr: null, ci: null,
+          delta: null, pr: null, ci: null,
           createdAt: ev.t, touchedAt: ev.t,
         };
         state.items.set(ev.id, it);
@@ -168,34 +168,36 @@ export function reduce(state, ev) {
     }
 
     case 'todos': {
-      // Which card owns this plan? A genuine change attaches to the card that
-      // made it (explicit item, else the active doing card). But the hook seeds
-      // the current plan onto every new turn at its open, so an UNCHANGED plan
-      // re-emitted at a turn boundary must stay on the card that last advanced
-      // it — otherwise one stale checklist (a stuck 12/13) smears onto turn after
-      // turn. Dedup by content signature.
-      const sig = (ev.todos || [])
-        .map(td => `${td.text}${td.status || (td.done ? 'completed' : 'pending')}`).join('');
-      const changed = sig !== state.todosSig;
-      state.todosSig = sig;
-      let it = changed ? targetItem(state, ev) : (state.planItemId && state.items.get(state.planItemId));
-      if (!it) it = targetItem(state, ev); // first plan ever, or the owning card is gone
-      if (it) state.planItemId = it.id;
-
-      // Track per-step timing across plan snapshots (keyed by step text): when a
-      // step first goes in_progress (startedAt) and when it completes (doneAt),
-      // so the card can show how long each step took / has been running.
-      const times = it ? (it.stepTimes || (it.stepTimes = new Map())) : null;
+      // The plan is SESSION state, not a turn's: the agent keeps one cumulative
+      // list. The full plan lives at session level (state.todos -> the sidebar
+      // Plan panel); each card carries only its DELTA -- the steps that advanced
+      // while it was active. A card never shows the whole plan, which is what
+      // stops the cumulative list smearing onto every turn.
+      // Per-step timing (keyed by step text): startedAt when a step first goes
+      // in_progress, doneAt when it completes — for the durations on the panel.
+      const times = state.stepTimes, prev = state.todoPrev;
+      const target = (ev.item && state.items.get(ev.item)) || activeDoingItem(state);
       const todos = (ev.todos || []).map(td => {
         const status = td.status || (td.done ? 'completed' : 'pending');
-        let tm = times && times.get(td.text);
-        if (times && !tm) { tm = { firstSeenAt: ev.t }; times.set(td.text, tm); }
-        if (tm) {
-          if (status === 'in_progress' && tm.startedAt == null) tm.startedAt = ev.t;
-          if (status === 'completed' && tm.doneAt == null) {
-            tm.doneAt = ev.t;
-            if (tm.startedAt == null) tm.startedAt = tm.firstSeenAt;
-          }
+        let tm = times.get(td.text);
+        if (!tm) { tm = { firstSeenAt: ev.t }; times.set(td.text, tm); }
+        if (status === 'in_progress' && tm.startedAt == null) tm.startedAt = ev.t;
+        if (status === 'completed' && tm.doneAt == null) {
+          tm.doneAt = ev.t;
+          if (tm.startedAt == null) tm.startedAt = tm.firstSeenAt;
+        }
+        // A step joins this turn's delta only if we WITNESS it advance here: it
+        // was seen earlier not-yet-done and now moved forward. A step first seen
+        // already completed/in_progress (a continued session, work from an earlier
+        // turn, or a checklist written pre-checked) was not moved here — which is
+        // what stops a long first turn absorbing the whole backlog.
+        const was = prev.get(td.text);
+        const advanced = was != null && was !== 'completed' && status !== was &&
+          (status === 'completed' || status === 'in_progress');
+        if (advanced && target) {
+          const d = target.delta || (target.delta = new Map());
+          d.set(td.text, { text: td.text, status, startedAt: tm.startedAt, doneAt: tm.doneAt, elapsedMs: td.elapsedMs });
+          target.touchedAt = ev.t;
         }
         return {
           text: td.text, done: status === 'completed', status,
@@ -210,7 +212,7 @@ export function reduce(state, ev) {
       // An unchanged re-emit refreshes the reference but isn't real activity on
       // the card, so it must not bump touchedAt (which drives ordering / "active
       // card") — only a genuine plan change counts as touching it.
-      if (it) { it.todos = todos; if (changed) it.touchedAt = ev.t; }
+      state.todoPrev = new Map(todos.map(t => [t.text, t.status]));
       awake(state);
       break;
     }

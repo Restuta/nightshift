@@ -69,27 +69,60 @@ test('an unrelated PR number never hijacks a card', () => {
   assert.equal(x.item('turn-1').status, 'doing');
 });
 
-test('an unchanged plan re-seeded onto a new turn does not smear forward', () => {
-  const x = stream();
-  const plan = bDone => ({
-    type: 'todos',
-    todos: [{ text: 'a', status: 'completed' }, { text: 'b', status: bDone ? 'completed' : 'pending' }],
-  });
-  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
-  x.emit({ ...plan(false), item: 'turn-1' });        // plan built during turn-1 (1/2)
-  assert.equal(x.item('turn-1').todos.length, 2);
+// The plan is session-scoped: its full state lives on state.todos (the sidebar
+// Plan panel), and each turn card carries only the steps it advanced (its delta).
+const delta = it => (it.delta ? [...it.delta.values()] : []);
 
-  // turn-1 ends, turn-2 opens; the hook seeds the *same* plan onto turn-2.
+test('the full plan lives at session level, never on a card', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'a', status: 'completed' }, { text: 'b', status: 'in_progress' }, { text: 'c', status: 'pending' },
+  ] });
+  assert.equal(x.state.todos.length, 3, 'whole plan is on state.todos');
+  assert.equal(x.item('turn-1').todos, undefined, 'card has no full-plan field');
+});
+
+test('a card carries only the steps it advanced (its delta)', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  // turn-1 lays out the plan (nothing moved yet), then starts step a.
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'a', status: 'pending' }, { text: 'b', status: 'pending' },
+  ] });
+  assert.equal(delta(x.item('turn-1')).length, 0, 'just writing the plan is not a delta');
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'a', status: 'in_progress' }, { text: 'b', status: 'pending' },
+  ] });
+  assert.deepEqual(delta(x.item('turn-1')).map(s => s.text), ['a'], 'turn-1 started a');
+
+  // turn-2 opens; the hook re-seeds the identical plan — no advance, no delta.
   x.emit({ type: 'item', id: 'turn-1', status: 'done' });
   x.emit({ type: 'item', id: 'turn-2', status: 'doing' });
-  x.emit({ ...plan(false), item: 'turn-2' });        // identical — a re-seed, not progress
-  assert.equal(x.item('turn-2').todos, null, 'an unchanged plan must not attach to the new turn');
-  assert.ok(x.item('turn-1').todos, 'it stays on the turn that last advanced it');
+  x.emit({ type: 'todos', item: 'turn-2', todos: [
+    { text: 'a', status: 'in_progress' }, { text: 'b', status: 'pending' },
+  ] });
+  assert.equal(delta(x.item('turn-2')).length, 0, 'a re-seed of an unchanged plan adds no delta');
 
-  // turn-2 actually advances the plan → now it belongs to turn-2.
-  x.emit({ ...plan(true), item: 'turn-2' });          // 2/2 — a real change
-  assert.equal(x.item('turn-2').todos.filter(t => t.done).length, 2,
-    'a genuine plan change attaches to the current turn');
+  // turn-2 finishes a and starts b → those are turn-2's delta; turn-1 unchanged.
+  x.emit({ type: 'todos', item: 'turn-2', todos: [
+    { text: 'a', status: 'completed' }, { text: 'b', status: 'in_progress' },
+  ] });
+  assert.deepEqual(delta(x.item('turn-2')).map(s => s.text).sort(), ['a', 'b'], 'turn-2 advanced a and b');
+  assert.deepEqual(delta(x.item('turn-1')).map(s => s.text), ['a'], 'turn-1 delta is untouched');
+  assert.equal(x.state.todos.filter(t => t.done).length, 1, 'session plan reflects the completion');
+});
+
+test('steps already done when first seen are not attributed to a turn', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  // A continued session (or a checklist written pre-checked): the first snapshot
+  // already shows items completed. They were not moved during turn-1.
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'a', status: 'completed' }, { text: 'b', status: 'completed' }, { text: 'c', status: 'pending' },
+  ] });
+  assert.equal(delta(x.item('turn-1')).length, 0, "pre-done work is not this turn's delta");
+  assert.equal(x.state.todos.filter(t => t.done).length, 2, 'but the sidebar plan still shows them done');
 });
 
 // Regression against the real tape that surfaced this bug (best-effort: skipped

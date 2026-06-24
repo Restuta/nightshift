@@ -560,29 +560,22 @@ function updateCard(el, it, animate, activeId) {
   R.commitsPill.style.display = it.commits ? '' : 'none';
   R.c.textContent = it.commits ? `${it.commits} commit${it.commits > 1 ? 's' : ''}` : '';
 
-  const hasTodos = !!(it.todos && it.todos.length);
-  R.progress.style.display = hasTodos ? '' : 'none';
-  el.classList.toggle('has-todos', hasTodos);
-  if (!hasTodos) el.classList.remove('expanded');
-  if (hasTodos) {
-    const done = it.todos.filter(t => t.done).length;
-    const pct = (done / it.todos.length) * 100;
-    R.ring.style.setProperty('--p', `${pct}%`);
-    R.ring.style.setProperty('--ring-c', pct >= 100 ? 'var(--green)' : 'var(--yellow)');
-    R.frac.textContent = `${done}/${it.todos.length}`;
-    el._todos = it.todos;
-    // On a done card the turn has ended: a step that never completed is
-    // "unfinished", not "now" — don't show it as the active step with a live,
-    // ever-growing timer (that's what made a finished card look still-working).
-    const cardDone = it.status === 'done';
-    const firstOpen = it.todos.findIndex(t => !t.done);
-    const hasInProgress = it.todos.some(t => t.status === 'in_progress');
-    R.tlist.innerHTML = it.todos.map((t, i) => {
-      // The live step: an explicit in_progress one, or — when the agent marks none
-      // (Claude's task tools often go pending → completed) — the first open step on
-      // the active card, so the current work always looks live, not dead.
-      const now = !cardDone && (t.status === 'in_progress' || (!hasInProgress && i === firstOpen));
-      const cls = t.done ? 'done' : now ? 'now' : cardDone ? 'unfinished' : '';
+  // Each card shows only the steps it advanced this turn (its delta); the whole
+  // plan lives in the sidebar Plan panel. Keeps a turn from showing a stale,
+  // cumulative checklist that isn't really "its" work.
+  const steps = it.delta ? [...it.delta.values()] : [];
+  const hasDelta = steps.length > 0;
+  R.progress.style.display = 'none';
+  el.classList.toggle('has-todos', hasDelta);
+  if (!hasDelta) el.classList.remove('expanded');
+  if (hasDelta) {
+    steps.sort((x, y) =>
+      (x.status === 'in_progress' ? 0 : 1) - (y.status === 'in_progress' ? 0 : 1) ||
+      (x.doneAt || x.startedAt || 0) - (y.doneAt || y.startedAt || 0));
+    el._todos = steps;
+    R.tlist.innerHTML = steps.map(t => {
+      const now = t.status === 'in_progress';
+      const cls = t.status === 'completed' ? 'done' : now ? 'now' : 'unfinished';
       const tm = stepTime(t, now);
       return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}</li>`;
     }).join('');
@@ -598,7 +591,7 @@ function updateCard(el, it, animate, activeId) {
     R.pr.style.display = 'none';
   }
 
-  R.pills.classList.toggle('has-pills', hasDiff || !!it.commits || hasTodos || !!it.pr);
+  R.pills.classList.toggle('has-pills', hasDiff || !!it.commits || hasDelta || !!it.pr);
 
   el.classList.toggle('is-done', it.status === 'done');
   el.classList.toggle('is-active', it.id === activeId);
@@ -971,9 +964,29 @@ function renderReadout() {
   $('#stat-elapsed').textContent = durText(vtNow() - (state.session.startedAt ?? t0));
 }
 
+// The full session plan, shown once in the sidebar — cards show only their
+// own delta. Progress bar + the live (in-progress, else next-open) step lit.
+function renderPlan() {
+  const box = $('#plan');
+  const todos = state.todos || [];
+  box.hidden = !todos.length;
+  if (!todos.length) return;
+  const done = todos.filter(t => t.done).length;
+  $('#plan-frac').textContent = `${done}/${todos.length}`;
+  $('#plan-bar').style.width = `${(done / todos.length) * 100}%`;
+  const hasIP = todos.some(t => t.status === 'in_progress');
+  const firstOpen = todos.findIndex(t => !t.done);
+  $('#plan-list').innerHTML = todos.map((t, i) => {
+    const now = hasIP ? t.status === 'in_progress' : i === firstOpen;
+    const cls = t.done ? 'done' : now ? 'now' : '';
+    return `<li class="${cls}">${esc(t.text)}</li>`;
+  }).join('');
+}
+
 function renderAll(animate, freshEvents = null) {
   renderInstruments(animate);
   renderBoard(animate);
+  renderPlan();
   renderPRs();
   if (!$('#gantt-overlay').hidden) renderGantt();
   renderHotfiles();
