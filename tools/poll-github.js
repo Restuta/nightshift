@@ -347,18 +347,27 @@ if (flags.worker) {
 }
 if (tick() > 0) sawOpenPr = true;
 console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG}`);
-let doneTicks = 0, lifeTicks = 0;
+let doneTicks = 0, lifeTicks = 0, lastGrowthTick = 0;
+let lastSize = (() => { try { return fs.statSync(LOG).size; } catch { return -1; } })();
 const MAX_LIFE = Math.max(60, Math.round((4 * 3600 * 1000) / INTERVAL)); // ~4h orphan cap
+// "Quiet" = the session log hasn't grown for this long. Only then is "all PRs
+// merged" a reason to retire. A live session opens PRs in waves hours apart, so
+// all-currently-merged is NOT a stop signal — retiring between waves is what
+// froze #382/#383/#386 at "open" with no title for the rest of the session.
+const QUIET_TICKS = Math.max(20, Math.round((10 * 60 * 1000) / INTERVAL)); // ~10 min idle
 const timer = setInterval(() => {
   lifeTicks++;
+  let size = -1; try { size = fs.statSync(LOG).size; } catch { /* gone */ }
+  if (size > lastSize) { lastSize = size; lastGrowthTick = lifeTicks; }
   const openCount = tick();
   if (openCount > 0) sawOpenPr = true;
   if (flags.worker && flags.known) {
-    // Retire once the WORK is done — a PR was seen OPEN during THIS run and all are
-    // now merged/closed. Historical (already-merged) refs from a Continue'd tape
-    // don't count, so we keep polling for a PR created later. /nightshift off stops
-    // us; MAX_LIFE backstops a session abandoned without `off`.
-    doneTicks = (sawOpenPr && openCount === 0) ? doneTicks + 1 : 0;
-    if (doneTicks >= 6 || lifeTicks >= MAX_LIFE) { clearInterval(timer); process.exit(0); }
+    // Retire only when the work is done AND the session has gone quiet — never
+    // just because the PRs known so far are all merged (the session may be mid-
+    // turn, about to open the next one). /nightshift off stops us sooner;
+    // MAX_LIFE backstops a session abandoned without `off`.
+    const quiet = (lifeTicks - lastGrowthTick) >= QUIET_TICKS;
+    doneTicks = (sawOpenPr && openCount === 0 && quiet) ? doneTicks + 1 : 0;
+    if (doneTicks >= 4 || lifeTicks >= MAX_LIFE) { clearInterval(timer); process.exit(0); }
   }
 }, INTERVAL);
