@@ -69,6 +69,29 @@ test('an unrelated PR number never hijacks a card', () => {
   assert.equal(x.item('turn-1').status, 'doing');
 });
 
+test('an unchanged plan re-seeded onto a new turn does not smear forward', () => {
+  const x = stream();
+  const plan = bDone => ({
+    type: 'todos',
+    todos: [{ text: 'a', status: 'completed' }, { text: 'b', status: bDone ? 'completed' : 'pending' }],
+  });
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ ...plan(false), item: 'turn-1' });        // plan built during turn-1 (1/2)
+  assert.equal(x.item('turn-1').todos.length, 2);
+
+  // turn-1 ends, turn-2 opens; the hook seeds the *same* plan onto turn-2.
+  x.emit({ type: 'item', id: 'turn-1', status: 'done' });
+  x.emit({ type: 'item', id: 'turn-2', status: 'doing' });
+  x.emit({ ...plan(false), item: 'turn-2' });        // identical — a re-seed, not progress
+  assert.equal(x.item('turn-2').todos, null, 'an unchanged plan must not attach to the new turn');
+  assert.ok(x.item('turn-1').todos, 'it stays on the turn that last advanced it');
+
+  // turn-2 actually advances the plan → now it belongs to turn-2.
+  x.emit({ ...plan(true), item: 'turn-2' });          // 2/2 — a real change
+  assert.equal(x.item('turn-2').todos.filter(t => t.done).length, 2,
+    'a genuine plan change attaches to the current turn');
+});
+
 // Regression against the real tape that surfaced this bug (best-effort: skipped
 // if the recording isn't on this machine).
 test('prove.health tape: turn-5 sits in PR until #381 merges', (t) => {

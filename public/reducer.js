@@ -43,6 +43,8 @@ export function initialState() {
     session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null },
     items: new Map(),
     todos: [],
+    todosSig: null,    // signature of the current plan — to ignore unchanged re-emits
+    planItemId: null,  // card the current plan belongs to (the one that last advanced it)
     files: new Map(), // path → {edits, lastAt} — churn signal
     prs: new Map(),   // pr number → {number, state, url, title, ci, openedAt} — the PR panel
     feed: [],
@@ -166,10 +168,23 @@ export function reduce(state, ev) {
     }
 
     case 'todos': {
+      // Which card owns this plan? A genuine change attaches to the card that
+      // made it (explicit item, else the active doing card). But the hook seeds
+      // the current plan onto every new turn at its open, so an UNCHANGED plan
+      // re-emitted at a turn boundary must stay on the card that last advanced
+      // it — otherwise one stale checklist (a stuck 12/13) smears onto turn after
+      // turn. Dedup by content signature.
+      const sig = (ev.todos || [])
+        .map(td => `${td.text}${td.status || (td.done ? 'completed' : 'pending')}`).join('');
+      const changed = sig !== state.todosSig;
+      state.todosSig = sig;
+      let it = changed ? targetItem(state, ev) : (state.planItemId && state.items.get(state.planItemId));
+      if (!it) it = targetItem(state, ev); // first plan ever, or the owning card is gone
+      if (it) state.planItemId = it.id;
+
       // Track per-step timing across plan snapshots (keyed by step text): when a
       // step first goes in_progress (startedAt) and when it completes (doneAt),
       // so the card can show how long each step took / has been running.
-      const it = targetItem(state, ev);
       const times = it ? (it.stepTimes || (it.stepTimes = new Map())) : null;
       const todos = (ev.todos || []).map(td => {
         const status = td.status || (td.done ? 'completed' : 'pending');
@@ -192,7 +207,10 @@ export function reduce(state, ev) {
         };
       });
       state.todos = todos;
-      if (it) { it.todos = todos; it.touchedAt = ev.t; }
+      // An unchanged re-emit refreshes the reference but isn't real activity on
+      // the card, so it must not bump touchedAt (which drives ordering / "active
+      // card") — only a genuine plan change counts as touching it.
+      if (it) { it.todos = todos; if (changed) it.touchedAt = ev.t; }
       awake(state);
       break;
     }

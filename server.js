@@ -130,7 +130,13 @@ function serveStatic(req, res) {
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
   fs.readFile(file, (err, body) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
-    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
+    // The board is a live dev tool on localhost with tiny assets — never let the
+    // browser cache app code, or a reducer/UI fix silently fails to show up on a
+    // plain refresh (the "board looks outdated after a fix" trap).
+    res.writeHead(200, {
+      'content-type': MIME[path.extname(file)] || 'application/octet-stream',
+      'cache-control': 'no-store',
+    });
     res.end(body);
   });
 }
