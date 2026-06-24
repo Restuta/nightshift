@@ -66,7 +66,17 @@ including the ones building it.
   it. Synthesizes per-turn cards from `UserPromptSubmit` (Codex always, Claude in
   central recordings) — skipping harness-injected turns like `<task-notification>`
   so they don't litter the board; maps `apply_patch`→edit, `update_plan`→todos,
-  `Bash`→commit/activity and `gh pr create|merge`→pr. Fail-open.
+  `TodoWrite`→todos, `Bash`→commit/activity and `gh pr create|merge`→pr. Claude's
+  newer task tools (`TaskCreate`/`TaskUpdate`) live only in the transcript and
+  aren't in the hook matcher, so on every firing tool the hook tails the transcript
+  (by byte offset) and folds the task list into `todos` snapshots — live without a
+  restart. Fail-open.
+- `tools/tasks-fold.js` — shared reconstruction of Claude's task list from
+  transcript lines (incremental `TaskCreate`/`TaskUpdate`/delete → full `todos`
+  snapshot); used by both the hook (tail) and the backfill (full replay).
+- `tools/backfill-tasks.js` — at `/nightshift` start, replays the session
+  transcript once to seed the task state (and the offset the hook tails from) and
+  emit the current plan, so a session that had tasks before recording shows them.
 - `tools/install-codex.js` — Codex counterpart of the global install: symlinks
   the (shared) `/nightshift` skill into `~/.codex/skills/` and registers
   `agent-hook.js` in `~/.codex/hooks.json` behind a per-session pre-gate
