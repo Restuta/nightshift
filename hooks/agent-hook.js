@@ -114,7 +114,11 @@ function syncClaudeTasks(hook, sid, append) {
   }
   const { lines, offset } = tasksFold.readNewLines(tp, state.offset || 0);
   let changed = false;
-  for (const ln of lines) if (tasksFold.applyLine(ln, state)) changed = true;
+  for (const raw of lines) {
+    if (!tasksFold.lineMayMatter(raw, Object.keys(state.pending || {}).length > 0)) continue;
+    let ev; try { ev = JSON.parse(raw); } catch { continue; }
+    if (tasksFold.applyLine(ev, state)) changed = true;
+  }
   state.offset = offset;
   fs.writeFileSync(f, JSON.stringify(state));
   if (changed) {

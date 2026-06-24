@@ -58,9 +58,12 @@ function toTodos(state) {
   };
 }
 
-// Read complete new lines from `file` starting at byte `offset`. Returns the
-// parsed lines (unparseable ones skipped) and the offset just past the last
-// newline consumed. A shrunk file (rotation/truncation) resets to its new size.
+// Read complete new lines from `file` starting at byte `offset`. Returns the RAW
+// lines (callers parse only the ones that matter — see lineMayMatter) and the
+// offset just past the last newline consumed. A shrunk file (rotation/truncation)
+// resets to its new size. Reads always start on a newline boundary (ASCII \n), so
+// no multibyte char is ever split at the start; the partial tail past the last \n
+// is dropped, so the end is safe too.
 function readNewLines(file, offset) {
   let size;
   try { size = fs.statSync(file).size; } catch { return { lines: [], offset }; }
@@ -76,11 +79,20 @@ function readNewLines(file, offset) {
     if (lastNl === -1) return { lines: [], offset };        // only a partial line so far
     const complete = text.slice(0, lastNl);
     const consumed = Buffer.byteLength(complete, 'utf8') + 1; // + the newline
-    const lines = complete.split('\n').filter(Boolean)
-      .map(l => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(Boolean);
-    return { lines, offset: offset + consumed };
+    return { lines: complete.split('\n').filter(Boolean), offset: offset + consumed };
   } finally { fs.closeSync(fd); }
+}
+
+// Cheap pre-filter so callers can skip JSON.parse on the bulk of transcript lines
+// (big file reads, edits, assistant text) that can't touch the task list — keeping
+// the per-tool-call hook cost flat regardless of tool-output size. A line matters
+// only if it names a task tool, or — while a TaskCreate awaits its id — carries a
+// tool_result. (A false positive, e.g. a file whose text contains "TaskCreate",
+// just costs one harmless parse.)
+function lineMayMatter(raw, havePending) {
+  if (!raw) return false;
+  if (raw.includes('TaskCreate') || raw.includes('TaskUpdate')) return true;
+  return havePending && raw.includes('tool_result');
 }
 
 // Byte offset just past the last complete line of `text` — what to persist after
@@ -90,4 +102,4 @@ function offsetAfterLastLine(text) {
   return lastNl === -1 ? 0 : Buffer.byteLength(text.slice(0, lastNl), 'utf8') + 1;
 }
 
-module.exports = { emptyState, applyLine, toTodos, readNewLines, offsetAfterLastLine };
+module.exports = { emptyState, applyLine, toTodos, readNewLines, lineMayMatter, offsetAfterLastLine };

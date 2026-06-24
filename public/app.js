@@ -664,11 +664,20 @@ function feedLine(ev) {
       if (ev.phase === 'attention') {
         tag = 'ask'; cls = 'ci-fail';
         tx = `needs input${ev.text ? ` — ${esc(ev.text)}` : ''}`;
+      } else if (ev.phase === 'start') {
+        tx = 'session started';
+      } else if (ev.phase === 'resume') {
+        tx = 'prompt received';
+      } else if (ev.phase === 'idle') {
+        tx = 'agent idle — turn finished';
+      } else if (ev.phase === 'end' || ev.phase === 'ended') {
+        tx = 'session ended';
+      } else if (ev.title) {
+        // A phase-less title update (the backfill naming the session) — don't
+        // mislabel it as "session ended".
+        tx = `renamed → ${esc(ev.title)}`;
       } else {
-        tx = ev.phase === 'start' ? 'session started'
-          : ev.phase === 'resume' ? 'prompt received'
-          : ev.phase === 'idle' ? 'agent idle — turn finished'
-          : 'session ended';
+        tx = 'session ended';
       }
       break;
     case 'item':
