@@ -569,9 +569,12 @@ function updateCard(el, it, animate, activeId) {
   el.classList.toggle('has-todos', hasDelta);
   if (!hasDelta) el.classList.remove('expanded');
   if (hasDelta) {
-    steps.sort((x, y) =>
-      (x.status === 'in_progress' ? 0 : 1) - (y.status === 'in_progress' ? 0 : 1) ||
-      (x.doneAt || x.startedAt || 0) - (y.doneAt || y.startedAt || 0));
+    // A card's delta is a changelog of what this turn advanced — so read it
+    // chronologically, top→bottom in time order ("did this, then started this").
+    // The running step is the latest action, so it naturally lands at the bottom;
+    // pinning it to the top instead made it sit *above* steps finished earlier.
+    const when = t => t.doneAt || t.startedAt || t.firstSeenAt || 0;
+    steps.sort((x, y) => when(x) - when(y));
     el._todos = steps;
     R.tlist.innerHTML = steps.map(t => {
       const now = t.status === 'in_progress';
