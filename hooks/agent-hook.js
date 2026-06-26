@@ -142,6 +142,48 @@ function syncClaudeTasks(hook, sid, append) {
   }
 }
 
+// Live capture of Claude's plaintext narration — the status text it prints
+// between tool calls ("Now I'll check whether the eval run finished"). Like the
+// task list, it lives only in the transcript (no hook payload carries it), so we
+// tail the transcript on each firing PostToolUse/Stop, pull the latest assistant
+// text block, and emit it as a `say` attached to the open turn card. The board
+// shows the latest one on the active card's live "now" line. We start a fresh
+// session at EOF (no offset file) so we never replay history as a flood; only
+// the LAST text block in each new batch is emitted (the now-line shows one line,
+// and emitting once per crossing avoids duplicating a block across tool calls).
+const SAYS = path.join(NS_HOME, 'says');
+function syncClaudeSay(hook, sid, append, card) {
+  if (!tasksFold || !sid) return;
+  const tp = hook.transcript_path;
+  if (!tp) return;
+  const f = path.join(SAYS, sid + '.json');
+  let st;
+  try { st = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { st = null; }
+  if (!st) {
+    let size = 0; try { size = fs.statSync(tp).size; } catch { /* none yet */ }
+    fs.mkdirSync(SAYS, { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({ offset: size }));
+    return; // start at EOF — new narration streams from here, no history replay
+  }
+  const { lines, offset } = tasksFold.readNewLines(tp, st.offset || 0);
+  let last = '';
+  for (const raw of lines) {
+    if (!raw.includes('"text"')) continue; // cheap pre-filter
+    let ev; try { ev = JSON.parse(raw); } catch { continue; }
+    const msg = ev && ev.type === 'assistant' && ev.message;
+    if (!msg || !Array.isArray(msg.content)) continue;
+    for (const b of msg.content) {
+      if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) last = b.text;
+    }
+  }
+  st.offset = offset;
+  fs.writeFileSync(f, JSON.stringify(st));
+  if (last) {
+    const text = last.replace(/\s+/g, ' ').trim().slice(0, 280);
+    if (text) append(card ? { type: 'say', text, item: card } : { type: 'say', text });
+  }
+}
+
 // Files an apply_patch command (Codex edits) touches.
 function patchFiles(cmd) {
   const files = [];
@@ -285,7 +327,10 @@ function main() {
     // leave those alone.
     // Capture any last task change before the card is retired (a TaskUpdate with
     // no following tool call would otherwise be missed until the next turn).
-    if (agent === 'claude' && !SELF) { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
+    if (agent === 'claude' && !SELF) {
+      try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ }
+      try { syncClaudeSay(hook, sid, append, turnState(sid).card); } catch { /* never break */ }
+    }
     if (!SELF && sid) {
       const st = turnState(sid);
       if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
@@ -354,9 +399,12 @@ function main() {
     const item = sid ? turnState(sid).card : null;
     const withItem = ev => (item ? { ...ev, item } : ev);
 
-    // Piggyback on this firing tool to pull in any Claude task-list changes
-    // (TaskCreate/TaskUpdate live only in the transcript, not in this payload).
-    if (agent === 'claude' && !SELF) { try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ } }
+    // Piggyback on this firing tool to pull in any Claude task-list changes and
+    // narration (both live only in the transcript, not in this payload).
+    if (agent === 'claude' && !SELF) {
+      try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ }
+      try { syncClaudeSay(hook, sid, append, item); } catch { /* never break */ }
+    }
 
     if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(tool) && inp.file_path) {
       append(withItem({ type: 'edit', path: path.relative(root, inp.file_path), tool }));
