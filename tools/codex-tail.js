@@ -355,6 +355,12 @@ function step(e) {
       // Merge narration ("PR #205 merged") is reliable and guarded; opens come
       // from `gh pr create` output, not prose urls (which may cite merged PRs).
       out.push(...prMergesFrom(p.message, t));
+      // The message is also the agent's plaintext status — its running thoughts
+      // ("waiting one more interval for the harvest to finish"). It used to live
+      // only in the CLI/rollout, so a turn spent narrating looked dead on the
+      // board. Emit it as a `say` so the active card shows what the agent's doing.
+      const say = String(p.message).replace(/\s+/g, ' ').trim();
+      if (say) out.push({ t, type: 'say', text: say.slice(0, 280), ...(state.card ? { item: state.card } : {}) });
     }
     return out;
   }

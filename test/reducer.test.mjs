@@ -125,6 +125,26 @@ test('steps already done when first seen are not attributed to a turn', () => {
   assert.equal(x.state.todos.filter(t => t.done).length, 2, 'but the sidebar plan still shows them done');
 });
 
+// The live "now" line: a card surfaces the latest of its narration / commands so
+// a turn spent thinking and watching still reads as alive. Latest activity wins,
+// but narration outranks nothing newer than itself — it's just the most recent.
+test('say narration and commands fill the active card\'s live now line', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  assert.equal(x.item('turn-1').now, null, 'no activity yet → no now line');
+
+  x.emit({ type: 'tool', tool: 'run', text: 'ps -axo pid,etime | rg eval', item: 'turn-1' });
+  assert.equal(x.item('turn-1').now.kind, 'tool', 'a command fills the now line');
+
+  x.emit({ type: 'say', text: 'Waiting one more interval for the harvest', item: 'turn-1' });
+  assert.equal(x.item('turn-1').now.kind, 'say', 'newer narration takes the slot');
+  assert.match(x.item('turn-1').now.text, /harvest/);
+  assert.equal(x.state.session.lastSay, 'Waiting one more interval for the harvest');
+
+  x.emit({ type: 'tool', tool: 'run', text: 'find . -name "*.json"', item: 'turn-1' });
+  assert.equal(x.item('turn-1').now.kind, 'tool', 'the newest activity always wins');
+});
+
 // Regression against the real tape that surfaced this bug (best-effort: skipped
 // if the recording isn't on this machine).
 test('prove.health tape: turn-5 sits in PR until #381 merges', (t) => {

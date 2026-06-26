@@ -73,6 +73,16 @@ into the masthead tokens/cost meters. Mostly emitted by the transcript importer
 (live hooks have no token visibility). Kept out of the activity feed — too
 frequent — and cost is an approximate local estimate, not a billing record.
 
+### `say`
+The agent's plaintext narration / running status — what it tells you in the CLI
+between tool calls ("waiting one more interval for the harvest to finish").
+`{text, item?}`. Emitted from Codex `agent_message` rollout entries and Claude
+assistant text blocks (tailed from the transcript). The reducer keeps the latest
+on the owning card and shows it as the live "now" line on the active card, so a
+turn spent thinking and watching a job still reads as alive instead of frozen.
+Distinct from `note` (which is a deliberate, sparse milestone): `say` is the
+ambient status stream and can be frequent.
+
 ### `note`
 Free-form narration from the agent. `{text}` — used sparingly for milestones,
 not a chat log.

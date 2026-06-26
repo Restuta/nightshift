@@ -40,7 +40,7 @@ function usageCost(ev) {
 
 export function initialState() {
   return {
-    session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null },
+    session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null, lastSay: null },
     items: new Map(),
     todos: [],            // full current plan (session-scoped) → the sidebar Plan panel
     stepTimes: new Map(), // step text → {firstSeenAt, startedAt, doneAt}
@@ -148,7 +148,7 @@ export function reduce(state, ev) {
         it = {
           id: ev.id, title: '', status: 'inbox', note: null, emoji: null,
           add: 0, del: 0, commits: 0, edits: 0, activeMs: 0,
-          delta: null, pr: null, ci: null,
+          delta: null, pr: null, ci: null, now: null,
           createdAt: ev.t, touchedAt: ev.t,
         };
         state.items.set(ev.id, it);
@@ -300,10 +300,28 @@ export function reduce(state, ev) {
     case 'tool': {
       // The agent ran a command (read a file, ran tests). Activity, not a file
       // change — it warms the active card and scrolls the tape so a working
-      // turn looks alive between edits.
+      // turn looks alive between edits. The text becomes the card's live "now"
+      // line until newer narration (a `say`) or another command replaces it.
       state.totals.tools = (state.totals.tools || 0) + 1;
       const it = targetItem(state, ev);
-      if (it) { it.tools = (it.tools || 0) + 1; it.touchedAt = ev.t; }
+      if (it) {
+        it.tools = (it.tools || 0) + 1;
+        it.touchedAt = ev.t;
+        if (ev.text) it.now = { text: ev.text, kind: 'tool', t: ev.t };
+      }
+      awake(state);
+      break;
+    }
+
+    case 'say': {
+      // The agent's plaintext narration — its running status ("waiting one more
+      // interval for the harvest to finish"). It used to live only in the CLI /
+      // rollout, so a turn spent thinking and watching looked frozen on the
+      // board. Surface the latest line on the card it belongs to as the live
+      // "now" line; narration outranks a bare command, so it wins the slot.
+      const it = targetItem(state, ev);
+      if (it && ev.text) { it.now = { text: ev.text, kind: 'say', t: ev.t }; it.touchedAt = ev.t; }
+      if (ev.text) state.session.lastSay = ev.text;
       awake(state);
       break;
     }

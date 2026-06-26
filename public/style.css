@@ -506,6 +506,44 @@ body.tape-collapsed .tape-resize { display: none; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Live "now" line on the active card — the agent's latest narration (or, if it
+   hasn't narrated yet, its latest command). A quiet status footer with a slow
+   pulse, so a turn that's mostly thinking/watching still reads as alive. */
+.now-doing {
+  display: none;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+.now-doing .nd-pulse {
+  flex: none;
+  width: 5px; height: 5px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--yellow);
+  animation: ndpulse 1.9s ease-out infinite;
+}
+.now-doing .nd-text {
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.now-doing.say  .nd-text { color: var(--ink); font-style: italic; opacity: .85; }
+.now-doing.tool .nd-text { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.now-doing.tool .nd-pulse { background: var(--faint); }
+@keyframes ndpulse {
+  0%   { box-shadow: 0 0 0 0 rgba(210, 153, 34, .5); }
+  70%  { box-shadow: 0 0 0 5px rgba(210, 153, 34, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(210, 153, 34, 0); }
+}
+
 .add-card { padding: 0 8px 10px; }
 
 .add-card input {
@@ -891,6 +929,7 @@ body.tape-collapsed .tape-resize { display: none; }
 .feed .tag.note   { color: var(--merged); }
 .feed .tag.item   { color: var(--dim); }
 .feed .tag.tool   { color: var(--faint); }
+.feed .tag.say    { color: var(--ink); }
 
 .feed .tx .cmd { color: var(--dim); opacity: .85; }
 

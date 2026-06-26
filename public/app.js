@@ -509,7 +509,8 @@ function makeCard() {
       <span class="pill progress"><i class="ring"></i><b class="frac"></b></span>
       <a class="pill pr" target="_blank" rel="noopener"><i class="ci"></i><b class="prtxt"></b></a>
     </div>
-    <ul class="todo-list"></ul>`;
+    <ul class="todo-list"></ul>
+    <div class="now-doing"><i class="nd-pulse"></i><span class="nd-text"></span></div>`;
   el._refs = {
     emoji: el.querySelector('.emoji'),
     cid: el.querySelector('.cid'),
@@ -527,6 +528,8 @@ function makeCard() {
     ci: el.querySelector('.pill.pr .ci'),
     prtxt: el.querySelector('.prtxt'),
     tlist: el.querySelector('.todo-list'),
+    nowDoing: el.querySelector('.now-doing'),
+    ndText: el.querySelector('.nd-text'),
   };
   // Click a card with a plan to expand/collapse its steps (the active card
   // shows them anyway). Don't hijack clicks on the PR link.
@@ -595,6 +598,19 @@ function updateCard(el, it, animate, activeId) {
   }
 
   R.pills.classList.toggle('has-pills', hasDiff || !!it.commits || hasDelta || !!it.pr);
+
+  // Live "now" line — the agent's latest narration (or, lacking any, its latest
+  // command) shown only on the active in-progress card, so a turn spent thinking
+  // and watching a job still says what it's doing instead of looking frozen.
+  const now = it.id === activeId && it.status === 'doing' ? it.now : null;
+  if (now && now.text) {
+    R.nowDoing.className = `now-doing ${now.kind}`;
+    R.nowDoing.style.display = 'flex'; // override the stylesheet's default `none`
+    R.ndText.textContent = now.text;
+    R.ndText.title = now.text;
+  } else {
+    R.nowDoing.style.display = 'none';
+  }
 
   el.classList.toggle('is-done', it.status === 'done');
   el.classList.toggle('is-active', it.id === activeId);
@@ -717,6 +733,10 @@ function feedLine(ev) {
       tx = `<span class="cmd">${esc(ev.text || '')}</span>`;
       break;
     }
+    case 'say':
+      tag = 'says'; cls = 'say';
+      tx = esc(ev.text || '');
+      break;
     case 'note':
       tx = esc(ev.text || '');
       break;
