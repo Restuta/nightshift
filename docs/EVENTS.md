@@ -62,6 +62,15 @@ numbers from `git diff --shortstat`. Drives the line counters and tickers.
 
 ### `pr`
 `{number, title?, url?, state: "open" | "merged" | "closed"}`
+- **Terminal state (`merged`/`closed`) must come from authoritative gh output**
+  — `poll-github`'s gh queries, gh's own "Merged pull request #N" success line,
+  or `gh pr list --state merged/closed`. NEVER inferred from the agent's prose
+  ("merged #404" while #404 was still open false-merged it). Producers may record
+  `open` and metadata; the truth of merge/close is gh's alone (invariant #4).
+- Freshness is reconciled by the board server, not a standalone daemon: while a
+  viewer is watching a session with an open PR, the server re-polls it (see
+  `server.js`). So a merge that lands while no poller was alive still appears the
+  next time the board is opened.
 
 ### `ci`
 `{status: "pending" | "pass" | "fail", pr?}`

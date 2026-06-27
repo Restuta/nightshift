@@ -26,7 +26,14 @@ including the ones building it.
 - `server.js` — zero-dep static + SSE server; tails the log, broadcasts
   appends; `POST /event` appends (stamps `t` if missing). Serves multiple
   sessions via repeated `--log` or `--dir`; `GET /sessions` lists them and
-  `/sse?session=` / `/event?session=` scope to one.
+  `/sse?session=` / `/event?session=` scope to one. **Owns PR reconciliation:**
+  for any session a viewer is actually looking at that still has an open PR, it
+  runs `poll-github --once` (on SSE connect + every 30s) with cwd = the session's
+  repo, so merged PRs flip to merged within seconds of opening the board. This
+  is the durable fix for "merged PR stuck showing open": freshness is tied to the
+  board being up (which it must be for anyone to see anything), NOT to a separate
+  detached poller surviving a laptop restart / crash / self-retirement. Still
+  pure — the server records events, never renders fetched state.
 - `public/` — the board. `reducer.js` (pure fold), `app.js` (render, FLIP
   animations, tickers, replay engine), `style.css`, `index.html`.
 - `hooks/claude-hook.js` — single entrypoint for all Claude Code hooks; routes
@@ -107,10 +114,18 @@ including the ones building it.
   installed, falling back to gh's check rollup; PR metadata (title/url/state) is
   from gh. `--known` polls only the PRs the tape itself surfaced (PR URLs, `#N` in
   card titles, `gh pr` commands) instead of the whole repo — so one session's
-  board isn't flooded by a repo's hundreds of PRs. In `--known` mode it
-  self-detaches ONE realtime worker per log (`--stop`/`--status` manage it; it
-  retires itself once every surfaced PR is merged/closed). The `/nightshift` skill
-  runs it for Claude sessions (Codex gets PR/CI from its meter).
+  board isn't flooded by a repo's hundreds of PRs, AND only the non-terminal ones
+  (a merged/closed PR never changes again, so re-polling it is waste — and over a
+  long session the surfaced set grows to dozens, which made a reconcile take
+  minutes). In `--known` mode it self-detaches ONE realtime worker per log
+  (`--stop`/`--status` manage it; it retires itself once every surfaced PR is
+  merged/closed). `server.js` is now the primary driver (it runs `--once` for
+  watched sessions, see above); the realtime worker is a redundant low-latency
+  optimization the `/nightshift` skill still starts and that dies on restart —
+  harmless, since both are idempotent (delta-only over the folded log).
+  **Terminal PR state (merged/closed) is only ever recorded from authoritative gh
+  output** — never inferred from the agent's prose (that false-merged #404). The
+  Codex tailer's old narration-merge parser was removed for exactly this reason.
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
 
 ## Commands

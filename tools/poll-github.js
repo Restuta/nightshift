@@ -302,11 +302,16 @@ function emitPr(pr) {
 function tick() {
   refreshKnown();
   if (flags.known) {
-    // Session-scoped: refresh ONLY the PRs this tape surfaced. No repo-wide list,
-    // so a repo with hundreds of open PRs can't flood a single session's board.
-    const nums = [...sessionPrNumbers()];
+    // Session-scoped: refresh ONLY the PRs this tape surfaced (no repo-wide list,
+    // so a repo with hundreds of open PRs can't flood a board) AND only those not
+    // already terminal. A merged/closed PR never changes again, so re-polling it
+    // is pure waste — and over a long session the surfaced set grows to dozens,
+    // which made a full reconcile take minutes (one gh + toast call each). Poll
+    // just the open / not-yet-seen ones; terminal PRs stay as the log recorded.
+    const live = n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || ''); };
+    const nums = [...sessionPrNumbers()].filter(live);
     for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr); }
-    return nums.filter(n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || ''); }).length;
+    return nums.filter(live).length;
   }
   let prs;
   try { prs = ghPrs(); } catch (err) {

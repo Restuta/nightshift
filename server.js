@@ -9,6 +9,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const args = process.argv.slice(2);
 function flag(name, fallback) {
@@ -117,6 +118,73 @@ function drain(s) {
 // addSession() sets up each file's watch; a poll backs them up.
 setInterval(() => { for (const s of sessions.values()) drain(s); }, 300).unref();
 
+// --------------------------------------------------- PR state reconciliation
+// PR/CI freshness used to depend on a separate detached poller staying alive —
+// and it didn't: a laptop restart, a crash, or its own retirement froze PR
+// state, so a merged PR showed "open" forever (nothing emitted the merge). The
+// board server is the ONE process that must be alive for anyone to see the
+// board, so it owns reconciliation now. For any session a viewer is actually
+// looking at that still has an open PR, it runs poll-github (--once, session-
+// scoped), which queries gh (authoritative) and appends only merge/close/ci
+// deltas. Those flow back through the normal tail → SSE. The reducer stays pure
+// (the server records events, it never renders fetched state); there's no daemon
+// to die — reconciliation's lifecycle is the board's own. See docs/EVENTS.md.
+const POLLER = path.join(__dirname, 'tools', 'poll-github.js');
+const RECONCILE_MS = 30000; // re-poll a watched session at most this often
+// A board relaunched on login can inherit a minimal PATH, leaving the reconciler
+// unable to find gh/toast. Augment with the usual tool dirs (+ node's own).
+const TOOL_PATH = [
+  path.dirname(process.execPath),
+  process.env.HOME && path.join(process.env.HOME, '.volta/bin'),
+  process.env.HOME && path.join(process.env.HOME, '.local/bin'),
+  '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin',
+  process.env.PATH,
+].filter(Boolean).join(':');
+
+// Fold just PR state + the cwd out of a log — cheap enough at viewer cadence.
+// We only need: does this session have an OPEN PR, and which repo dir is it.
+function prScan(s) {
+  let raw = '';
+  try { raw = fs.readFileSync(s.file, 'utf8'); } catch { return { cwd: null, open: 0 }; }
+  let cwd = null;
+  const st = new Map();
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let ev; try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type === 'session' && ev.cwd) cwd = ev.cwd;
+    else if (ev.type === 'pr' && ev.number != null && ev.state) st.set(ev.number, ev.state);
+  }
+  let open = 0;
+  for (const v of st.values()) if (v === 'open') open++;
+  return { cwd, open };
+}
+
+// Reconcile one session's PRs against gh, if it's worth it. Spawns the poller
+// detached (its appends arrive via drain()); never blocks the request loop.
+function reconcilePRs(s) {
+  if (s._polling) return;                                       // a poll's in flight
+  if (Date.now() - (s._lastPoll || 0) < RECONCILE_MS) return;  // throttled
+  const { cwd, open } = prScan(s);
+  if (!cwd || open === 0) return;                               // nothing to reconcile
+  if (!fs.existsSync(cwd)) return;                              // repo dir gone (worktree removed)
+  s._lastPoll = Date.now();
+  s._polling = true;
+  const child = spawn(process.execPath, [POLLER, '--once', '--known', '--log', s.file], {
+    cwd,                                                        // so `gh repo view`/refs resolve to this repo
+    env: { ...process.env, PATH: TOOL_PATH },
+    stdio: 'ignore',                                            // its appends arrive via drain()→SSE
+  });
+  child.on('error', () => { s._polling = false; });
+  child.on('exit', () => { s._polling = false; });
+}
+
+// Keep watched sessions fresh while someone's looking — the board IS the poller.
+// Gated on having a viewer AND an open PR, so historical/all-merged sessions
+// never spawn a thing.
+setInterval(() => {
+  for (const s of sessions.values()) if (s.clients.size) reconcilePRs(s);
+}, RECONCILE_MS).unref();
+
 // ----------------------------------------------------------------- http bits
 const MIME = {
   '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript',
@@ -177,6 +245,7 @@ const server = http.createServer((req, res) => {
     }
     res.write('event: ready\ndata: {}\n\n');
     s.clients.add(res);
+    reconcilePRs(s); // heal stale PR state the moment someone opens the board
     // Real `ping` event (not a `:` comment) so the client can observe liveness
     // and detect a wedged socket — a comment fires no handler, so a board left
     // running through a laptop sleep can't tell its stream died.

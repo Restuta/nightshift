@@ -263,31 +263,6 @@ function prMetaFrom(text, t) {
   });
 }
 
-// The agent narrates merges reliably ("PR #198 merged", "merged in PR #205").
-// Parse those, guarding against negations ("#261 is not merged yet").
-function prMergesFrom(text, t) {
-  const nums = new Set();
-  for (const m of text.matchAll(/\bmerged\b[^.\n#]{0,12}#(\d+)/gi)) {
-    const pre = text.slice(Math.max(0, m.index - 16), m.index).toLowerCase();
-    if (/\bnot\b|isn'?t|aren'?t|\bun|will|would|should|before|once|after|when|if\b/.test(pre)) continue;
-    nums.add(Number(m[1]));
-  }
-  for (const m of text.matchAll(/#(\d+)[^.\n]{0,12}\bmerged\b/gi)) {
-    if (/\bnot\b|isn'?t|n'?t |\bun/i.test(m[0])) continue;
-    nums.add(Number(m[1]));
-  }
-  // Completed-merge phrasings the past-tense match misses ("#223 did merge",
-  // "#236 was merged", "merged successfully"). Intentionally NOT "merging #224"
-  // — present tense is intent, not done, and the merge can still be gate-blocked.
-  for (const m of text.matchAll(/#(\d+)\b[^.\n]{0,24}\b(?:did merge|was merged|got merged|has merged|merged successfully|merge commit)\b/gi)) {
-    if (/\bnot\b|isn'?t|n'?t |\bun|\bwill\b|\bwould\b|\bshould\b|\bonce\b|\bbefore\b|\bafter\b|\bwhen\b|\bif\b/i.test(m[0])) continue;
-    nums.add(Number(m[1]));
-  }
-  // "pull/N at merge commit <sha>" — a merge commit hash is proof it landed.
-  for (const m of text.matchAll(/pull\/(\d+)\b[^.\n]{0,30}\bmerge commit\b/gi)) nums.add(Number(m[1]));
-  return [...nums].map(n => ({ t, type: 'pr', number: n, state: 'merged' }));
-}
-
 // Map a toast review-ci result to a ci status. Toast's vocabulary: ready (good),
 // pending (running), needs_fix / blocked / github_blocked (action needed).
 function toastCi(text) {
@@ -352,13 +327,13 @@ function step(e) {
         in: Math.max(0, (u.input_tokens || 0) - cached), out: u.output_tokens || 0, cacheRead: cached,
       });
     } else if (p.type === 'agent_message' && p.message) {
-      // Merge narration ("PR #205 merged") is reliable and guarded; opens come
-      // from `gh pr create` output, not prose urls (which may cite merged PRs).
-      out.push(...prMergesFrom(p.message, t));
-      // The message is also the agent's plaintext status — its running thoughts
-      // ("waiting one more interval for the harvest to finish"). It used to live
-      // only in the CLI/rollout, so a turn spent narrating looked dead on the
-      // board. Emit it as a `say` so the active card shows what the agent's doing.
+      // The message is the agent's plaintext status — its running thoughts
+      // ("waiting one more interval for the harvest to finish"). Emit it as a
+      // `say` so the active card shows what the agent's doing. We deliberately do
+      // NOT infer PR merges from this prose: narration is intent, not fact, and it
+      // false-merged #404 (the agent wrote "merged" about a PR still open). Per
+      // invariant #4, terminal PR state comes only from authoritative gh output —
+      // `gh pr list --state merged` (below) and the poller's gh queries.
       const say = String(p.message).replace(/\s+/g, ' ').trim();
       if (say) out.push({ t, type: 'say', text: say.slice(0, 280), ...(state.card ? { item: state.card } : {}) });
     }
