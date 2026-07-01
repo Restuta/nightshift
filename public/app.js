@@ -215,15 +215,23 @@ async function initSessions() {
     if (age < 30 * 60e3) return '🟡';     // within 30 min — recent
     return '⚪';                           // older — stale
   };
-  // Prefer the agent's own session name (Claude's customTitle, flowed into the
-  // tape as the title) — it's what the human knows the session by. Keep the
-  // worktree basename as a hint so sibling worktree tapes stay distinguishable.
-  // Fall back to the slug when there's no meaningful name (title == basename).
+  // What distinguishes a repo's parallel sessions is the WORKTREE — and that
+  // lives in the tape's filename (slug), NOT in the recorded cwd or title. A
+  // fleet of Codex agents all record cwd = the main repo and often share a
+  // generic title ("context-restore."), so labeling by title·cwd renders 15
+  // identical rows. Label by the worktree suffix baked into the slug instead;
+  // append the title only when there's no worktree to tell tapes apart.
   const place = s => {
     const slug = s.id.replace(/^Users-[^-]+-Projects-/, '') || s.id;
-    const wt = s.cwd ? s.cwd.split('/').filter(Boolean).pop() : '';
-    if (s.title && wt && s.title !== wt) return `${s.title} · ${wt}`;
-    return slug || s.title || s.id;
+    const repo = s.cwd ? s.cwd.split('/').filter(Boolean).pop() : '';
+    let label = slug;
+    if (repo) {
+      const i = slug.lastIndexOf(repo + '-');
+      if (i >= 0) label = slug.slice(i + repo.length + 1); // the worktree tail
+      else if (slug.endsWith(repo)) label = repo;          // the bare repo tape
+    }
+    const t = (s.title || '').trim();
+    return (label === repo && t && t !== repo) ? `${repo} · ${t}` : label;
   };
   const sel = $('#session-select');
   if (list.length > 1) {
@@ -531,18 +539,21 @@ function makeCard() {
     nowDoing: el.querySelector('.now-doing'),
     ndText: el.querySelector('.nd-text'),
   };
-  // Click a card with a plan to expand/collapse its steps (the active card
-  // shows them anyway). Don't hijack clicks on the PR link.
+  // Click a card with a plan to expand/collapse its steps (collapsed shows only
+  // the recent tail — see updateCard). Re-render so the expand takes effect at
+  // once, not on the next event. Don't hijack clicks on the PR link.
   el.addEventListener('click', e => {
     if (e.target.closest('a')) return;
     if (!el.classList.contains('has-todos')) return;
     el.classList.toggle('expanded');
+    if (el._it) updateCard(el, el._it, false, el._activeId);
   });
   return el;
 }
 
 function updateCard(el, it, animate, activeId) {
   const R = el._refs;
+  el._it = it; el._activeId = activeId; // remembered so a click can re-render in place
   R.emoji.textContent = cardEmoji(it);
   R.cid.textContent = it.id;
   R.title.textContent = it.title || it.id;
@@ -579,12 +590,23 @@ function updateCard(el, it, animate, activeId) {
     const when = t => t.doneAt || t.startedAt || t.firstSeenAt || 0;
     steps.sort((x, y) => when(x) - when(y));
     el._todos = steps;
-    R.tlist.innerHTML = steps.map(t => {
+    // A long autonomous turn (one Codex card can span dozens of plan steps) would
+    // otherwise render a wall of checklist items taller than the screen. Collapsed,
+    // show only the tail — recent history plus the in-progress step; a "+N earlier"
+    // line leads, and clicking the card expands to the full list.
+    const CAP = 6;
+    const collapsed = !el.classList.contains('expanded');
+    const hidden = collapsed && steps.length > CAP ? steps.length - CAP : 0;
+    const shown = hidden ? steps.slice(hidden) : steps;
+    const li = t => {
       const now = t.status === 'in_progress';
       const cls = t.status === 'completed' ? 'done' : now ? 'now' : 'unfinished';
       const tm = stepTime(t, now);
       return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}</li>`;
-    }).join('');
+    };
+    R.tlist.innerHTML =
+      (hidden ? `<li class="more">+${hidden} earlier step${hidden > 1 ? 's' : ''}</li>` : '') +
+      shown.map(li).join('');
   }
 
   if (it.pr) {

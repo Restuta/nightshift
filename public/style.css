@@ -503,6 +503,10 @@ body.tape-collapsed .tape-resize { display: none; }
    live spinner — the turn finished without it, it isn't actively running. */
 .todo-list li.unfinished { color: var(--dim); opacity: .6; }
 .todo-list li.unfinished::before { border-color: var(--faint); border-style: dashed; }
+/* "+N earlier steps" — the collapsed-delta affordance on a long turn. No bullet;
+   quiet, italic; text aligns with the steps. Clicking the card expands the list. */
+.todo-list li.more { color: var(--faint); font-size: 11px; font-style: italic; }
+.todo-list li.more::before { display: none; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
