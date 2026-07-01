@@ -126,7 +126,20 @@ including the ones building it.
   **Terminal PR state (merged/closed) is only ever recorded from authoritative gh
   output** — never inferred from the agent's prose (that false-merged #404). The
   Codex tailer's old narration-merge parser was removed for exactly this reason.
+- `tools/prune-sessions.js` — keeps the board's session list bounded: archives
+  (moves to `~/.nightshift/archive/`, reversible) or `--delete`s tapes untouched
+  for `--days N` (default 14; freshness = file mtime). `--dry-run` previews. The
+  server reconciles removals on its `--dir` rescan, so a prune reflects on the
+  board within seconds without a restart. Run it when the switcher gets long.
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
+
+## Session switcher
+
+A fleet board can serve dozens of tapes, so the masthead switcher is a filterable
+popover (`#session-picker`), not a native `<select>`. Rows are labeled by the
+WORKTREE (the slug's suffix), because parallel Codex agents all record cwd = the
+main repo and often share a generic title — labeling by title·cwd renders N
+identical rows. Freshest first, with a live/recent/stale dot.
 
 ## Commands
 

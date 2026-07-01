@@ -196,60 +196,105 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// Session switcher — fetch the served tapes; show the dropdown when >1.
-// Most-recently-active first, with a live/idle marker, so you can't get stranded
-// on a stale worktree tape (a dead session looks dead but isn't your current one).
-async function initSessions() {
-  let list = [];
-  try { list = await (await fetch('/sessions')).json(); } catch { /* offline */ }
-  list.sort((a, b) => (b.lastT || 0) - (a.lastT || 0)); // freshest first
-  const params = new URLSearchParams(location.search);
-  const wanted = params.get('session');
-  // Respect an explicit ?session=, else default to the most recently active.
-  const start = (list.find(s => s.id === wanted) || list[0] || {}).id || 'default';
+// Session switcher. A fleet board can serve dozens of tapes, so it's a filterable
+// popover (type to narrow), not a native <select> wall. Freshest first, with a
+// live/idle dot, so you can't get stranded on a stale worktree tape.
+let sessionList = [];
 
+// live (<90s) / recent (<30m) / stale dot.
+function sessionMark(s, now) {
+  const age = now - (s.lastT || 0);
+  if (age < 90e3) return '🟢';
+  if (age < 30 * 60e3) return '🟡';
+  return '⚪';
+}
+
+// What distinguishes a repo's parallel sessions is the WORKTREE — and that lives
+// in the tape's filename (slug), NOT in the recorded cwd or title. A fleet of
+// Codex agents all record cwd = the main repo and often share a generic title
+// ("context-restore."), so labeling by title·cwd renders 15 identical rows.
+// Label by the worktree suffix baked into the slug; append the title only when
+// there's no worktree to tell tapes apart.
+function sessionLabel(s) {
+  const slug = s.id.replace(/^Users-[^-]+-Projects-/, '') || s.id;
+  const repo = s.cwd ? s.cwd.split('/').filter(Boolean).pop() : '';
+  let label = slug;
+  if (repo) {
+    const i = slug.lastIndexOf(repo + '-');
+    if (i >= 0) label = slug.slice(i + repo.length + 1); // the worktree tail
+    else if (slug.endsWith(repo)) label = repo;          // the bare repo tape
+  }
+  const t = (s.title || '').trim();
+  return (label === repo && t && t !== repo) ? `${repo} · ${t}` : label;
+}
+
+function currentSessionId() { return new URLSearchParams(location.search).get('session'); }
+
+function setPickerLabel(id) {
+  const s = sessionList.find(x => x.id === id);
+  $('#session-btn-label').textContent = s ? sessionLabel(s) : (id || 'no session');
+}
+
+function renderSessionMenu(filter) {
   const now = Date.now();
-  const mark = s => {
-    const age = now - (s.lastT || 0);
-    if (age < 90e3) return '🟢';          // wrote in the last 90s — live
-    if (age < 30 * 60e3) return '🟡';     // within 30 min — recent
-    return '⚪';                           // older — stale
-  };
-  // What distinguishes a repo's parallel sessions is the WORKTREE — and that
-  // lives in the tape's filename (slug), NOT in the recorded cwd or title. A
-  // fleet of Codex agents all record cwd = the main repo and often share a
-  // generic title ("context-restore."), so labeling by title·cwd renders 15
-  // identical rows. Label by the worktree suffix baked into the slug instead;
-  // append the title only when there's no worktree to tell tapes apart.
-  const place = s => {
-    const slug = s.id.replace(/^Users-[^-]+-Projects-/, '') || s.id;
-    const repo = s.cwd ? s.cwd.split('/').filter(Boolean).pop() : '';
-    let label = slug;
-    if (repo) {
-      const i = slug.lastIndexOf(repo + '-');
-      if (i >= 0) label = slug.slice(i + repo.length + 1); // the worktree tail
-      else if (slug.endsWith(repo)) label = repo;          // the bare repo tape
-    }
-    const t = (s.title || '').trim();
-    return (label === repo && t && t !== repo) ? `${repo} · ${t}` : label;
-  };
-  const sel = $('#session-select');
-  if (list.length > 1) {
-    sel.innerHTML = list.map(s =>
-      `<option value="${esc(s.id)}">${mark(s)} ${esc(place(s))}${s.agent ? ` · ${s.agent}` : ''} · ${ageText(now - (s.lastT || now))} ago</option>`
-    ).join('');
-    sel.value = start;
-    sel.hidden = false;
+  const q = (filter || '').trim().toLowerCase();
+  const cur = currentSessionId();
+  const rows = sessionList.filter(s =>
+    !q || sessionLabel(s).toLowerCase().includes(q) || (s.agent || '').toLowerCase().includes(q));
+  $('#session-list').innerHTML = rows.map(s =>
+    `<li role="option" data-id="${esc(s.id)}" class="${s.id === cur ? 'sel' : ''}">` +
+    `<span class="sm-dot">${sessionMark(s, now)}</span>` +
+    `<span class="sm-label">${esc(sessionLabel(s))}</span>` +
+    `<span class="sm-meta">${s.agent ? esc(s.agent) + ' · ' : ''}${ageText(now - (s.lastT || now))} ago</span>` +
+    `</li>`).join('') || '<li class="sm-empty">no matches</li>';
+}
+
+async function initSessions() {
+  try { sessionList = await (await fetch('/sessions')).json(); } catch { sessionList = []; }
+  sessionList.sort((a, b) => (b.lastT || 0) - (a.lastT || 0)); // freshest first
+  const wanted = currentSessionId();
+  const start = (sessionList.find(s => s.id === wanted) || sessionList[0] || {}).id || 'default';
+
+  if (sessionList.length > 1) {
+    $('#session-picker').hidden = false;
     $('#session-title').hidden = true;
-    sel.addEventListener('change', () => {
-      const p = new URLSearchParams(location.search);
-      p.set('session', sel.value); p.delete('at');
-      history.replaceState(null, '', `?${p}`);
-      connect(sel.value);
-    });
+    setPickerLabel(start);
   }
   connect(start);
 }
+
+// Picker popover wiring (elements always present; harmless while hidden).
+(() => {
+  const picker = $('#session-picker'), menu = $('#session-menu');
+  const btn = $('#session-btn'), input = $('#session-filter');
+  if (!picker || !menu || !btn || !input) return;
+  const close = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  const open = () => {
+    renderSessionMenu('');
+    input.value = '';
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    input.focus();
+  };
+  btn.addEventListener('click', e => { e.stopPropagation(); menu.hidden ? open() : close(); });
+  input.addEventListener('input', () => renderSessionMenu(input.value));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { close(); btn.focus(); }
+    if (e.key === 'Enter') { const first = $('#session-list').querySelector('li[data-id]'); if (first) first.click(); }
+  });
+  $('#session-list').addEventListener('click', e => {
+    const li = e.target.closest('li[data-id]');
+    if (!li) return;
+    const id = li.dataset.id;
+    const p = new URLSearchParams(location.search);
+    p.set('session', id); p.delete('at');
+    history.replaceState(null, '', `?${p}`);
+    setPickerLabel(id);
+    close();
+    connect(id);
+  });
+  document.addEventListener('click', e => { if (!picker.contains(e.target)) close(); });
+})();
 
 function goLive() {
   live = true; playing = false;

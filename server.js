@@ -56,16 +56,27 @@ function addSession(file) {
 }
 for (const file of logPaths) addSession(file);
 
+const defaultSession = sessions.keys().next().value;
+
 // A persistent --dir board should surface projects recorded after it started,
-// so rescan the folder for new *.jsonl. (Open pages see them on refresh.)
+// so rescan the folder for new *.jsonl (open pages see them on refresh) — and
+// reconcile removals: a tape archived/deleted by prune-sessions.js is dropped
+// from the list within a few seconds, so cleanup reflects live without a restart.
+// The default session is never dropped, so the board always has a fallback.
 if (servedDir) {
   setInterval(() => {
     let files = [];
     try { files = fs.readdirSync(servedDir); } catch { return; }
-    for (const f of files) if (f.endsWith('.jsonl')) addSession(path.join(servedDir, f));
+    const present = new Set(files.filter(f => f.endsWith('.jsonl')).map(f => path.join(servedDir, f)));
+    for (const f of present) addSession(f);
+    for (const [id, s] of sessions) {
+      if (id !== defaultSession && s.file.startsWith(servedDir + path.sep) && !present.has(s.file)) {
+        sessions.delete(id);
+        usedIds.delete(id);
+      }
+    }
   }, 3000).unref();
 }
-const defaultSession = sessions.keys().next().value;
 
 // A cheap scan for the switcher: title, agent, event count, last activity,
 // and the latest session phase. Parses lines but folds nothing heavy.
