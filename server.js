@@ -211,6 +211,10 @@ function prScan(s) {
   for (const ev of evs) {
     if (ev.type === 'session' && ev.cwd) cwd = ev.cwd;
     else if (ev.type === 'pr' && ev.number != null && ev.state) st.set(ev.number, ev.state);
+    // A pr_ref sighting with no confirmed pr state yet still needs a poll — the
+    // hook/tailer emit these instead of pr now (plan 1.4), so bootstrap the poller
+    // from them, else a freshly created PR would never get its first pr event.
+    else if (ev.type === 'pr_ref' && ev.number != null && !st.has(ev.number)) st.set(ev.number, 'open');
   }
   let open = 0;
   for (const v of st.values()) if (v === 'open') open++;
