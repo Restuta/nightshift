@@ -23,6 +23,39 @@ Every event has:
 
 Unknown event types must be ignored by consumers (forward compatibility).
 
+### Envelope v2 — `id`, `source`, `v`
+
+Every event a producer writes now also carries:
+
+| field | type | meaning |
+|-------|------|---------|
+| `id` | string | a unique per-event identity (`crypto.randomUUID()`). See the item-event exception below. |
+| `source` | string | which producer wrote it (the registry below) |
+| `v` | number | envelope version — currently `2` |
+
+Why: without an identity, duplicated events were invisible. One real tape
+(`grade-v7-n154`) had its entire 14k-event stream re-appended by a second
+recorder — 9,105 out-of-order events and a 10-hour backward time jump — and
+nothing could tell the copy from the original. `id` makes duplication detectable
+(the server's `POST /event` dedupe guard; `tools/tape-doctor.js --dedupe`).
+
+**Source registry** — a producer writes its own name, one of:
+`hook` · `codex-tail` · `poll-github` · `server` · `emit` · `ui` · `import` ·
+`backfill` · `demo`. (`tape-doctor`'s corrective `retract` events use `backfill`
+— it is a tape-maintenance producer.)
+
+**The item-event exception.** `item` events already key on `id` as the *work-item*
+id (`{type:"item", id:"wi-2", …}`), and that id is legitimately reused across a
+card's transitions (`doing`→`done`). So an item event's `id` is its work-item id,
+NOT a per-event UUID — producers stamp the UUID only when `id` is missing (a
+`{ …, ...ev }` spread does this naturally). Consumers that dedupe by `id` must
+therefore treat item events as exact-line-only (their ids repeat by design), and
+`retract`'s `target.item` (below) is how you address a card.
+
+**v1 compatibility is forever.** Events without `id`/`source`/`v` are fully valid;
+consumers MUST NOT require the new fields. Old tapes keep folding unchanged. `v`
+is informational, not a gate.
+
 ## Types
 
 ### `session`
@@ -95,6 +128,38 @@ ambient status stream and can be frequent.
 ### `note`
 Free-form narration from the agent. `{text}` — used sparingly for milestones,
 not a chat log.
+
+### `retract`
+Correct a recording error. `{type:"retract", target:{event?:<event id>, item?:<item id>}, reason?}`
+- `target.event` names an envelope `id`; `target.item` names a work-item id.
+- **Semantics: retraction is META-level and applies at ALL replay times.** Before
+  folding, `fold()` pre-scans the ENTIRE array (ignoring `untilT`) for retracts,
+  then skips any event whose `id` is retracted and drops any retracted item
+  entirely — it vanishes from board, counts, and feed at every scrub time, even
+  times *before* the retract's own `t`.
+- **This is the ONE documented exception to "replay shows history as it was."**
+  The rationale: a recording bug is *not* history. Two cards titled
+  `<task-notification>` from a producer bug, or a whole re-appended stream, were
+  never real work — replaying them faithfully just reproduces the bug forever. An
+  append-only tape can't delete, so `retract` is the append-only way to say "this
+  line was never true." Genuine history (a card that really moved `doing`→`done`,
+  a PR that really merged) is never retracted — only recording errors are.
+- `fold` stays a pure, deterministic function of `(events, untilT)`.
+
+## Ordering
+
+The log is *meant* to be time-ordered, but a tape can arrive out of order (a late
+backfill, or the n154 re-append seam). So:
+
+- **Consumers sort by `t`.** The board stable-sorts on load and inserts late live
+  arrivals at their position (`public/app.js`); the server sorts before any
+  whole-file scan (`prScan`, `scanMeta`); `tools/tape-doctor.js --sort` rewrites a
+  tape in order. Array sort is stable, so equal `t` preserves file order.
+- **`fold()` never stops early.** Its per-event guard is `continue`, not `break`:
+  a single event whose `t` exceeds `untilT` is skipped, not treated as the end —
+  otherwise an out-of-order tape made scrub-to-end and live-fold disagree.
+- **Producers should still append in time order** (they nearly always do), but no
+  consumer may rely on it.
 
 ## Attribution heuristic
 

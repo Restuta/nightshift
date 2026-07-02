@@ -8,7 +8,9 @@ including the ones building it.
 
 1. **The event log is the contract.** `docs/EVENTS.md` is the source of truth.
    Server, UI, hooks, and importers are all producers or pure consumers of
-   JSONL events. New features start by asking "what event is this?"
+   JSONL events. New features start by asking "what event is this?" Every event
+   carries an envelope-v2 stamp `{id, source, v:2}` (unique id, producer name);
+   v1 events without it stay valid forever (see EVENTS.md "Envelope v2").
 2. **The reducer is pure.** UI state is `reduce(events[0..t])`. Never fetch
    external state (CI, PR status, GitHub) at render time — record it as an
    event. This is what makes replay work; breaking it breaks time travel.
@@ -131,6 +133,12 @@ including the ones building it.
   for `--days N` (default 14; freshness = file mtime). `--dry-run` previews. The
   server reconciles removals on its `--dir` rescan, so a prune reflects on the
   board within seconds without a restart. Run it when the switcher gets long.
+- `tools/tape-doctor.js` — offline tape repair (zero deps, dry-run by default,
+  writes a `.bak` before applying, NEVER touches `~/.nightshift` on its own).
+  `--dedupe` removes re-append duplicates (the n154 corruption) and reports
+  backward-time seams; `--sort` reorders by `t`; `--retract-junk` appends
+  `retract` events for harness-injected cards; `--collapse-dupes <dir>` moves
+  near-identical fleet copies of one session to an archive dir (never deletes).
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
 
 ## Session switcher

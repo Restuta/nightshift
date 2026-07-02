@@ -59,6 +59,18 @@ function upperBound(t) {
   return n;
 }
 
+// Insert a late-arriving event into the sorted log at its position by t (binary
+// search for the first entry with a strictly greater t, so equal t keeps arrival
+// order). Used only on the rare out-of-order live arrival.
+function insertByT(arr, ev) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid].t <= ev.t) lo = mid + 1; else hi = mid;
+  }
+  arr.splice(lo, 0, ev);
+}
+
 // number ticker — tweens displayed value toward target
 function setNum(el, val, animate, fmt = n => n.toLocaleString('en-US')) {
   const from = el._v ?? 0;
@@ -124,14 +136,31 @@ function openStream(id) {
     try { ev = JSON.parse(e.data); } catch { return; }
     if (typeof ev.t !== 'number' || typeof ev.type !== 'string') return;
     if (!connReady) { buf.push(ev); return; }  // history replay → buffer
-    log.push(ev);
+    // Keep `log` ordered by t. The common case is the newest event (t >= last),
+    // which just appends and folds incrementally as before. A late arrival (an
+    // OLDER t — a backfill, or an n154-style re-append seam) is inserted at its
+    // sorted position, and a `retract` is meta (it applies at ALL replay times),
+    // so both take the rare correctness-over-speed path: re-fold from scratch.
+    const lastT = log.length ? log[log.length - 1].t : -Infinity;
+    const older = ev.t < lastT;
+    const meta = ev.type === 'retract';
+    if (older) insertByT(log, ev); else log.push(ev);
     if (!ready) return;
-    if (live) {
+    if (!live) {
+      // A late/meta event can change the already-replayed state; re-fold at vt.
+      if (older || meta) { state = fold(log, vt); cursor = upperBound(vt); renderAll(false); }
+      else drawTimeline(); // tape just grows under the paused/replaying view
+      return;
+    }
+    if (older || meta) {
+      state = fold(log);
+      cursor = log.length;
+      vt = log.length ? log[log.length - 1].t : Date.now();
+      renderAll(false);
+    } else {
       reduce(state, ev);
       cursor++;
       renderAll(true, [ev]);
-    } else {
-      drawTimeline(); // tape grows under the paused/replaying view
     }
   };
 
@@ -143,6 +172,10 @@ function openStream(id) {
     log.length = 0;
     for (const ev of buf) log.push(ev);
     buf = [];
+    // Consume the log time-ordered even if it was recorded out of order (Array
+    // .sort is stable, so equal t keeps file order). fold() has a belt-and-
+    // suspenders guard too, but sorting here is what makes scrub == live.
+    log.sort((a, b) => a.t - b.t);
     ready = true;
     lastBeat = Date.now();
     renderStatus();
@@ -1146,10 +1179,14 @@ $('#add-card-form').addEventListener('submit', async e => {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
+      // Envelope v2, source 'ui'. This is an item event, so `id` is the work-item
+      // id (its identity); the server won't overwrite it with a UUID.
       type: 'item',
       id: 'wi-' + Date.now().toString(36),
       title,
       status: 'inbox',
+      source: 'ui',
+      v: 2,
     }),
   }).catch(() => {});
   // no local apply — the SSE echo renders it, same path as every other event

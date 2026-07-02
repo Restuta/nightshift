@@ -7,6 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
 
 const [type, ...rest] = process.argv.slice(2);
 if (!type || type.startsWith('--')) {
@@ -14,7 +15,10 @@ if (!type || type.startsWith('--')) {
   process.exit(1);
 }
 
-const ev = { t: Date.now(), type };
+// Envelope v2: unique event id + source + v. `--id` (item events' work-item id)
+// overrides the UUID in the loop below — item ids are reused across a card's
+// transitions, so the item id, not a per-line UUID, is this event's identity.
+const ev = { t: Date.now(), id: randomUUID(), source: 'emit', v: 2, type };
 let log = path.join(process.env.CLAUDE_PROJECT_DIR || '.', '.nightshift', 'events.jsonl');
 
 for (let i = 0; i < rest.length; i += 2) {

@@ -24,6 +24,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { randomUUID } = require('node:crypto');
 
 const argv = process.argv.slice(2);
 const flags = { repo: [] };
@@ -307,7 +308,9 @@ events.sort((a, b) => a.t - b.t);
 
 const out = flags.out || path.join('.nightshift', `import-${sid8}.jsonl`);
 fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+// Envelope v2: stamp a unique event id + source + v on each line as it's written.
+// `...e` last so an item event keeps its own `id` (the work-item id).
+fs.writeFileSync(out, events.map(e => JSON.stringify({ id: randomUUID(), source: 'import', v: 2, ...e })).join('\n') + '\n');
 
 const mins = Math.round((r.lastT - r.firstT) / 60000);
 const usageCount = events.filter(e => e.type === 'usage').length;

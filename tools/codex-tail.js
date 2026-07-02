@@ -17,6 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { randomUUID } = require('node:crypto');
 
 const args = process.argv.slice(2);
 const val = f => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
@@ -449,7 +450,9 @@ function append(events) {
   if (meter) events = events.filter(meterKeep);
   if (!events.length || !LOG) return;
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
-  fs.appendFileSync(LOG, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+  // Envelope v2: unique event id + source + v per line. `...e` last so item
+  // events keep their work-item `id`.
+  fs.appendFileSync(LOG, events.map(e => JSON.stringify({ id: randomUUID(), source: 'codex-tail', v: 2, ...e })).join('\n') + '\n');
 }
 
 // --- tail loop --------------------------------------------------------------

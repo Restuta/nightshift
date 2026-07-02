@@ -12,6 +12,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
 
 const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
 
@@ -78,7 +79,10 @@ function recording(hook, central) {
 function makeAppend(LOG) {
   return ev => {
     fs.mkdirSync(path.dirname(LOG), { recursive: true });
-    fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), ...ev }) + '\n');
+    // Envelope v2: stamp a unique event id + this producer's source + v. `...ev`
+    // last so an item event's own `id` (the work-item id) wins over the UUID —
+    // item ids are legitimately reused across a card's transitions (see EVENTS.md).
+    fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'hook', v: 2, ...ev }) + '\n');
   };
 }
 

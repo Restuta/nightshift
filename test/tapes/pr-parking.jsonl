@@ -1,0 +1,10 @@
+{"t":1700000300000,"id":"p0","source":"hook","v":2,"type":"session","phase":"start","title":"pr parking","agent":"claude","cwd":"/repo"}
+{"t":1700000360000,"source":"hook","v":2,"type":"item","id":"turn-5","title":"What's the status of work?","status":"doing"}
+{"t":1700000420000,"id":"p1","source":"hook","v":2,"type":"edit","path":"work.js","item":"turn-5"}
+{"t":1700000480000,"id":"p2","source":"hook","v":2,"type":"commit","sha":"ccc3333","message":"ship it","add":20,"del":5,"files":2,"item":"turn-5"}
+{"t":1700000540000,"id":"p3","source":"hook","v":2,"type":"pr","number":381,"title":"the work","url":"https://github.com/o/r/pull/381","state":"open","item":"turn-5"}
+{"t":1700000600000,"id":"p4","source":"poll-github","v":2,"type":"ci","pr":381,"status":"pending"}
+{"t":1700000660000,"source":"hook","v":2,"type":"item","id":"turn-5","status":"done"}
+{"t":1700000780000,"id":"p5","source":"poll-github","v":2,"type":"ci","pr":381,"status":"pass"}
+{"t":1700000840000,"id":"p6","source":"poll-github","v":2,"type":"pr","number":381,"state":"merged"}
+{"t":1700000900000,"id":"p7","source":"hook","v":2,"type":"session","phase":"idle"}

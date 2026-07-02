@@ -4,6 +4,7 @@
 // no matter who made the commit — agent, human, or another tool.
 
 const { execSync } = require('child_process');
+const { randomUUID } = require('node:crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -23,5 +24,5 @@ try {
 
   const log = path.join(root, '.nightshift', 'events.jsonl');
   fs.mkdirSync(path.dirname(log), { recursive: true });
-  fs.appendFileSync(log, JSON.stringify({ t: Date.now(), type: 'commit', sha, message, add, del, files }) + '\n');
+  fs.appendFileSync(log, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'hook', v: 2, type: 'commit', sha, message, add, del, files }) + '\n');
 } catch { /* never block a commit */ }

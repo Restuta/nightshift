@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
 
 try {
   const n = JSON.parse(process.argv[process.argv.length - 1] || '{}');
@@ -31,6 +32,6 @@ try {
     if (!cwd || !fs.existsSync(path.join(cwd, '.nightshift'))) process.exit(0);
     log = path.join(cwd, '.nightshift', 'events.jsonl');
   }
-  fs.appendFileSync(log, JSON.stringify({ t: Date.now(), ...ev }) + '\n');
+  fs.appendFileSync(log, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'hook', v: 2, ...ev }) + '\n');
 } catch { /* observability must never break the session */ }
 process.exit(0);
