@@ -183,6 +183,14 @@ including the ones building it.
   backward-time seams; `--sort` reorders by `t`; `--retract-junk` appends
   `retract` events for harness-injected cards; `--collapse-dupes <dir>` moves
   near-identical fleet copies of one session to an archive dir (never deletes).
+- `tools/report-model.mjs` — the Shift Report (`GET /report?session=&since=`): a
+  pure `buildReportModel(events, since)` folds the tape with the SAME reducer the
+  board uses and derives the morning answer — header, *Needs you*, *Shipped*,
+  *Still open*, *The story* (chapters split on >30min silent gaps), cost — plus a
+  thin server-rendered HTML view. Deterministic, zero-dep, no LLM; every claim
+  deep-links into replay (`/?session=&t=`). Session omitted = fleet aggregate.
+  `server.js` loads it via `import()` (CJS → ESM) and caches the model per
+  `(file, mtime, since)`.
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
 
 ## Session switcher
