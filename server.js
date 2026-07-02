@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { randomUUID } = require('node:crypto');
+const { pathToFileURL } = require('node:url');
 
 const args = process.argv.slice(2);
 function flag(name, fallback) {
@@ -254,6 +255,78 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
+// ----------------------------------------------------------- shift report
+// GET /report?session=<id>&since=<ISO|epoch-ms|Nh> — the morning answer, a pure
+// server-side fold of the tape(s) (tools/report-model.mjs) rendered to static
+// HTML. Session omitted = aggregate across all served sessions. The heavy work
+// (fold → model) is cached per (file, mtime, since); render is cheap and fresh.
+const REPORT_MODEL_URL = pathToFileURL(path.join(__dirname, 'tools', 'report-model.mjs')).href;
+const reportCache = new Map(); // `${file}\0${mtime}\0${since}` → model
+
+// since accepts an ISO date, an epoch-ms number, or the shorthand Nh/Nd/Nm/Nw
+// (also `0` for "all time"). Default: 24h ago.
+function parseSince(param, now) {
+  const s = (param || '').trim();
+  if (!s) return now - 24 * 3600e3;
+  const m = /^(\d+)\s*([hdmw])$/i.exec(s);
+  if (m) {
+    const unit = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 }[m[2].toLowerCase()];
+    return now - Number(m[1]) * unit;
+  }
+  if (/^\d+$/.test(s)) return Number(s);            // epoch ms (0 = all)
+  const parsed = Date.parse(s);
+  return Number.isNaN(parsed) ? now - 24 * 3600e3 : parsed;
+}
+
+function readEvents(file) {
+  let raw = '';
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const evs = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try { evs.push(JSON.parse(line)); } catch { /* skip a torn line */ }
+  }
+  return evs;
+}
+
+function sessionModel(s, buildReportModel, sinceParam, now) {
+  let mtime = 0;
+  try { mtime = fs.statSync(s.file).mtimeMs; } catch { /* gone */ }
+  const key = `${s.file}\0${mtime}\0${sinceParam}`;
+  const hit = reportCache.get(key);
+  if (hit) return hit;
+  const model = buildReportModel(readEvents(s.file), parseSince(sinceParam, now), { now });
+  reportCache.set(key, model);
+  if (reportCache.size > 200) reportCache.delete(reportCache.keys().next().value);
+  return model;
+}
+
+async function handleReport(req, res, url) {
+  let buildReportModel, renderReportHTML;
+  try {
+    ({ buildReportModel, renderReportHTML } = await import(REPORT_MODEL_URL));
+  } catch (e) {
+    res.writeHead(500, { 'content-type': 'text/plain' });
+    res.end('report module failed to load: ' + (e && e.message));
+    return;
+  }
+  const wantId = url.searchParams.get('session');
+  let targets;
+  if (wantId) {
+    const s = sessions.get(wantId);
+    if (!s) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end(`unknown session: ${wantId}`); return; }
+    targets = [s];
+  } else {
+    targets = [...sessions.values()];
+  }
+  const sinceParam = (url.searchParams.get('since') || '').trim() || '24h';
+  const now = Date.now();
+  const built = targets.map(s => ({ id: s.id, model: sessionModel(s, buildReportModel, sinceParam, now) }));
+  const html = renderReportHTML({ sessions: built, sinceParam });
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(html);
+}
+
 function serveStatic(req, res) {
   const url = new URL(req.url, 'http://x');
   let file = path.normalize(path.join(PUBLIC, url.pathname === '/' ? 'index.html' : url.pathname));
@@ -342,6 +415,15 @@ const server = http.createServer((req, res) => {
         res.writeHead(400, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: String(e.message || e) }));
       }
+    });
+    return;
+  }
+
+  if (url.pathname === '/report') {
+    handleReport(req, res, url).catch(e => {
+      if (res.headersSent) return;
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('report error: ' + (e && e.message));
     });
     return;
   }
