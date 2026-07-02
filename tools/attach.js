@@ -46,7 +46,7 @@ if (fs.existsSync(settingsPath)) {
 }
 const CMD = 'node "$CLAUDE_PROJECT_DIR/.nightshift/hooks/claude-hook.js"';
 const HOOK_EVENTS = {
-  SessionStart: null, UserPromptSubmit: null, Stop: null, Notification: null,
+  SessionStart: null, SessionEnd: null, UserPromptSubmit: null, Stop: null, Notification: null,
   PostToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite',
 };
 settings.hooks = settings.hooks || {};

@@ -322,6 +322,22 @@ function main() {
     return;
   }
 
+  // Claude Code fires SessionEnd when the session actually closes (reason:
+  // clear|logout|prompt_input_exit|other). Codex fires no such hook — its end
+  // comes from the rollout tailer's self-retirement (tools/codex-tail.js). This
+  // is where a session boundary is genuinely KNOWABLE for a hook-based recorder,
+  // so record it: the reducer sweeps any card still in `doing` to abandoned and
+  // freezes the now-lines (1.6). Retire the open turn card first so it doesn't
+  // strand in "in progress" behind the end.
+  if (name === 'SessionEnd') {
+    if (!SELF && sid) {
+      const st = turnState(sid);
+      if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
+    }
+    append({ type: 'session', phase: 'end', session: sid, reason: hook.reason });
+    return;
+  }
+
   if (name === 'Stop') { // Claude only — Codex fires no Stop
     // For central recordings (where we synthesize the turn card, below), retire
     // it here: Claude gives a clean end-of-turn signal Codex lacks, so the card

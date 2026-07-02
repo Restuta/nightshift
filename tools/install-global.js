@@ -51,7 +51,7 @@ const CMD =
   '|| { [ -z "$CLAUDE_CODE_SESSION_ID" ] && [ -n "$(ls -A "$HOME/.nightshift/active" 2>/dev/null)" ]; }; ' +
   `then node "${HOOK}"; fi; true`;
 const EVENTS = {
-  SessionStart: null, UserPromptSubmit: null, Stop: null, Notification: null,
+  SessionStart: null, SessionEnd: null, UserPromptSubmit: null, Stop: null, Notification: null,
   PostToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash',
 };
 
