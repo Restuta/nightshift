@@ -93,20 +93,44 @@ Edit/Write tools. Feeds the activity column and per-item "warmth".
 `{sha, message, add, del, files}` — emitted by the git `post-commit` hook with
 numbers from `git diff --shortstat`. Drives the line counters and tickers.
 
+### `pr_ref`
+A SIGHTING that a PR is relevant to this session. `{number, url?, title?, item?}`
+- Emitted by the hook and the codex tailer wherever they detect PR activity — a
+  `gh pr create` URL, a rollout mention, a `gh pr merge` success line. It carries
+  **no state** and **never moves a card to done**. Its only jobs: register the
+  number as session-relevant (so `poll-github` knows to fetch it) and link the
+  owning card (`item` ↔ `number`) so the poller's later `pr` events carry that card
+  `pr → done`. It must NOT create a PR-panel row by itself — the panel folds from
+  real `pr` events; a ref only lands in `state.prRefs`. This is plan 1.4: **PR
+  state has exactly one writer**, and a sighting is not a state.
+
 ### `pr`
-`{number, title?, url?, state: "open" | "merged" | "closed"}`
-- **Terminal state (`merged`/`closed`) must come from authoritative gh output**
-  — `poll-github`'s gh queries, gh's own "Merged pull request #N" success line,
-  or `gh pr list --state merged/closed`. NEVER inferred from the agent's prose
-  ("merged #404" while #404 was still open false-merged it). Producers may record
-  `open` and metadata; the truth of merge/close is gh's alone (invariant #4).
-- Freshness is reconciled by the board server, not a standalone daemon: while a
-  viewer is watching a session with an open PR, the server re-polls it (see
-  `server.js`). So a merge that lands while no poller was alive still appears the
-  next time the board is opened.
+`{number, repo?, title?, url?, state: "open" | "merged" | "closed", occurredAt?, createdAt?}`
+- **Single writer (plan 1.4).** Only `poll-github` — and the offline whole-tape
+  synthesizers `emit` / `import` / `demo` — may author a v2 `pr` STATE event. A v2
+  `pr` from any other source (`hook`, `codex-tail`, …) is IGNORED by the reducer
+  for state changes; those producers now emit `pr_ref` instead. v1 events (no
+  `source`/`v`) stay honored forever for back-compat. This closes the four-writer
+  race that false-merged #404 and conjured 17+ title-less rows.
+- **Terminal state (`merged`/`closed`) comes only from `poll-github`'s gh queries**
+  — never inferred from the agent's prose ("merged #404" while #404 was still open
+  false-merged it) or from a `gh pr merge` command running (invariant #4).
+- `repo` (owner/name) — `poll-github` stamps it (`gh repo view`, once per run). The
+  reducer keys `state.prs` by `repo#number` when present (bare number for v1), and
+  the PR panel prefixes the repo only when a session spans more than one — killing
+  cross-repo `#1`–`#4` collisions inside one panel.
+- `occurredAt` / `createdAt` — gh's REAL fact-times in epoch ms (the actual
+  merge/close from `mergedAt`/`closedAt`, and the open time from `createdAt`),
+  distinct from `t` (when recorded). The reducer's `mergedAt`/`openedAt` use these,
+  so replay shows a 2am merge at 2am even though the poller only recorded it at 9am.
+- Freshness is reconciled by the board server (which spawns `poll-github`), not a
+  standalone daemon — see `server.js`. A merge that lands while no poller was alive
+  still appears the next time the board is opened.
 
 ### `ci`
-`{status: "pending" | "pass" | "fail", pr?}`
+`{status: "pending" | "pass" | "fail", pr?, repo?}` — also written solely by
+`poll-github` (plan 1.4). `repo` keys it onto the same `repo#number` PR as the
+`pr` events, so CI attaches to the right row when a session spans repos.
 
 ### `usage`
 Token accounting for a model turn. `{in?, out?, cacheRead?, cacheWrite?, model?}`

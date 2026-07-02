@@ -3,16 +3,16 @@
 {"t":1700001300000,"id":"x1","source":"codex-tail","v":2,"type":"edit","path":"x.js","item":"wi-x"}
 {"t":1700002500000,"id":"x2","source":"codex-tail","v":2,"type":"commit","sha":"bbb2222","message":"work","add":5,"del":1,"files":1,"item":"wi-x"}
 {"t":1700003700000,"id":"x3","source":"codex-tail","v":2,"type":"usage","model":"gpt-5-codex","in":2000,"out":400,"cacheRead":100}
-{"t":1700004300000,"id":"x4","source":"codex-tail","v":2,"type":"pr","number":7,"title":"seam PR","url":"https://github.com/o/r/pull/7","state":"open","item":"wi-x"}
+{"t":1700004300000,"id":"x4","source":"codex-tail","v":2,"type":"pr_ref","number":7,"title":"seam PR","url":"https://github.com/o/r/pull/7","item":"wi-x"}
 {"t":1700004900000,"source":"codex-tail","v":2,"type":"item","id":"wi-x","status":"done"}
-{"t":1700005200000,"id":"x5","source":"codex-tail","v":2,"type":"pr","number":7,"state":"merged"}
+{"t":1700005200000,"id":"x5","source":"poll-github","v":2,"type":"pr","number":7,"state":"merged"}
 {"t":1700005500000,"id":"x6","source":"codex-tail","v":2,"type":"session","phase":"idle"}
 {"t":1700000100000,"id":"x0","source":"codex-tail","v":2,"type":"session","phase":"start","title":"seam session","agent":"codex","cwd":"/repo"}
 {"t":1700000700000,"source":"codex-tail","v":2,"type":"item","id":"wi-x","title":"Only task","status":"doing"}
 {"t":1700001300000,"id":"x1","source":"codex-tail","v":2,"type":"edit","path":"x.js","item":"wi-x"}
 {"t":1700002500000,"id":"x2","source":"codex-tail","v":2,"type":"commit","sha":"bbb2222","message":"work","add":5,"del":1,"files":1,"item":"wi-x"}
 {"t":1700003700000,"id":"x3","source":"codex-tail","v":2,"type":"usage","model":"gpt-5-codex","in":2000,"out":400,"cacheRead":100}
-{"t":1700004300000,"id":"x4","source":"codex-tail","v":2,"type":"pr","number":7,"title":"seam PR","url":"https://github.com/o/r/pull/7","state":"open","item":"wi-x"}
+{"t":1700004300000,"id":"x4","source":"codex-tail","v":2,"type":"pr_ref","number":7,"title":"seam PR","url":"https://github.com/o/r/pull/7","item":"wi-x"}
 {"t":1700004900000,"source":"codex-tail","v":2,"type":"item","id":"wi-x","status":"done"}
-{"t":1700005200000,"id":"x5","source":"codex-tail","v":2,"type":"pr","number":7,"state":"merged"}
+{"t":1700005200000,"id":"x5","source":"poll-github","v":2,"type":"pr","number":7,"state":"merged"}
 {"t":1700005500000,"id":"x6","source":"codex-tail","v":2,"type":"session","phase":"idle"}

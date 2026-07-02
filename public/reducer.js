@@ -6,6 +6,12 @@ export const STATUSES = ['inbox', 'doing', 'pr', 'done'];
 
 const FEED_CAP = 150;
 
+// Sources allowed to author v2 `pr` STATE (plan 1.4 — PR truth single-writer). The
+// live poller is the sole live writer; emit is the manual CLI; import/demo are the
+// offline whole-tape synthesizers. The demoted live producers (hook, codex-tail)
+// now emit `pr_ref`, so their v2 `pr` events are ignored. v1 events are exempt.
+const PR_AUTHORITY = new Set(['poll-github', 'emit', 'import', 'demo']);
+
 // A single working gap longer than this is almost certainly the session
 // sitting idle without an `idle` event (a missed Stop hook, say), not real
 // work — cap each gap so one stuck window can't inflate a card's timer.
@@ -46,7 +52,8 @@ export function initialState() {
     stepTimes: new Map(), // step text → {firstSeenAt, startedAt, doneAt}
     todoPrev: new Map(),  // step text → status at the previous snapshot (for per-turn deltas)
     files: new Map(), // path → {edits, lastAt} — churn signal
-    prs: new Map(),   // pr number → {number, state, url, title, ci, openedAt} — the PR panel
+    prs: new Map(),   // repo#number (bare number for v1/no-repo) → {number, repo, state, url, title, ci, openedAt, mergedAt} — the PR panel
+    prRefs: new Set(),// session-relevant PR numbers seen via pr_ref sightings; NOT rendered (they carry no state) until a real pr event arrives
     feed: [],
     totals: { add: 0, del: 0, commits: 0, edits: 0, events: 0, tokIn: 0, tokOut: 0, cacheTok: 0, cost: 0 },
   };
@@ -73,12 +80,28 @@ function activeDoingItem(state) {
   return best;
 }
 
+// state.prs is keyed by repo#number when the producer knows the repo (poll-github
+// stamps it), else by the bare number for v1/no-repo back-compat. Two repos can
+// each have a PR #1 in one session; a bare-number key collided them into one row.
+function prKey(number, repo) {
+  return repo ? `${repo}#${number}` : number;
+}
+
+// Does a card's PR link refer to this (number, repo)? Match by number, and when
+// BOTH sides name a repo require it to agree — so a poll-github event scoped to
+// one repo never resolves onto a same-numbered PR from another repo.
+function samePr(link, number, repo) {
+  if (!link || link.number !== number) return false;
+  if (link.repo && repo) return link.repo === repo;
+  return true;
+}
+
 // True when a card has a linked PR that hasn't merged/closed yet. A turn
 // boundary (Stop / next prompt) marks a card 'done', but if its PR is still
 // open the work hasn't actually shipped — defer 'done' to the PR lifecycle.
 function prStillOpen(state, it) {
   if (!it.pr || it.pr.number == null) return false;
-  const pr = state.prs.get(it.pr.number);
+  const pr = state.prs.get(prKey(it.pr.number, it.pr.repo));
   const prState = (pr && pr.state) || it.pr.state;
   return prState === 'open';
 }
@@ -246,37 +269,83 @@ export function reduce(state, ev) {
       break;
     }
 
+    case 'pr_ref': {
+      // A SIGHTING (plan 1.4): the hook / codex tailer noticed a PR is relevant to
+      // this session (a `gh pr create`/`merge` line, a rollout mention). It carries
+      // NO state and never moves a card to done. It only (a) registers the number
+      // so poll-github knows to fetch its real state, and (b) links the owning card
+      // so poll-github's later pr events (matched by number) carry it pr -> done. It
+      // must NOT create a PR-panel row: the panel reads state.prs, a ref only touches
+      // state.prRefs — so no title-less phantom row is conjured.
+      if (ev.number != null) {
+        state.prRefs.add(Number(ev.number));
+        const it = ev.item ? state.items.get(ev.item) : null;
+        if (it && (!it.pr || it.pr.number == null)) {
+          // Link, presuming open (a just-created/-referenced PR isn't merged until
+          // gh says so). Do NOT touch it.status — no state means no column move;
+          // parking to 'pr' at a turn boundary still works via prStillOpen, and the
+          // poller's real open/merged events drive the actual transitions.
+          it.pr = { number: ev.number, repo: null, state: 'open', url: ev.url || null, title: ev.title || null };
+          it.touchedAt = ev.t;
+        } else if (it) {
+          // Already linked (re-sighted) — refresh soft metadata only, never state.
+          if (ev.url && !it.pr.url) it.pr.url = ev.url;
+          if (ev.title && !it.pr.title) it.pr.title = ev.title;
+          it.touchedAt = ev.t;
+        }
+      }
+      break;
+    }
+
     case 'pr': {
+      // Single-writer authority (plan 1.4): a v2 pr STATE event is honored only from
+      // producers that legitimately author pr state — the live poller (poll-github),
+      // the manual CLI (emit), and the offline tape synthesizers (import, demo). The
+      // demoted live producers (hook, codex-tail) now emit pr_ref, never pr, so a
+      // stray v2 pr from them is ignored. v1 events (no source/v) stay honored for
+      // back-compat — old tapes fold unchanged.
+      if (ev.v >= 2 && ev.source && !PR_AUTHORITY.has(ev.source)) break;
+
+      const repo = ev.repo || null;
+      // occurredAt is gh's REAL transition time (mergedAt/closedAt/createdAt); t is
+      // when we recorded it. Using it means replay shows the 2am merge at 2am even
+      // though the poller only noticed (and recorded) it at 9am.
+      const when = ev.occurredAt != null ? ev.occurredAt : ev.t;
+      const key = prKey(ev.number, repo);
+
       // A metadata-only event (title/url, no state) must not conjure a PR — an
       // unknown number would default to 'open' and flood the panel (e.g. a
       // `gh pr list` dump of merged PRs). Attach to a known PR or skip.
-      if (ev.number != null && !(ev.meta && !state.prs.has(ev.number))) {
-        // PRs are session-level entities (the PR panel), tracked by number.
-        const pr = state.prs.get(ev.number) ||
-          { number: ev.number, state: 'open', url: null, title: null, ci: null, openedAt: ev.t, mergedAt: null };
+      if (ev.number != null && !(ev.meta && !state.prs.has(key))) {
+        // PRs are session-level entities (the PR panel), keyed by repo#number.
+        const pr = state.prs.get(key) ||
+          { number: ev.number, repo, state: 'open', url: null, title: null, ci: null,
+            openedAt: ev.createdAt != null ? ev.createdAt : when, mergedAt: null };
         if (ev.state) pr.state = ev.state;
-        if (ev.state === 'merged' && pr.mergedAt == null) pr.mergedAt = ev.t;
+        if (ev.createdAt != null) pr.openedAt = ev.createdAt;      // gh's real open time
+        if (ev.state === 'merged' && pr.mergedAt == null) pr.mergedAt = when;
         if (ev.state === 'open') pr.mergedAt = null; // reopened / corrected
         if (ev.url) pr.url = ev.url;
         if (ev.title) pr.title = ev.title;
+        if (repo && pr.repo == null) pr.repo = repo;
         pr.t = ev.t;
-        state.prs.set(ev.number, pr);
+        state.prs.set(key, pr);
       }
-      // Resolve the owning card: an explicit ev.item link (set when the PR is
-      // opened), or any card that already claimed this number — so a later
-      // poller event with no item (the merge/close) still reaches the card that
-      // opened the PR and can finish it. Matching only cards that already own
-      // the number means the attribution heuristic never hijacks an unrelated
-      // card (the original ev.item-only concern).
+      // Resolve the owning card: an explicit ev.item link (set at pr_ref time), or
+      // any card that already claimed this number/repo — so a later poller event
+      // with no item (the merge/close) still reaches the card that opened the PR and
+      // can finish it. Matching only cards that already own the number means the
+      // attribution heuristic never hijacks an unrelated card.
       let it = ev.item ? state.items.get(ev.item) : null;
       if (!it && ev.number != null) {
         for (const c of state.items.values()) {
-          if (c.pr && c.pr.number === ev.number) { it = c; break; }
+          if (samePr(c.pr, ev.number, repo)) { it = c; break; }
         }
       }
       if (it) {
         it.pr = {
           number: ev.number,
+          repo: repo || (it.pr && it.pr.repo) || null,
           state: ev.state || (it.pr && it.pr.state) || 'open',
           url: ev.url || (it.pr && it.pr.url) || null,
           title: ev.title || (it.pr && it.pr.title) || null,
@@ -289,10 +358,14 @@ export function reduce(state, ev) {
     }
 
     case 'ci': {
-      if (ev.pr != null && state.prs.has(ev.pr)) state.prs.get(ev.pr).ci = ev.status;
-      // attach to a card only if one is explicitly carrying this PR
-      for (const it of state.items.values()) {
-        if (it.pr && it.pr.number === ev.pr) { it.ci = ev.status; it.touchedAt = ev.t; }
+      // poll-github stamps repo on ci too, so it keys onto the same repo#number PR.
+      if (ev.pr != null) {
+        const key = prKey(ev.pr, ev.repo || null);
+        if (state.prs.has(key)) state.prs.get(key).ci = ev.status;
+        // attach to a card only if one is explicitly carrying this PR
+        for (const it of state.items.values()) {
+          if (samePr(it.pr, ev.pr, ev.repo || null)) { it.ci = ev.status; it.touchedAt = ev.t; }
+        }
       }
       break;
     }
@@ -339,9 +412,10 @@ export function reduce(state, ev) {
     // 'note' and unknown types land in the feed only (forward compatibility).
   }
 
-  // Usage events are frequent and machine-ish — they feed the meters, not the
-  // human-readable activity tape.
-  if (ev.type !== 'usage') {
+  // Usage events feed the meters, not the tape. `pr_ref` is a low-level linking
+  // signal — the gh command line (or the poller's real pr event) already narrates
+  // the sighting — so it stays out of the human-readable activity feed too.
+  if (ev.type !== 'usage' && ev.type !== 'pr_ref') {
     state.feed.unshift(ev);
     if (state.feed.length > FEED_CAP) state.feed.length = FEED_CAP;
   }

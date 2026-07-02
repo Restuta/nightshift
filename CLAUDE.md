@@ -106,7 +106,8 @@ including the ones building it.
   everywhere except the nightshift repo itself, which self-curates via emit.js —
   central or locally-attached) — skipping harness-injected turns like `<task-notification>`
   so they don't litter the board; maps `apply_patch`→edit, `update_plan`→todos,
-  `TodoWrite`→todos, `Bash`→commit/activity and `gh pr create|merge`→pr. Claude's
+  `TodoWrite`→todos, `Bash`→commit/activity and `gh pr create|merge`→`pr_ref` (a
+  sighting — never pr state; the poller is the single writer, plan 1.4). Claude's
   newer task tools (`TaskCreate`/`TaskUpdate`) live only in the transcript and
   aren't in the hook matcher, so on every firing tool the hook tails the transcript
   (by byte offset) and folds the task list into `todos` snapshots — live without a
@@ -124,7 +125,8 @@ including the ones building it.
   index) and backed up.
 - `tools/codex-tail.js` — the rollout tailer. In `--meter` mode it's the thin
   companion to hook recording: emits ONLY what hooks can't carry (token cost,
-  PR/CI, idle + card retirement), so the two never double-count. Full mode is
+  `pr_ref` sightings — never pr/ci state, which is the poller's alone per plan 1.4 —
+  idle + card retirement), so the two never double-count. Full mode is
   retained for `import-transcript` parity and as a fallback. Self-detaches; the
   worker registry (`~/.nightshift/codex-tails.json`) is keyed by **rollout path**,
   so exactly one recorder tails a rollout — a second `/nightshift` (e.g. from
@@ -137,12 +139,16 @@ including the ones building it.
   resumes on restart. On re-attach with a lost checkpoint but a log that already
   holds this session, it resumes from the log instead of re-draining from zero (the
   n154 double-record).
-- `tools/poll-github.js` — records PR/CI facts as events; folds the log's known
-  state each tick and appends only deltas (stateless, idempotent). CI/review
-  status comes from **toast review-ci** (Orba's CI — fast, authoritative) when
-  installed, falling back to gh's check rollup; PR metadata (title/url/state) is
-  from gh. `--known` polls only the PRs the tape itself surfaced (PR URLs, `#N` in
-  card titles, `gh pr` commands) instead of the whole repo — so one session's
+- `tools/poll-github.js` — the **SOLE writer of `pr`/`ci` events (plan 1.4)**; folds
+  the log's known state each tick and appends only deltas (stateless, idempotent).
+  CI/review status comes from **toast review-ci** (Orba's CI — fast, authoritative)
+  when installed, falling back to gh's check rollup; PR metadata (title/url/state)
+  is from gh. Each `pr` event carries `repo` (owner/name, one `gh repo view` per run)
+  so the board keys panel rows by `repo#number`, and gh's real `occurredAt`/
+  `createdAt` so replay shows a 2am merge at 2am. `--known` polls only the PRs the
+  tape itself surfaced — chiefly the `pr_ref` sightings the hook/tailer now emit,
+  plus a legacy text-scan (PR URLs, `#N` in card titles, `gh pr` commands) for old
+  tapes — instead of the whole repo, so one session's
   board isn't flooded by a repo's hundreds of PRs, AND only the non-terminal ones
   (a merged/closed PR never changes again, so re-polling it is waste — and over a
   long session the surfaced set grows to dozens, which made a reconcile take
@@ -152,9 +158,11 @@ including the ones building it.
   watched sessions, see above); the realtime worker is a redundant low-latency
   optimization the `/nightshift` skill still starts and that dies on restart —
   harmless, since both are idempotent (delta-only over the folded log).
-  **Terminal PR state (merged/closed) is only ever recorded from authoritative gh
-  output** — never inferred from the agent's prose (that false-merged #404). The
-  Codex tailer's old narration-merge parser was removed for exactly this reason.
+  **PR state (open/merged/closed) is only ever recorded here, from authoritative gh
+  output** — never inferred from the agent's prose (that false-merged #404) nor from
+  the hook/tailer, which now emit only `pr_ref` sightings (a PR is relevant to this
+  session) and never `pr` state. The reducer ignores a v2 `pr` from any other
+  source; v1 events stay honored for back-compat.
 - `tools/prune-sessions.js` — keeps the board's session list bounded: archives
   (moves to `~/.nightshift/archive/`, reversible) or `--delete`s tapes untouched
   for `--days N` (default 14; freshness = file mtime). `--dry-run` previews. The
