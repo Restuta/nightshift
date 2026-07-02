@@ -8,6 +8,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { randomUUID } = require('node:crypto');
@@ -20,6 +21,26 @@ function flag(name, fallback) {
 
 const PORT = Number(flag('port', process.env.PORT || 4173));
 const PUBLIC = path.join(__dirname, 'public');
+
+// --managed: run supervised (a LaunchAgent keeps us up in the FOREGROUND, since
+// KeepAlive needs a process that stays alive — see tools/install-launchd.js).
+// In this mode the server OWNS ~/.nightshift/board.json: it writes it atomically
+// on boot and refreshes it, so tools/board.js and the /nightshift skill detect
+// the supervised board (pid alive + /whoami) and never spawn a second one on
+// another port. Unmanaged, board.json is written by whoever spawned us
+// (tools/board.js) — unchanged.
+const MANAGED = args.includes('--managed');
+const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
+const BOARD_JSON = path.join(NS_HOME, 'board.json');
+
+function writeBoardJson(port) {
+  const tmp = `${BOARD_JSON}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(NS_HOME, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify({ port, pid: process.pid, managed: true, at: Date.now() }) + '\n');
+    fs.renameSync(tmp, BOARD_JSON); // atomic replace — a reader never sees a half file
+  } catch { /* best effort: if we can't claim board.json, board.js just spawns its own */ }
+}
 
 // ---------------------------------------------------------------- sessions
 // Collect log files from repeated --log and/or a scanned --dir, preserving
@@ -324,11 +345,31 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
+// A supervised board is pinned to its port (board.js and the portless proxy
+// expect it there). If the port is already taken — most often by an old
+// unmanaged board that hasn't exited yet — fail fast; launchd's KeepAlive retries
+// and takes over once the squatter exits. Unmanaged, this just surfaces the
+// clash instead of crashing with a stack trace.
+server.on('error', err => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`port ${PORT} is already in use — another server owns it.` +
+      (MANAGED ? ' KeepAlive will retry and take over once it exits.' : ''));
+  } else {
+    console.error('server error:', (err && err.message) || err);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
-  console.log(`nightshift  http://localhost:${PORT}`);
+  const port = server.address().port; // the real bound port (PORT may be 0 = ephemeral)
+  console.log(`nightshift  http://localhost:${port}`);
   if (sessions.size === 1) console.log(`tailing     ${sessions.get(defaultSession).file}`);
   else {
     console.log(`serving     ${sessions.size} sessions:`);
     for (const s of sessions.values()) console.log(`  ${s.id}  ${s.file}`);
+  }
+  if (MANAGED) {
+    writeBoardJson(port); // claim board.json now…
+    setInterval(() => writeBoardJson(port), 15000).unref(); // …and keep it fresh
   }
 });
