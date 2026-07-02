@@ -1,0 +1,21 @@
+{"t":1700000000000,"id":"r0","source":"demo","v":2,"type":"session","phase":"start","title":"Report test","agent":"claude","cwd":"/repo"}
+{"t":1700000060000,"source":"demo","v":2,"type":"item","id":"wi-1","title":"Build feature A","status":"doing"}
+{"t":1700000120000,"id":"r1","source":"demo","v":2,"type":"todos","item":"wi-1","todos":[{"text":"design A","status":"pending"},{"text":"ship A","status":"pending"}]}
+{"t":1700000180000,"id":"r2","source":"demo","v":2,"type":"edit","path":"src/foo.js","item":"wi-1"}
+{"t":1700000240000,"id":"r3","source":"demo","v":2,"type":"commit","sha":"aaa1111","message":"feat: feature A","add":20,"del":3,"files":1,"item":"wi-1"}
+{"t":1700000300000,"id":"r4","source":"demo","v":2,"type":"todos","item":"wi-1","todos":[{"text":"design A","status":"completed"},{"text":"ship A","status":"in_progress"}]}
+{"t":1700000330000,"id":"r5","source":"demo","v":2,"type":"usage","model":"claude-opus","in":2000,"out":400,"cacheRead":1000}
+{"t":1700000360000,"id":"r6","source":"demo","v":2,"type":"say","text":"opening PR for feature A","item":"wi-1"}
+{"t":1700000420000,"id":"r7","source":"demo","v":2,"type":"pr","number":1,"title":"Feature A","url":"https://github.com/o/r/pull/1","state":"open","item":"wi-1"}
+{"t":1700000480000,"id":"r8","source":"poll-github","v":2,"type":"ci","pr":1,"status":"pass"}
+{"t":1700000540000,"id":"r9","source":"poll-github","v":2,"type":"pr","number":1,"state":"merged","occurredAt":1700000500000}
+{"t":1700000600000,"source":"demo","v":2,"type":"item","id":"wi-1","status":"done"}
+{"t":1700003300000,"id":"r10","source":"demo","v":2,"type":"session","phase":"resume"}
+{"t":1700003360000,"source":"demo","v":2,"type":"item","id":"wi-2","title":"Build feature B","status":"doing"}
+{"t":1700003390000,"source":"demo","v":2,"type":"item","id":"wi-3","title":"Refactor C","status":"doing"}
+{"t":1700003420000,"id":"r11","source":"demo","v":2,"type":"edit","path":"src/bar.js","item":"wi-2"}
+{"t":1700003480000,"id":"r12","source":"demo","v":2,"type":"commit","sha":"bbb2222","message":"wip: feature B","add":15,"del":1,"files":1,"item":"wi-2"}
+{"t":1700003540000,"id":"r13","source":"demo","v":2,"type":"pr","number":2,"title":"Feature B","url":"https://github.com/o/r/pull/2","state":"open","item":"wi-2"}
+{"t":1700003600000,"id":"r14","source":"poll-github","v":2,"type":"ci","pr":2,"status":"fail"}
+{"t":1700003660000,"id":"r15","source":"demo","v":2,"type":"say","text":"CI is red on feature B, need a hand","item":"wi-2"}
+{"t":1700003720000,"id":"r16","source":"demo","v":2,"type":"session","phase":"attention","text":"CI failing on #2 — force-merge?"}
