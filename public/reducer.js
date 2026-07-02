@@ -44,9 +44,31 @@ function usageCost(ev) {
   ) / 1e6;
 }
 
+// Sources that record EXTERNAL reconciliation, not the agent's own work: the
+// GitHub poller and the board server's reconcile. Their events — and any `alive`
+// heartbeat from anyone — must NOT accrue work-time, reset the quiet clock, or
+// count as the agent-recorder being alive. Coupling liveness to them is exactly
+// what made a dead session read LIVE all night while the server poller kept
+// appending an event every 30s (see PLAN F3).
+const RECONCILE_SOURCES = new Set(['poll-github', 'server']);
+
+// Is this event agent-WORK from a live recorder (vs a reconcile append)? A v1
+// event (no `source`) is, by definition — every pre-envelope producer recorded
+// agent work, so old tapes fold exactly as before. `alive` is never work; it's
+// handled before this is consulted.
+function isProducerEvent(ev) {
+  return !RECONCILE_SOURCES.has(ev.source);
+}
+
 export function initialState() {
   return {
-    session: { title: null, startedAt: null, lastAt: null, phase: null, cwd: null, agent: null, attentionText: null, lastSay: null },
+    // `lastAt` = the last event of ANY kind (feed/clock display). `lastProducerAt`
+    // = the last agent-WORK event (accrual + the "quiet" clock) — split so a
+    // reconcile append (poll-github/server) can't bump the work clock. `sources`
+    // = per-source freshness (source → latest t), fed by every v2 event incl.
+    // `alive` heartbeats; the badge derives honest staleness from it.
+    session: { title: null, startedAt: null, lastAt: null, lastProducerAt: null, phase: null, cwd: null, agent: null, attentionText: null, lastSay: null },
+    sources: new Map(),
     items: new Map(),
     todos: [],            // full current plan (session-scoped) → the sidebar Plan panel
     stepTimes: new Map(), // step text → {firstSeenAt, startedAt, doneAt}
@@ -126,13 +148,31 @@ function targetItem(state, ev) {
 }
 
 export function reduce(state, ev) {
+  // Per-source freshness: every v2 event stamps who produced it, and the fold
+  // tracks each source's latest t. `alive` heartbeats land ONLY here — that is
+  // the whole point of a heartbeat: proof the recorder is alive without being
+  // agent work. The badge derives honest staleness from this map.
+  if (ev.source != null) {
+    const prev = state.sources.get(ev.source) || 0;
+    if (ev.t > prev) state.sources.set(ev.source, ev.t);
+  }
+
+  // A recorder heartbeat is not activity: it must not enter the feed, touch a
+  // card, wake the session, accrue time, or count as an event. It has already
+  // updated per-source freshness above — nothing else.
+  if (ev.type === 'alive') return state;
+
   // Accrue active work-time to the card in progress over the gap that just
-  // elapsed — but only while the session was working. Idle/attention gaps
-  // (waiting on the human) don't count, so a card's timer reflects time spent
-  // on it, not wall-clock since it opened. Pure over the log, so the number is
-  // the same live or in replay.
-  if (state.session.lastAt != null && state.session.phase === 'working') {
-    const dt = ev.t - state.session.lastAt;
+  // elapsed — but keyed on PRODUCER activity (lastProducerAt), NOT any event, and
+  // only while working. A reconcile append (poll-github/server) during a working
+  // phase must not accrue phantom hours (F3: the overnight server poller bumped
+  // the clock every 30s), so those don't advance lastProducerAt. Idle/attention
+  // gaps (waiting on the human) don't count either, so a card's timer reflects
+  // time spent on it, not wall-clock since it opened. Pure over the log, so the
+  // number is the same live or in replay.
+  const producer = isProducerEvent(ev);
+  if (producer && state.session.lastProducerAt != null && state.session.phase === 'working') {
+    const dt = ev.t - state.session.lastProducerAt;
     if (dt > 0) {
       const active = activeDoingItem(state);
       if (active) active.activeMs += Math.min(dt, ACTIVE_GAP_CAP);
@@ -140,7 +180,8 @@ export function reduce(state, ev) {
   }
 
   state.totals.events++;
-  state.session.lastAt = ev.t;
+  state.session.lastAt = ev.t;                        // any event → feed/clock display
+  if (producer) state.session.lastProducerAt = ev.t;  // agent work → accrual + quiet clock
 
   switch (ev.type) {
     case 'session': {
@@ -160,6 +201,14 @@ export function reduce(state, ev) {
       } else if (ev.phase === 'end') {
         state.session.phase = 'ended';
         state.session.attentionText = null;
+        // Session boundary (1.6): any card still in `doing` when the session ends
+        // was never finished — the agent stopped mid-flight (0/20 real tapes ever
+        // emitted an `end`, so these cards latched in "in progress" forever). Mark
+        // them abandoned — a derived, pure stale marker the board renders as
+        // distinct from done. Cleared if a later event re-activates the card.
+        for (const it of state.items.values()) {
+          if (it.status === 'doing') it.abandoned = true;
+        }
       }
       break;
     }
@@ -171,7 +220,7 @@ export function reduce(state, ev) {
         it = {
           id: ev.id, title: '', status: 'inbox', note: null, emoji: null,
           add: 0, del: 0, commits: 0, edits: 0, activeMs: 0,
-          delta: null, pr: null, ci: null, now: null,
+          delta: null, pr: null, ci: null, now: null, abandoned: false,
           createdAt: ev.t, touchedAt: ev.t,
         };
         state.items.set(ev.id, it);
@@ -187,6 +236,7 @@ export function reduce(state, ev) {
       if (ev.note != null) it.note = ev.note;
       if (ev.emoji != null) it.emoji = ev.emoji;
       it.touchedAt = ev.t;
+      it.abandoned = false; // a fresh upsert (reopen / move) un-abandons the card
       break;
     }
 
@@ -221,6 +271,7 @@ export function reduce(state, ev) {
           const d = target.delta || (target.delta = new Map());
           d.set(td.text, { text: td.text, status, startedAt: tm.startedAt, doneAt: tm.doneAt, elapsedMs: td.elapsedMs });
           target.touchedAt = ev.t;
+          target.abandoned = false;
         }
         return {
           text: td.text, done: status === 'completed', status,
@@ -249,7 +300,7 @@ export function reduce(state, ev) {
         state.files.set(ev.path, f);
       }
       const it = targetItem(state, ev);
-      if (it) { it.edits++; it.touchedAt = ev.t; }
+      if (it) { it.edits++; it.touchedAt = ev.t; it.abandoned = false; }
       awake(state);
       break;
     }
@@ -264,6 +315,7 @@ export function reduce(state, ev) {
         it.add += ev.add || 0;
         it.del += ev.del || 0;
         it.touchedAt = ev.t;
+        it.abandoned = false;
       }
       awake(state);
       break;
@@ -353,6 +405,7 @@ export function reduce(state, ev) {
         if (it.pr.state === 'open' && (it.status === 'inbox' || it.status === 'doing')) it.status = 'pr';
         if (it.pr.state === 'merged' || it.pr.state === 'closed') it.status = 'done';
         it.touchedAt = ev.t;
+        it.abandoned = false;
       }
       break;
     }
@@ -380,6 +433,7 @@ export function reduce(state, ev) {
       if (it) {
         it.tools = (it.tools || 0) + 1;
         it.touchedAt = ev.t;
+        it.abandoned = false;
         if (ev.text) it.now = { text: ev.text, kind: 'tool', t: ev.t };
       }
       awake(state);
@@ -393,7 +447,7 @@ export function reduce(state, ev) {
       // board. Surface the latest line on the card it belongs to as the live
       // "now" line; narration outranks a bare command, so it wins the slot.
       const it = targetItem(state, ev);
-      if (it && ev.text) { it.now = { text: ev.text, kind: 'say', t: ev.t }; it.touchedAt = ev.t; }
+      if (it && ev.text) { it.now = { text: ev.text, kind: 'say', t: ev.t }; it.touchedAt = ev.t; it.abandoned = false; }
       if (ev.text) state.session.lastSay = ev.text;
       awake(state);
       break;
@@ -485,4 +539,43 @@ export function prList(state) {
 export function activeItemId(state) {
   const it = activeDoingItem(state);
   return it ? it.id : null;
+}
+
+// The freshest sign that SOME recorder of this session's agent work is alive:
+// the newest of the per-source freshnesses (excluding the reconcile lanes) and
+// the last producer event. A resident recorder (codex-tail) keeps this fresh via
+// `alive` heartbeats even while the agent quietly thinks; a hook-based recorder
+// CANNOT heartbeat (it is event-driven), so its honest signal is simply the age
+// of its last real event. Pure over state → live and replay agree.
+export function freshestProducerAt(state) {
+  let best = state.session.lastProducerAt;
+  for (const [src, at] of state.sources) {
+    if (RECONCILE_SOURCES.has(src)) continue;
+    if (best == null || at > best) best = at;
+  }
+  return best;
+}
+
+// A hook-based recorder goes quiet between turns (a turn ends → idle), so it
+// gets a long grace; a heartbeating recorder (codex-tail, ~30s) is stale fast.
+const STALE_TTL_HEARTBEAT = 5 * 60e3;
+const STALE_TTL_HOOK = 15 * 60e3;
+
+// Honest liveness for the badge, derived PURELY from (phase, freshest producer
+// age) at time `now`. `working` is trusted only while a recorder signal is
+// fresh; past the TTL it becomes `stale` — the honest "the recorder died, data
+// ends at <that time>" instead of a latched, lying LIVE (F3). idle / attention /
+// ended pass through as the recorded phase. Same inputs → same output, so the
+// badge agrees live and in replay.
+export function liveness(state, now) {
+  const phase = state.session.phase;
+  if (phase === 'attention') return { state: 'attention' };
+  if (phase === 'ended') return { state: 'ended' };
+  if (phase === 'idle') return { state: 'idle' };
+  if (phase !== 'working') return { state: 'waiting' };
+  const at = freshestProducerAt(state);
+  const heartbeats = state.sources.has('codex-tail') || state.session.agent === 'codex';
+  const ttl = heartbeats ? STALE_TTL_HEARTBEAT : STALE_TTL_HOOK;
+  if (at != null && now - at > ttl) return { state: 'stale', dataEndsAt: at };
+  return { state: 'live' };
 }
