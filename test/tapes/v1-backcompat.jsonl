@@ -1,0 +1,20 @@
+{"t":1700000000000,"type":"session","phase":"start","title":"v1 back-compat","agent":"claude","cwd":"/repo"}
+{"t":1700000060000,"type":"item","id":"wi-1","title":"First task","status":"doing"}
+{"t":1700000120000,"type":"todos","item":"wi-1","todos":[{"text":"step1","status":"pending"},{"text":"step2","status":"pending"}]}
+{"t":1700000180000,"type":"edit","path":"a.js","item":"wi-1"}
+{"t":1700000240000,"type":"todos","item":"wi-1","todos":[{"text":"step1","status":"in_progress"},{"text":"step2","status":"pending"}]}
+{"t":1700000300000,"type":"commit","sha":"aaa1111","message":"do step1","add":10,"del":2,"files":1,"item":"wi-1"}
+{"t":1700000360000,"type":"usage","model":"claude-opus","in":1000,"out":200,"cacheRead":500}
+{"t":1700000420000,"type":"tool","tool":"run","text":"npm test","item":"wi-1"}
+{"t":1700000480000,"type":"todos","item":"wi-1","todos":[{"text":"step1","status":"completed"},{"text":"step2","status":"in_progress"}]}
+{"t":1700000540000,"type":"pr","number":1,"title":"PR one","url":"https://github.com/o/r/pull/1","state":"open","item":"wi-1"}
+{"t":1700000600000,"type":"ci","pr":1,"status":"pending"}
+{"t":1700000660000,"type":"item","id":"wi-1","status":"done"}
+{"t":1700000720000,"type":"ci","pr":1,"status":"pass"}
+{"t":1700000780000,"type":"pr","number":1,"state":"merged"}
+{"t":1700000840000,"type":"item","id":"wi-2","title":"Second task","status":"doing"}
+{"t":1700000900000,"type":"edit","path":"b.js","item":"wi-2"}
+{"t":1700000960000,"type":"commit","sha":"bbb2222","message":"more work","add":5,"del":1,"files":1,"item":"wi-2"}
+{"t":1700001020000,"type":"say","text":"waiting for the eval run","item":"wi-2"}
+{"t":1700001080000,"type":"item","id":"wi-2","status":"done"}
+{"t":1700001140000,"type":"session","phase":"idle"}

@@ -1,0 +1,12 @@
+{"t":1700000000000,"id":"e0","source":"codex-tail","v":2,"type":"session","phase":"start","title":"heartbeat + end","agent":"codex","cwd":"/repo"}
+{"t":1700000030000,"id":"e1","source":"codex-tail","v":2,"type":"alive"}
+{"t":1700000060000,"source":"codex-tail","v":2,"type":"item","id":"turn-1","title":"do the thing","status":"doing"}
+{"t":1700000090000,"id":"e2","source":"codex-tail","v":2,"type":"alive"}
+{"t":1700000120000,"id":"e3","source":"codex-tail","v":2,"type":"edit","path":"a.js","item":"turn-1"}
+{"t":1700000150000,"id":"e4","source":"poll-github","v":2,"type":"alive"}
+{"t":1700000180000,"source":"codex-tail","v":2,"type":"item","id":"turn-1","status":"done"}
+{"t":1700000185000,"id":"e5","source":"codex-tail","v":2,"type":"alive"}
+{"t":1700000210000,"source":"codex-tail","v":2,"type":"item","id":"turn-2","title":"second thing","status":"doing"}
+{"t":1700000240000,"id":"e6","source":"codex-tail","v":2,"type":"say","text":"waiting one more interval for the harvest","item":"turn-2"}
+{"t":1700000270000,"id":"e7","source":"codex-tail","v":2,"type":"alive"}
+{"t":1700000300000,"id":"e8","source":"codex-tail","v":2,"type":"session","phase":"end"}
