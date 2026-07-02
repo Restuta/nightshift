@@ -46,6 +46,21 @@ function writeRollout(sessions, { id, cwd, ts = '2026-07-01T01:00:00.000Z', mtim
   return file;
 }
 
+// Write a rollout whose DRAINED log is deliberately larger than the re-attach
+// guard's chunk size, so the lone session-start marker (top of the log) sits far
+// before any tail window. `prompts` user turns → ~3 log lines each; the caller
+// asserts the resulting log clears 256KB.
+function writeBigRollout(sessions, { id, cwd, prompts }) {
+  const ts = '2026-07-01T01:00:00.000Z';
+  const file = path.join(sessions, `rollout-${ts.replace(/[:.]/g, '-')}-${id}.jsonl`);
+  const lines = [JSON.stringify({ timestamp: ts, type: 'session_meta', payload: { session_id: id, id, timestamp: ts, cwd, originator: 'codex-tui', source: 'cli', thread_source: 'user' } })];
+  for (let i = 0; i < prompts; i++) {
+    lines.push(JSON.stringify({ timestamp: ts, type: 'event_msg', payload: { type: 'user_message', message: `prompt ${i} — a chunk of the overnight work, long enough that the tape outgrows the tail window` } }));
+  }
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+  return file;
+}
+
 // Run codex-tail synchronously (default entry, --once, --status, --stop) with a
 // scoped env. Returns { status, stdout, stderr }.
 function runTail(args, { home, ns, sid } = {}) {
@@ -184,6 +199,33 @@ test('re-attach guard: no re-drain when the snapshot is lost but the log has the
     const w = await runWorker([rollout, '--log', log], { home: sb.home, ns: sb.ns });
     assert.match(w.stderr, /re-attach guard/, 'the guard fired');
     assert.equal(readLines(log).length, n, 'the stream was NOT re-appended (no double)');
+  } finally { sb.cleanup(); }
+});
+
+// (5b) The re-attach guard must hold for a REAL overnight tape, not just a tiny
+// fixture: when the recorded log outgrows the guard's scan window, the lone
+// session-start marker sits at the TOP, far before any tail. A tail-only probe
+// misses it and re-drains the entire multi-MB stream from zero — the precise n154
+// double this guard exists to eliminate. The scan must cover the whole log.
+test('re-attach guard: no re-drain even when the log is far larger than the scan window', async () => {
+  const sb = sandbox();
+  try {
+    const rollout = writeBigRollout(sb.sessions, { id: A, cwd: '/Users/dev/wt/feature-a', prompts: 2000 });
+    const log = path.join(sb.ns, 'sessions', 'feature-a.jsonl');
+
+    // Seed via --once (no checkpoint), exactly like an import/reset/crash-before-persist.
+    const seed = runTail(['--once', rollout, '--log', log], { home: sb.home, ns: sb.ns });
+    assert.equal(seed.status, 0, seed.stderr);
+    const n = readLines(log).length;
+    const bytes = fs.statSync(log).size;
+    assert.ok(bytes > 262144, `the recorded log must exceed the 256KB scan window (was ${bytes} bytes)`);
+    assert.ok(!readState(sb.ns)[rollout], 'no snapshot exists for the rollout');
+
+    // Re-attach with no checkpoint: the guard must still detect the session (its
+    // marker is nowhere near the tail) and refuse to re-drain.
+    const w = await runWorker([rollout, '--log', log], { home: sb.home, ns: sb.ns });
+    assert.match(w.stderr, /re-attach guard/, 'the guard fired despite the marker being outside a tail window');
+    assert.equal(readLines(log).length, n, 'the large stream was NOT re-appended (no double)');
   } finally { sb.cleanup(); }
 });
 

@@ -134,13 +134,39 @@ function logHasSession(log, sid) {
   if (!sid) return false;
   let size = 0; try { size = fs.statSync(log).size; } catch { return false; }
   if (!size) return false;
-  const start = size > 262144 ? size - 262144 : 0;
+  // Scan the WHOLE log, not a fixed tail. In FULL mode the only `session:<sid>`
+  // marker is codex-tail's single phase:'start' event at the TOP of the
+  // (append-only, possibly multi-session) log; resume events carry no `session`.
+  // So for any session whose recorded stream outgrows a tail window — i.e. every
+  // real overnight tape, and specifically the n154-class multi-MB one — that lone
+  // marker sits BEFORE the tail, and a tail-only scan would miss it and wrongly
+  // re-drain the entire stream from zero (the exact n154 double this guard exists
+  // to kill). In meter mode the marker is the hook's newest per-resume line, which
+  // a single long autonomous turn can likewise push out of a tail window — same
+  // blind spot, same fix. A one-time O(file) chunked read at worker start is cheap
+  // and correct; byte-level search bridges the chunk boundary so a marker split
+  // across two reads still matches.
+  const needle = Buffer.from(`"session":"${sid}"`, 'utf8');
+  const CHUNK = 262144;
+  const keep = needle.length - 1; // bytes carried across a chunk boundary
+  let fd;
+  try { fd = fs.openSync(log, 'r'); } catch { return false; }
   try {
-    const fd = fs.openSync(log, 'r');
-    const buf = Buffer.alloc(size - start);
-    try { fs.readSync(fd, buf, 0, buf.length, start); } finally { fs.closeSync(fd); }
-    return buf.toString('utf8').includes(`"session":"${sid}"`);
+    const buf = Buffer.alloc(CHUNK + keep);
+    let pos = 0, carried = 0;
+    while (pos < size) {
+      const n = fs.readSync(fd, buf, carried, CHUNK, pos);
+      if (n <= 0) break;
+      const end = carried + n;
+      if (buf.subarray(0, end).indexOf(needle) !== -1) return true;
+      const carryStart = end > keep ? end - keep : 0; // retain a marker-1 tail
+      buf.copy(buf, 0, carryStart, end);
+      carried = end - carryStart;
+      pos += n;
+    }
+    return false;
   } catch { return false; }
+  finally { fs.closeSync(fd); }
 }
 
 // --status: print `live` if a worker is tailing this log right now, else `off`.
@@ -663,7 +689,22 @@ if (worker) {
     // the whole stream (that is what doubled n154 into 14k duplicate lines). Resume
     // from the checkpoint offset if we still have one that fits the rollout;
     // otherwise skip to the current end rather than re-draining and doubling.
-    offset = (snap && typeof snap.offset === 'number' && snap.offset <= size) ? snap.offset : size;
+    const usedSnapOffset = snap && typeof snap.offset === 'number' && snap.offset <= size;
+    offset = usedSnapOffset ? snap.offset : size;
+    // The session's start already sits in the log, so mark it started — otherwise
+    // the idle gate (state.started, below) never lets a re-attached session go IDLE.
+    // Carry the checkpoint's turn/card numbering when it belongs to this rollout so a
+    // resumed turn keeps its id instead of minting a colliding fresh turn-1.
+    if (snap && entry.rollout === rollout) {
+      if (usedSnapOffset) partial = snap.partial || '';
+      rolloutCwd = snap.rolloutCwd || rolloutCwd;
+      emittedIdle = !!snap.emittedIdle; idleClosedCard = snap.idleClosedCard || null;
+      state.turnN = snap.turnN || 0; state.card = snap.card || null; state.model = snap.model || null;
+      state.hasPlan = !!snap.hasPlan; state.planComplete = !!snap.planComplete;
+      state.titled = !!snap.titled;
+      if (Array.isArray(snap.prsSeen)) state.prsSeen = new Set(snap.prsSeen);
+    }
+    state.started = true;
     console.error(`re-attach guard: log already has session ${rolloutSessionId} — resuming at ${offset}, not re-draining from 0`);
   }
 }
