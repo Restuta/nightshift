@@ -8,7 +8,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { initialState, reduce, fold } from '../public/reducer.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Tiny event-stream helper: monotonically increasing t, fresh state.
 function stream() {
@@ -145,20 +148,21 @@ test('say narration and commands fill the active card\'s live now line', () => {
   assert.equal(x.item('turn-1').now.kind, 'tool', 'the newest activity always wins');
 });
 
-// Regression against the real tape that surfaced this bug (best-effort: skipped
-// if the recording isn't on this machine).
-test('prove.health tape: turn-5 sits in PR until #381 merges', (t) => {
-  const tape = path.join(
-    process.env.HOME || '', '.nightshift', 'sessions',
-    'Users-restuta-Projects-prove.health-ridiculous.health.jsonl'
-  );
-  if (!fs.existsSync(tape)) return t.skip('tape not present');
+// Regression against the tape that surfaced this bug, now a hermetic in-repo
+// fixture (test/tapes/pr-parking.jsonl) instead of a mutable machine-local tape
+// that had since rotated away — the old test could never pass on any other
+// machine. The referenced .bak-1782904052 could not reproduce it (its PR events
+// carry no item link, so no card ever attaches a PR), so the fixture is a faithful
+// synthesis of the same two assertions — see the Phase 0 report.
+test('pr-parking tape: turn-5 sits in PR until #381 merges', () => {
+  const tape = path.join(here, 'tapes', 'pr-parking.jsonl');
   const evs = fs.readFileSync(tape, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
 
-  // The moment in the screenshot: ~2s after #380 merged, #381 still running.
-  const atScreenshot = fold(evs, 1782291643000);
+  // Mid-scrub: after the turn-boundary "done", before the merge — #381 still open.
+  const midT = evs.find(e => e.type === 'item' && e.id === 'turn-5' && e.status === 'done').t + 30_000;
+  const atScreenshot = fold(evs, midT);
   assert.equal(atScreenshot.items.get('turn-5').status, 'pr',
-    'at screenshot time turn-5 belongs in PR-open, not Done');
+    'at mid time turn-5 belongs in PR-open, not Done');
 
   // End of tape: #381 has merged, so turn-5 is legitimately done.
   const final = fold(evs);

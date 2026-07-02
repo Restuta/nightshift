@@ -1,0 +1,13 @@
+{"t":1700000200000,"id":"j0","source":"hook","v":2,"type":"session","phase":"start","title":"junk session","agent":"claude","cwd":"/repo"}
+{"t":1700000260000,"source":"hook","v":2,"type":"item","id":"good-1","title":"Real work","status":"doing"}
+{"t":1700000320000,"source":"hook","v":2,"type":"item","id":"junk-1","title":"<task-notification> background task finished","status":"doing"}
+{"t":1700000380000,"source":"hook","v":2,"type":"item","id":"junk-2","title":"<local-command-stdout>ls output</local-command-stdout>","status":"doing"}
+{"t":1700000440000,"source":"hook","v":2,"type":"item","id":"junk-3","title":"Caveat: The messages below were generated while running local commands.","status":"inbox"}
+{"t":1700000500000,"source":"hook","v":2,"type":"item","id":"junk-4","title":"<command-name>","status":"doing"}
+{"t":1700000560000,"id":"j1","source":"hook","v":2,"type":"edit","path":"junk.js","item":"junk-1"}
+{"t":1700000620000,"source":"hook","v":2,"type":"item","id":"good-1","status":"done"}
+{"t":1700000680000,"id":"j2","source":"backfill","v":2,"type":"retract","target":{"item":"junk-1"},"reason":"harness-injected card"}
+{"t":1700000740000,"id":"j3","source":"backfill","v":2,"type":"retract","target":{"item":"junk-2"},"reason":"harness-injected card"}
+{"t":1700000800000,"id":"j4","source":"backfill","v":2,"type":"retract","target":{"item":"junk-3"},"reason":"harness-injected card"}
+{"t":1700000860000,"id":"j5","source":"backfill","v":2,"type":"retract","target":{"item":"junk-4"},"reason":"harness-injected card"}
+{"t":1700000920000,"id":"j6","source":"hook","v":2,"type":"session","phase":"idle"}
