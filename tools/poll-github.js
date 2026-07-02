@@ -312,6 +312,17 @@ function occurredMs(pr, state) {
   return tsMs(pr.createdAt); // open
 }
 
+// Recorder heartbeat: prove the poll lane is alive every tick. `alive` lands only
+// in the reducer's per-source freshness (no feed, no timers, and — being a
+// reconcile lane — it never keeps the AGENT badge LIVE); it's the honest signal
+// that the poller itself is running. Best-effort, silent (no console spam).
+function heartbeat() {
+  try {
+    fs.mkdirSync(path.dirname(LOG), { recursive: true });
+    fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'poll-github', v: 2, type: 'alive' }) + '\n');
+  } catch { /* best-effort */ }
+}
+
 // Emit pr/ci deltas for one PR's current state (folded `known` suppresses no-ops).
 // pr/ci events carry `repo` (owner/name) so the reducer keys the panel by
 // repo#number, and pr events carry gh's real `occurredAt`/`createdAt` so replay
@@ -410,10 +421,17 @@ const MAX_LIFE = Math.max(60, Math.round((4 * 3600 * 1000) / INTERVAL)); // ~4h 
 const QUIET_TICKS = Math.max(20, Math.round((10 * 60 * 1000) / INTERVAL)); // ~10 min idle
 const timer = setInterval(() => {
   lifeTicks++;
+  // Detect EXTERNAL growth (the agent's recorder appending) since our last tick,
+  // BEFORE we write anything ourselves this tick — our own heartbeat + pr/ci
+  // deltas must not count as "the session is active", or the poller would never
+  // see quiet and could never retire between PR waves (it'd run the full
+  // MAX_LIFE). lastSize is re-baselined AFTER our writes, below.
   let size = -1; try { size = fs.statSync(LOG).size; } catch { /* gone */ }
-  if (size > lastSize) { lastSize = size; lastGrowthTick = lifeTicks; }
+  if (size > lastSize) lastGrowthTick = lifeTicks;
+  heartbeat(); // resident poll lane → ~one alive per interval
   const openCount = tick();
   if (openCount > 0) sawOpenPr = true;
+  try { lastSize = fs.statSync(LOG).size; } catch { /* gone */ } // baseline incl. our own writes
   if (flags.worker && flags.known) {
     // Retire only when the work is done AND the session has gone quiet — never
     // just because the PRs known so far are all merged (the session may be mid-

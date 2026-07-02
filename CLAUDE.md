@@ -22,6 +22,15 @@ including the ones building it.
    are emitted deterministically (git hooks, Claude Code hooks). Work items and
    notes are emitted by the agent on purpose. Never make the model responsible
    for facts — it forgets; hooks don't.
+5. **Liveness is a recorded fact, not an inference.** Resident recorders
+   (`codex-tail`, `poll-github` workers) emit `alive` heartbeats ~30s; hook
+   recording is event-driven and *cannot* heartbeat, so its signal is last-event
+   age. The reducer derives an honest badge (LIVE / STALE "data ends HH:MM" /
+   idle) from freshest-producer age, and keys work-time accrual on producer
+   activity (not reconcile appends) — so a dead recorder never reads LIVE and
+   never accrues phantom hours (see `docs/EVENTS.md` "Liveness"). Session `end`
+   (SessionEnd hook / tailer self-retirement) sweeps still-`doing` cards to
+   abandoned.
 
 ## Layout
 

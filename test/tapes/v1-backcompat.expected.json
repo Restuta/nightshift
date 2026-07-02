@@ -1,0 +1,13 @@
+{
+  "items": {
+    "wi-1": { "status": "done", "add": 10, "del": 2, "commits": 1, "edits": 1, "activeMs": 480000, "pr": { "number": 1, "state": "merged" } },
+    "wi-2": { "status": "done", "add": 5, "del": 1, "commits": 1, "edits": 1, "activeMs": 240000, "pr": null }
+  },
+  "prs": {
+    "1": { "state": "merged", "ci": "pass" }
+  },
+  "totals": {
+    "add": 15, "del": 3, "commits": 2, "edits": 2, "events": 20,
+    "tokIn": 1000, "tokOut": 200, "cacheTok": 500, "cost": 0.03075, "tools": 1
+  }
+}

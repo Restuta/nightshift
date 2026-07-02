@@ -230,6 +230,10 @@ button { font-family: inherit; }
 .badge.is-idle .badge-dot { background: var(--yellow); }
 .badge.is-replay { color: var(--blue); border-color: #4ea7fc40; }
 .badge.is-replay .badge-dot { background: var(--blue); }
+/* STALE — the recorder died; not live, not idle. A quiet, un-blinking grey so it
+   reads as "no signal" rather than an active state. */
+.badge.is-stale { color: var(--faint); border-color: var(--line); }
+.badge.is-stale .badge-dot { background: var(--faint); }
 
 @keyframes blink { 50% { opacity: .25; } }
 
@@ -414,6 +418,27 @@ body.tape-collapsed .tape-resize { display: none; }
 
 .card.is-done { opacity: .55; }
 
+/* Abandoned — a card left in `doing` at a session end (definite) or a doing card
+   untouched for 6h on a tape that just stopped (inferred, "?"). Visually DISTINCT
+   from done: a dashed hairline + a muted warm tint, not the plain dim of done, so
+   "the agent walked away mid-flight" never reads as "shipped". */
+.card.is-abandoned { opacity: .72; border-style: dashed; border-color: #d2992250; }
+.ab-flag {
+  margin-top: 9px;
+  align-self: flex-start;
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--yellow);
+  background: #d2992216;
+  border: 1px solid #d2992240;
+}
+.ab-flag[hidden] { display: none; }
+.ab-flag.inferred { color: var(--faint); background: transparent; border-color: var(--line); }
+
 .card-head {
   display: flex;
   align-items: center;
@@ -595,6 +620,10 @@ body.tape-collapsed .tape-resize { display: none; }
 .now-doing.say  .nd-text { color: var(--ink); font-style: italic; opacity: .85; }
 .now-doing.tool .nd-text { font-family: var(--mono); font-size: 11px; color: var(--faint); }
 .now-doing.tool .nd-pulse { background: var(--faint); }
+/* Past-TTL now-line: re-tensed to "last seen 47m ago: …". Drop the live pulse and
+   mute it so it reads as history, not a present-tense claim. */
+.now-doing.past .nd-pulse { animation: none; background: var(--faint); opacity: .5; }
+.now-doing.past .nd-text { color: var(--faint); font-style: normal; opacity: .7; }
 @keyframes ndpulse {
   0%   { box-shadow: 0 0 0 0 rgba(210, 153, 34, .5); }
   70%  { box-shadow: 0 0 0 5px rgba(210, 153, 34, 0); }

@@ -153,6 +153,59 @@ ambient status stream and can be frequent.
 Free-form narration from the agent. `{text}` — used sparingly for milestones,
 not a chat log.
 
+### `alive`
+A recorder heartbeat — proof the RECORDER (not the agent) is still running.
+`{}` (the envelope `source` identifies which recorder). Emitted by RESIDENT
+producers ~every 30s: the Codex rollout tailer worker (`tools/codex-tail.js`,
+`source:"codex-tail"`) and the PR poller worker (`tools/poll-github.js`,
+`source:"poll-github"`).
+
+- `alive` is **freshness only**. The reducer records it in `state.sources`
+  (`source → latest t`) and does **nothing else**: it never enters the feed,
+  never touches a card or its timers, never calls `awake()`, never accrues
+  work-time, and does not count as an event. A heartbeat that did any of those
+  would be indistinguishable from real activity — defeating its purpose.
+- **The hook-based-recorder asymmetry (important).** Hook recording (Claude
+  Code, and Codex-via-hooks) is *event-driven*: the hook process runs, emits,
+  and exits per tool call. It has no resident loop, so it **cannot** heartbeat.
+  That asymmetry is real and intentional. The honest liveness signal for a
+  hook-based recorder is therefore the **age of its last real producer event**,
+  not a heartbeat. Resident tailers heartbeat; hook recorders are judged by
+  last-event age. The reducer's `liveness()` unifies both (below).
+
+## Liveness, staleness, and the two clocks
+
+The board must never show a dead recorder as LIVE (PLAN F3: 0/20 real tapes ever
+emitted an `end`; a latched `working` phase plus a server poller appending every
+30s made a dead session read LIVE all night and accrue phantom "time worked").
+So:
+
+- **Producer vs reconcile sources.** Every source except the reconcile lanes
+  (`poll-github`, `server`) counts as *agent-work* — including all v1 events (no
+  `source`), which are agent work by definition. The reducer splits the session
+  clock into `lastAt` (any event → feed/clock display) and `lastProducerAt`
+  (agent-work events only). **Work-time accrual and the "quiet" age key on
+  `lastProducerAt`**, so a reconcile append (or any `alive`) can't accrue phantom
+  hours or reset the quiet readout.
+- **Honest badge.** `liveness(state, now)` derives the display state purely from
+  `(phase, freshest producer age)`. A `working` phase is trusted only while a
+  recorder signal is fresh; past its TTL it becomes **`stale`** — the honest
+  "recorder died, data ends HH:MM" instead of a lying LIVE. TTL is short for a
+  heartbeating recorder (Codex, ~5m) and longer for a hook recorder (~15m, since
+  it goes genuinely quiet between turns). `idle`/`attention`/`ended` pass through
+  as the recorded phase. Pure over state → the badge agrees live and in replay.
+
+### `session` end + abandoned sweep (boundaries, plan 1.6)
+`session {phase:"end"}` closes the shift. It is emitted where a boundary is
+genuinely knowable: Claude Code's **SessionEnd** hook (`hooks/agent-hook.js`);
+and the Codex tailer's **self-retirement** on a long-dead rollout
+(`tools/codex-tail.js`) — Codex fires no end hook. On `end`, the reducer sweeps
+every card still in `doing` to `abandoned:true` (a derived, pure marker rendered
+distinctly from done — the agent stopped mid-flight). The flag clears if a later
+event re-activates the card (a resume + more work). For a tape that just *stops*
+with no `end`, the board applies a display-only inference: a `doing` card
+untouched for 6h is dimmed with an "abandoned?" chip (state is never mutated).
+
 ### `retract`
 Correct a recording error. `{type:"retract", target:{event?:<event id>, item?:<item id>}, reason?}`
 - `target.event` names an envelope `id`; `target.item` names a work-item id.

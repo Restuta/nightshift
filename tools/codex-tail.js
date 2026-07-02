@@ -33,8 +33,9 @@ const stop = args.includes('--stop');
 // only pr_ref sightings so the poller knows which PRs this session touched.
 const meter = args.includes('--meter');
 const meterKeep = e =>
+  e.type === 'alive' || // recorder heartbeat — always emitted, in both modes
   e.type === 'usage' || e.type === 'pr_ref' ||
-  (e.type === 'session' && e.phase === 'idle') ||
+  (e.type === 'session' && (e.phase === 'idle' || e.phase === 'end')) ||
   e.type === 'item'; // in meter mode the only items emitted are idle-retire/reopen of the hook's card
 let rollout = args.find(a => !a.startsWith('--') && a !== val('--log'));
 
@@ -530,6 +531,11 @@ function append(events) {
 // --- tail loop --------------------------------------------------------------
 
 let offset = 0, partial = '', idleTicks = 0, emittedIdle = false;
+// Recorder heartbeat cadence. A RESIDENT tailer emits `alive` every ~30s so the
+// board can tell a live-but-quiet agent (still heartbeating) from a dead tailer
+// (heartbeat stops → badge goes STALE). Hook-based recording can't do this.
+const ALIVE_MS = 30000;
+let lastAliveT = 0;
 // A turn card has no terminal event of its own — it closes on the next prompt.
 // When the session goes idle we retire it to `done` so a finished agent doesn't
 // leave a card stuck in "In progress"; we remember which card so the SAME turn
@@ -664,6 +670,13 @@ if (!once) {
   setInterval(() => {
     const before = offset;
     drain();
+    // Recorder heartbeat, independent of rollout growth: prove the tailer is
+    // alive every ~30s even while the agent quietly thinks. `alive` updates only
+    // per-source freshness in the reducer (no feed, no timers) — see EVENTS.md.
+    if (state.started && Date.now() - lastAliveT >= ALIVE_MS) {
+      lastAliveT = Date.now();
+      append([{ t: Date.now(), type: 'alive' }]);
+    }
     // Our rollout went quiet — did the session rotate to a new file? Follow it.
     if (idleTicks > 0 && idleTicks % 10 === 0) {
       const succ = findSuccessor(rolloutCwd, rollout, rolloutSessionId);
@@ -701,7 +714,14 @@ if (!once) {
       persist();
     }
     if (offset !== before) persist(); // checkpoint after any growth
-    if (idleTicks > IDLE_EXIT_TICKS) { cleanupState(); process.exit(0); } // long-dead → exit
+    if (idleTicks > IDLE_EXIT_TICKS) {
+      // The tailer self-retires (rollout long dead) — record the session END
+      // first (1.6): a knowable boundary Codex gives no hook for. The reducer
+      // sweeps any still-`doing` card to abandoned instead of latching forever.
+      if (state.started) append([{ t: Date.now(), type: 'session', phase: 'end' }]);
+      cleanupState();
+      process.exit(0);
+    }
   }, 500);
   // Exit but KEEP the snapshot, so a kill-and-restart resumes instead of
   // re-draining. `--stop` deletes the entry parent-side (explicit forget); a
