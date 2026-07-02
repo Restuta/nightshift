@@ -3,9 +3,13 @@
 // render path goes through renderAll(); animation only happens on forward,
 // incremental application of events, never on rebuilds (scrub/refresh).
 
-import { initialState, reduce, fold, activeItemId, hotFiles, prList, STATUSES } from './reducer.js';
+import { initialState, reduce, fold, activeItemId, hotFiles, prList, liveness, STATUSES } from './reducer.js';
 
 const $ = sel => document.querySelector(sel);
+
+// Mirror of the reducer's per-gap accrual cap, so the live in-flight timer on the
+// active card can't tick past one capped gap while a recorder is fresh.
+const ACTIVE_GAP_CAP = 30 * 60e3;
 
 const log = [];
 let state = initialState();
@@ -27,6 +31,18 @@ const pad = n => String(n).padStart(2, '0');
 function clockTime(t) {
   const d = new Date(t);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// HH:MM — for the honest "data ends HH:MM" on a stale badge.
+function hhmm(t) {
+  const d = new Date(t);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Is the live view showing a session whose recorder has gone stale? Pure derived
+// honesty (see reducer.liveness); only meaningful while live.
+function staleNow() {
+  return live && liveness(state, vtNow()).state === 'stale';
 }
 
 function durText(ms) {
@@ -448,6 +464,22 @@ function drawTimeline() {
     ctx.fillText(tickLabel(tk - t0), xx + 3, H - 2);
   }
 
+  // --- day boundaries: a multi-day tape (a project-keyed board can glue ~10
+  // calendar days into one run) gets a faint vertical line + a date label at each
+  // local midnight, so the days are legible. Dates sit up top, clear of the T+
+  // elapsed axis at the bottom. Only drawn when the span actually exceeds a day. ---
+  if (span > 24 * 3600e3) {
+    const first = new Date(t0); first.setHours(24, 0, 0, 0); // first local midnight after t0
+    for (let m = first.getTime(); m <= t1; m += 24 * 3600e3) {
+      const xx = x(m);
+      ctx.fillStyle = '#2b3556';
+      ctx.fillRect(xx, prTop, 1, base - prTop);
+      const d = new Date(m);
+      ctx.fillStyle = '#7c88b0';
+      ctx.fillText(`${d.getMonth() + 1}/${d.getDate()}`, xx + 3, prTop + 9);
+    }
+  }
+
   // --- event density bars (between the PR band and the axis) ---
   const BW = 4;
   const buckets = new Array(Math.ceil(W / BW)).fill(null);
@@ -560,7 +592,14 @@ const pinnedCols = new Set();   // empty columns the user clicked open (session-
 // (so a stalled card is visible at a glance).
 function cardTiming(el) {
   if (el._status === 'done') return el._activeMs > 0 ? `took ${ageText(el._activeMs)}` : '';
-  const dur = el._activeMs + (el._activeLive ? Math.max(0, vtNow() - state.session.lastAt) : 0);
+  // The in-flight gap accrues to the active card ONLY while a recorder is fresh
+  // and keyed on PRODUCER activity (lastProducerAt), never any event — so a dead
+  // recorder's card freezes at its real worked time instead of ticking phantom
+  // hours (F3). Capped like the reducer's per-gap accrual.
+  const base = state.session.lastProducerAt ?? state.session.lastAt;
+  const gap = el._activeLive && !staleNow() && base != null
+    ? Math.min(ACTIVE_GAP_CAP, Math.max(0, vtNow() - base)) : 0;
+  const dur = el._activeMs + gap;
   if (dur <= 0) return '';
   const idle = Math.max(0, vtNow() - (el._touchedAt || vtNow()));
   return ageText(dur) + (idle > 90e3 ? ` <span class="stale">· idle ${ageText(idle)}</span>` : '');
@@ -583,6 +622,22 @@ function stepTime(t, isNow) {
   return '';
 }
 
+// The card's live "now" line with a TTL: a fresh line (< 10 min old) reads as
+// present tense; an older one is honestly re-tensed to "last seen 47m ago: …" so
+// a dead recorder's 1am narration stops masquerading as current at 9am. Stored
+// on the element (el._now) so the 1s tick can re-age it with no new event.
+const NOW_TTL = 10 * 60e3;
+function renderNowLine(el) {
+  const R = el._refs, now = el._now;
+  if (!now || !now.text) { R.nowDoing.style.display = 'none'; return; }
+  const age = Math.max(0, vtNow() - (now.t || vtNow()));
+  const past = age > NOW_TTL;
+  R.nowDoing.className = `now-doing ${now.kind}${past ? ' past' : ''}`;
+  R.nowDoing.style.display = 'flex'; // override the stylesheet's default `none`
+  R.ndText.textContent = past ? `last seen ${ageText(age)} ago: ${now.text}` : now.text;
+  R.ndText.title = now.text;
+}
+
 function makeCard() {
   const el = document.createElement('article');
   el.className = 'card';
@@ -596,7 +651,8 @@ function makeCard() {
       <a class="pill pr" target="_blank" rel="noopener"><i class="ci"></i><b class="prtxt"></b></a>
     </div>
     <ul class="todo-list"></ul>
-    <div class="now-doing"><i class="nd-pulse"></i><span class="nd-text"></span></div>`;
+    <div class="now-doing"><i class="nd-pulse"></i><span class="nd-text"></span></div>
+    <div class="ab-flag" hidden></div>`;
   el._refs = {
     emoji: el.querySelector('.emoji'),
     cid: el.querySelector('.cid'),
@@ -616,6 +672,7 @@ function makeCard() {
     tlist: el.querySelector('.todo-list'),
     nowDoing: el.querySelector('.now-doing'),
     ndText: el.querySelector('.nd-text'),
+    abFlag: el.querySelector('.ab-flag'),
   };
   // Click a card with a plan to expand/collapse its steps (collapsed shows only
   // the recent tail — see updateCard). Re-render so the expand takes effect at
@@ -700,17 +757,26 @@ function updateCard(el, it, animate, activeId) {
   R.pills.classList.toggle('has-pills', hasDiff || !!it.commits || hasDelta || !!it.pr);
 
   // Live "now" line — the agent's latest narration (or, lacking any, its latest
-  // command) shown only on the active in-progress card, so a turn spent thinking
-  // and watching a job still says what it's doing instead of looking frozen.
-  const now = it.id === activeId && it.status === 'doing' ? it.now : null;
-  if (now && now.text) {
-    R.nowDoing.className = `now-doing ${now.kind}`;
-    R.nowDoing.style.display = 'flex'; // override the stylesheet's default `none`
-    R.ndText.textContent = now.text;
-    R.ndText.title = now.text;
+  // command) shown only on the active in-progress card. Stored on the element so
+  // the 1s tick can re-age it past its TTL without a full re-render.
+  el._now = it.id === activeId && it.status === 'doing' ? it.now : null;
+  renderNowLine(el);
+
+  // Abandoned: a card still in `doing` at a session `end` (reducer-set, definite)
+  // OR — for a tape that just STOPS with no end — a doing card untouched for 6h
+  // (display-only inference, state is never mutated). Both dim the card and show a
+  // chip; the "?" distinguishes the inference from the recorded fact.
+  const ABANDON_TTL = 6 * 3600e3;
+  const staleDoing = it.status === 'doing' && (vtNow() - (it.touchedAt || vtNow())) > ABANDON_TTL;
+  const abandoned = it.abandoned && it.status === 'doing';
+  if (abandoned || staleDoing) {
+    R.abFlag.hidden = false;
+    R.abFlag.textContent = abandoned ? 'abandoned' : 'abandoned?';
+    R.abFlag.className = `ab-flag${abandoned ? '' : ' inferred'}`;
   } else {
-    R.nowDoing.style.display = 'none';
+    R.abFlag.hidden = true;
   }
+  el.classList.toggle('is-abandoned', abandoned || staleDoing);
 
   el.classList.toggle('is-done', it.status === 'done');
   el.classList.toggle('is-active', it.id === activeId);
@@ -1040,17 +1106,26 @@ function renderStatus() {
   if (!live) {
     badge.classList.add('is-replay');
     text.textContent = playing ? `REPLAY ${speed}×` : 'PAUSED';
-  } else if (state.session.phase === 'attention') {
-    badge.classList.add('is-attn');
-    text.textContent = 'NEEDS INPUT';
-  } else if (state.session.phase === 'working') {
-    badge.classList.add('is-live');
-    text.textContent = 'LIVE';
-  } else if (state.session.phase === 'idle') {
-    badge.classList.add('is-idle');
-    text.textContent = 'IDLE';
   } else {
-    text.textContent = state.session.phase === 'ended' ? 'ENDED' : 'WAITING';
+    // Honest badge: derive from (phase, freshest producer age), so a `working`
+    // phase whose recorder has gone silent past its TTL reads STALE with the real
+    // "data ends HH:MM" — not a latched, lying LIVE (F3).
+    const L = liveness(state, vtNow());
+    if (L.state === 'attention') {
+      badge.classList.add('is-attn');
+      text.textContent = 'NEEDS INPUT';
+    } else if (L.state === 'stale') {
+      badge.classList.add('is-stale');
+      text.textContent = `STALE · data ends ${hhmm(L.dataEndsAt)}`;
+    } else if (L.state === 'live') {
+      badge.classList.add('is-live');
+      text.textContent = 'LIVE';
+    } else if (L.state === 'idle') {
+      badge.classList.add('is-idle');
+      text.textContent = 'IDLE';
+    } else {
+      text.textContent = L.state === 'ended' ? 'ENDED' : 'WAITING';
+    }
   }
   $('#btn-live').classList.toggle('on', live);
   $('#btn-play').textContent = playing ? '❚❚' : '▶';
@@ -1062,7 +1137,11 @@ function renderStatus() {
 function renderAttention() {
   const banner = $('#attention');
   const phase = state.session.phase;
-  const waiting = ageText(Math.max(0, vtNow() - (state.session.lastAt || vtNow())));
+  // "quiet/waiting" is time since the agent last DID something (lastProducerAt),
+  // not since any event — else a reconcile append every 30s reset the readout to
+  // "quiet 0m" all night (F3). Falls back to lastAt for a producer-less tape.
+  const quietFrom = state.session.lastProducerAt ?? state.session.lastAt;
+  const waiting = ageText(Math.max(0, vtNow() - (quietFrom || vtNow())));
   if (live && phase === 'attention') {
     banner.hidden = false;
     banner.classList.add('urgent');
@@ -1206,6 +1285,7 @@ function tickActiveCards() {
   for (const el of cardEls.values()) {
     if (el._status === 'done') continue;
     el._refs.age.innerHTML = cardTiming(el);
+    renderNowLine(el); // re-tense the now-line as it crosses its TTL
     // live-tick the running step's elapsed time on the active card
     if (el._activeLive && el._todos) {
       const nowEl = el._refs.tlist.querySelector('li.now .steptime');
@@ -1220,7 +1300,8 @@ setInterval(() => {
   if (live) {
     renderReadout();
     drawTimeline();
-    renderAttention();
+    renderStatus(); // re-derive the badge so it flips to STALE on time even with
+                    // zero incoming events (a dead recorder appends nothing)
     tickActiveCards();
   }
 }, 1000);
