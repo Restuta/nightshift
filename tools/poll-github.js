@@ -7,6 +7,12 @@
 //   node tools/poll-github.js --stop   [--log L]           # stop the worker
 //   node tools/poll-github.js --status [--log L]           # live | off
 //
+// This is the SINGLE writer of pr/ci events (plan 1.4). The hook and codex-tail no
+// longer write pr state — they emit `pr_ref` sightings, which this poller harvests
+// (alongside the legacy text-scan for old tapes) to learn which PRs a session
+// touched. Each pr event carries `repo` (owner/name) and gh's real `occurredAt`/
+// `createdAt`, so the board keys panel rows by repo#number and replays true history.
+//
 // CI/review status comes from toast review-ci (Orba's CI — fast, authoritative)
 // when available, falling back to the gh CLI's check rollup otherwise. PR
 // metadata (title/url/state) comes from gh. Zero deps. Stateless across restarts:
@@ -78,9 +84,22 @@ if (flags.known && !flags.repo) {
   catch { /* leave unset → repo-qualified refs are skipped below */ }
 }
 
+// Repo identity stamped on every emitted pr/ci event (plan 1.4): the reducer keys
+// state.prs by repo#number when repo is present, so two repos' PR #1 no longer
+// collide into one panel row. Resolved once per run and cached — cheap. In --known
+// mode flags.repo is already resolved above; otherwise fall back to the cwd's repo.
+let REPO = flags.repo || null;
+if (!REPO) {
+  try { REPO = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner'], { encoding: 'utf8' })).nameWithOwner; }
+  catch { /* unknown → events omit repo (v1-style bare-number keys) */ }
+}
+
+// gh's real fact-times (createdAt/mergedAt/closedAt) ride along so the reducer can
+// record occurredAt — replay then shows the 2am merge at 2am, not at poll time.
+const PR_FIELDS = 'number,title,url,state,mergedAt,closedAt,createdAt,statusCheckRollup';
+
 function ghPrs() {
-  const args = ['pr', 'list', '--state', 'all', '--limit', String(LIMIT),
-    '--json', 'number,title,url,state,statusCheckRollup'];
+  const args = ['pr', 'list', '--state', 'all', '--limit', String(LIMIT), '--json', PR_FIELDS];
   if (flags.repo) args.push('--repo', flags.repo);
   return JSON.parse(execFileSync('gh', args, { encoding: 'utf8' }));
 }
@@ -88,7 +107,7 @@ function ghPrs() {
 // One PR by number — used in --known mode so we touch only the PRs this session
 // surfaced, never the repo's hundreds. Returns null if it's not a PR / no access.
 function ghPr(n) {
-  const args = ['pr', 'view', String(n), '--json', 'number,title,url,state,statusCheckRollup'];
+  const args = ['pr', 'view', String(n), '--json', PR_FIELDS];
   if (flags.repo) args.push('--repo', flags.repo);
   try { return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
   catch { return null; }
@@ -203,6 +222,10 @@ function sessionPrNumbers() {
   for (const line of data.split('\n')) {
     if (!line) continue;
     let ev; try { ev = JSON.parse(line); } catch { continue; }
+    // pr_ref sightings (plan 1.4) are the PRIMARY harvest now — the hook/tailer emit
+    // these instead of pr, so the poller learns which PRs this session touched. Its
+    // url (when present) carries the repo; a repo-less ref is a current-repo number.
+    if (ev.type === 'pr_ref' && ev.number != null && sameRepo(urlRepo(ev.url))) set.add(Number(ev.number));
     if (ev.type === 'pr' && ev.number != null && sameRepo(urlRepo(ev.url))) set.add(Number(ev.number));
     if (ev.type === 'ci' && ev.pr != null) set.add(Number(ev.pr));
     // PR URLs (repo-scoped) anywhere, incl. card titles like
@@ -257,11 +280,15 @@ function refreshKnown() {
     const complete = chunk.lastIndexOf('\n');
     if (complete < 0) return;
     offset += Buffer.byteLength(chunk.slice(0, complete + 1));
+    // Only fold events belonging to THIS repo (or repo-less legacy ones): `known`
+    // is number-keyed, so a same-numbered PR from another repo in the same tape
+    // must not pollute this run's dedupe (plan 1.4 keys panel rows by repo#number).
+    const mine = ev => !ev.repo || !REPO || ev.repo === REPO;
     for (const line of chunk.slice(0, complete).split('\n').filter(Boolean)) {
       let ev; try { ev = JSON.parse(line); } catch { continue; }
-      if (ev.type === 'pr' && ev.number != null) {
+      if (ev.type === 'pr' && ev.number != null && mine(ev)) {
         known.set(ev.number, { ...(known.get(ev.number) || {}), state: ev.state });
-      } else if (ev.type === 'ci' && ev.pr != null) {
+      } else if (ev.type === 'ci' && ev.pr != null && mine(ev)) {
         known.set(ev.pr, { ...(known.get(ev.pr) || {}), ci: ev.status });
       }
     }
@@ -276,7 +303,19 @@ function append(ev) {
   console.log(JSON.stringify(ev));
 }
 
+// Parse a gh ISO timestamp to epoch ms, or null. gh's real fact-time (plan 1.4).
+const tsMs = s => { const ms = s ? Date.parse(s) : NaN; return Number.isFinite(ms) ? ms : null; };
+// The real time of the transition we're recording, from gh (falls back to open time).
+function occurredMs(pr, state) {
+  if (state === 'merged') return tsMs(pr.mergedAt) ?? tsMs(pr.createdAt);
+  if (state === 'closed') return tsMs(pr.closedAt) ?? tsMs(pr.createdAt);
+  return tsMs(pr.createdAt); // open
+}
+
 // Emit pr/ci deltas for one PR's current state (folded `known` suppresses no-ops).
+// pr/ci events carry `repo` (owner/name) so the reducer keys the panel by
+// repo#number, and pr events carry gh's real `occurredAt`/`createdAt` so replay
+// shows true history — this poller is the SINGLE writer of pr/ci (plan 1.4).
 function emitPr(pr) {
   let state = pr.state.toLowerCase(); // open | merged | closed (from gh)
   // CI/review status from toast when available (session-scoped polling only),
@@ -289,11 +328,19 @@ function emitPr(pr) {
   if (tbase === 'merged' && state === 'open') state = 'merged';
   const k = known.get(pr.number) || {};
   if (k.state !== state) {
-    append({ type: 'pr', number: pr.number, title: pr.title, url: pr.url, state });
+    const ev = { type: 'pr', number: pr.number, title: pr.title, url: pr.url, state };
+    if (REPO) ev.repo = REPO;
+    const created = tsMs(pr.createdAt);
+    if (created != null) ev.createdAt = created;
+    const occ = occurredMs(pr, state);
+    if (occ != null) ev.occurredAt = occ;
+    append(ev);
     known.set(pr.number, { ...known.get(pr.number), state });
   }
   if (ci != null && k.ci !== ci) {
-    append({ type: 'ci', pr: pr.number, status: ci });
+    const ev = { type: 'ci', pr: pr.number, status: ci };
+    if (REPO) ev.repo = REPO;
+    append(ev);
     known.set(pr.number, { ...known.get(pr.number), ci });
   }
 }
