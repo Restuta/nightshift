@@ -125,9 +125,18 @@ including the ones building it.
 - `tools/codex-tail.js` — the rollout tailer. In `--meter` mode it's the thin
   companion to hook recording: emits ONLY what hooks can't carry (token cost,
   PR/CI, idle + card retirement), so the two never double-count. Full mode is
-  retained for `import-transcript` parity and as a fallback. Self-detaches,
-  idempotent per log (`~/.nightshift/codex-tails.json`), `--stop` ends it,
-  follows rotation within the same session id, resumes on restart.
+  retained for `import-transcript` parity and as a fallback. Self-detaches; the
+  worker registry (`~/.nightshift/codex-tails.json`) is keyed by **rollout path**,
+  so exactly one recorder tails a rollout — a second `/nightshift` (e.g. from
+  another worktree resolving a different log) is a no-op, never a duplicate
+  recorder (duplicates fanned one session into 15 identical tapes). It attaches to
+  **this** session's rollout by id (`$CODEX_THREAD_ID`), never "newest in the dir",
+  and refuses rather than guess when nothing matches — so a worktree session
+  records its OWN cwd and tape. `--stop` ends it (a scoped `--stop --log` pauses and
+  keeps the resume checkpoint); it follows rotation within the same session id and
+  resumes on restart. On re-attach with a lost checkpoint but a log that already
+  holds this session, it resumes from the log instead of re-draining from zero (the
+  n154 double-record).
 - `tools/poll-github.js` — records PR/CI facts as events; folds the log's known
   state each tick and appends only deltas (stateless, idempotent). CI/review
   status comes from **toast review-ci** (Orba's CI — fast, authoritative) when

@@ -36,6 +36,12 @@ const meterKeep = e =>
   e.type === 'item'; // in meter mode the only items emitted are idle-retire/reopen of the hook's card
 let rollout = args.find(a => !a.startsWith('--') && a !== val('--log'));
 
+// This Codex session's id (== the hook payload's session_id / $CODEX_THREAD_ID).
+// When known, the rollout is selected by matching THIS id — never "newest in the
+// dir", the fallback that let 15 worktree /nightshift runs all attach to one
+// main-repo rollout and record one session into 15 identical tapes (F1).
+const SESSION_ID = val('--session') || process.env.CODEX_THREAD_ID || null;
+
 // Read the head of a rollout. The session_meta first line can be tens of KB (it
 // embeds base_instructions), so a small read truncates it — 64KB covers the
 // meta fields we match by regex without slurping the whole file.
@@ -51,7 +57,11 @@ function rolloutHead(p) {
 const headField = (head, re) => { const m = head.match(re); return m ? m[1] : null; };
 const CWD_RE = /"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 const ID_RE = /"id"\s*:\s*"([0-9a-f-]{36})"/;
+const SID_RE = /"session_id"\s*:\s*"([0-9a-f-]{36})"/;
 function rolloutCwdOf(p) { return headField(rolloutHead(p), CWD_RE); }
+// A rollout's own session id: session_meta carries both `id` and `session_id`
+// (same value); either identifies which session the file belongs to.
+function rolloutSessionIdOf(p) { const h = rolloutHead(p); return headField(h, ID_RE) || headField(h, SID_RE); }
 
 // Newest rollout = the session being written right now. With preferCwd, the
 // newest rollout recorded in THAT directory wins — so `/nightshift` attaches to
@@ -75,6 +85,31 @@ function newestRollout(preferCwd) {
   return bestCwd || best;
 }
 
+// Deterministic selection: the ONE rollout that IS this session. Matched by the
+// thread id embedded in the filename (Codex names rollouts
+// rollout-<ts>-<id>.jsonl) or by the session_meta id in the head. A subagent
+// rollout is never chosen (its head carries a different id). Returns null when
+// nothing matches — the caller then refuses to guess rather than grabbing the
+// newest unrelated rollout.
+function rolloutForSession(id) {
+  if (!id) return null;
+  const base = path.join(os.homedir(), '.codex', 'sessions');
+  let best = null, bestT = -1;
+  const walk = d => {
+    let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!/^rollout-.*\.jsonl$/.test(e.name)) continue;
+      if (!e.name.includes(id) && rolloutSessionIdOf(p) !== id) continue;
+      let m = 0; try { m = fs.statSync(p).mtimeMs; } catch { continue; }
+      if (m >= bestT) { bestT = m; best = p; } // newest, if a session ever spans files
+    }
+  };
+  walk(base);
+  return best;
+}
+
 const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
 const stateFile = path.join(NS_HOME, 'codex-tails.json');
 
@@ -90,11 +125,59 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch { return
 function readState() { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } }
 function writeState(s) { fs.mkdirSync(NS_HOME, { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s) + '\n'); }
 
+// Does the destination log already hold this rollout's session? Both recorders'
+// session-start events carry `session:<rolloutSessionId>`. The newest session's
+// events sit at the END of an append-only (possibly multi-session central) log, so
+// we scan the tail. Used only to decide whether a from-zero drain would re-append
+// a stream the log already has (the n154 double), so a cheap probe is enough.
+function logHasSession(log, sid) {
+  if (!sid) return false;
+  let size = 0; try { size = fs.statSync(log).size; } catch { return false; }
+  if (!size) return false;
+  // Scan the WHOLE log, not a fixed tail. In FULL mode the only `session:<sid>`
+  // marker is codex-tail's single phase:'start' event at the TOP of the
+  // (append-only, possibly multi-session) log; resume events carry no `session`.
+  // So for any session whose recorded stream outgrows a tail window — i.e. every
+  // real overnight tape, and specifically the n154-class multi-MB one — that lone
+  // marker sits BEFORE the tail, and a tail-only scan would miss it and wrongly
+  // re-drain the entire stream from zero (the exact n154 double this guard exists
+  // to kill). In meter mode the marker is the hook's newest per-resume line, which
+  // a single long autonomous turn can likewise push out of a tail window — same
+  // blind spot, same fix. A one-time O(file) chunked read at worker start is cheap
+  // and correct; byte-level search bridges the chunk boundary so a marker split
+  // across two reads still matches.
+  const needle = Buffer.from(`"session":"${sid}"`, 'utf8');
+  const CHUNK = 262144;
+  const keep = needle.length - 1; // bytes carried across a chunk boundary
+  let fd;
+  try { fd = fs.openSync(log, 'r'); } catch { return false; }
+  try {
+    const buf = Buffer.alloc(CHUNK + keep);
+    let pos = 0, carried = 0;
+    while (pos < size) {
+      const n = fs.readSync(fd, buf, carried, CHUNK, pos);
+      if (n <= 0) break;
+      const end = carried + n;
+      if (buf.subarray(0, end).indexOf(needle) !== -1) return true;
+      const carryStart = end > keep ? end - keep : 0; // retain a marker-1 tail
+      buf.copy(buf, 0, carryStart, end);
+      carried = end - carryStart;
+      pos += n;
+    }
+    return false;
+  } catch { return false; }
+  finally { fs.closeSync(fd); }
+}
+
 // --status: print `live` if a worker is tailing this log right now, else `off`.
 // Lets /nightshift tell "already recording" from "an old tape is sitting here".
 if (args.includes('--status')) {
-  const e = readState()[LOG];
-  process.stdout.write(e && e.pid && alive(e.pid) ? 'live\n' : 'off\n');
+  // The registry is keyed by rollout path, so a worker's destination log lives in
+  // its entry. `live` if some entry feeding THIS log has an alive worker. (`key ===
+  // LOG` also matches a pre-upgrade, log-keyed entry from an in-flight old worker.)
+  const s = readState();
+  const live = Object.entries(s).some(([key, e]) => e && e.pid && alive(e.pid) && (e.log === LOG || key === LOG));
+  process.stdout.write(live ? 'live\n' : 'off\n');
   process.exit(0);
 }
 
@@ -102,9 +185,19 @@ if (args.includes('--status')) {
 if (stop) {
   const s = readState();
   for (const [key, e] of Object.entries(s)) {
-    if (LOG && key !== LOG) continue;
+    // --log scopes the stop to the worker feeding that log (its stored `log`, or an
+    // old log-keyed entry). Bare --stop stops every worker.
+    if (LOG && !(e && (e.log === LOG || key === LOG))) continue;
     if (e && e.pid && alive(e.pid)) { try { process.kill(e.pid); } catch { /* gone */ } }
-    delete s[key];
+    if (LOG && e && e.snap) {
+      // Scoped stop = pause. Keep the resume checkpoint (no pid) so a later continue
+      // onto the SAME tape resumes instead of re-draining from zero. A Reset moves
+      // the log aside, which the checkpoint's logSize guard detects (the fresh log
+      // is smaller) → a clean from-zero drain, exactly as a reset intends.
+      s[key] = { rollout: e.rollout || key, log: e.log, mode: e.mode, snap: e.snap };
+    } else {
+      delete s[key];
+    }
   }
   writeState(s);
   process.exit(0);
@@ -145,9 +238,24 @@ function findSuccessor(cwd, current, sessionId) {
   return best;
 }
 
-// Prefer the newest rollout recorded in the current project dir (where the
-// skill runs), so `/nightshift` attaches to THIS session, not a parallel one.
-rollout = rollout || newestRollout(process.cwd());
+// Pick the rollout to tail. An explicit path always wins (codex-recorder pins the
+// exact rollout via $CODEX_THREAD_ID). Otherwise, if we know THIS session's id,
+// select by it and REFUSE to guess when nothing matches — never fall back to
+// "newest rollout in the dir", the mechanism that made 15 worktree sessions
+// converge on one rollout (F1). Only a truly identity-less run (a manual/import
+// invocation with no session id) uses the newest-mtime heuristic, and even then it
+// prefers this project dir.
+if (!rollout) {
+  if (SESSION_ID) {
+    rollout = rolloutForSession(SESSION_ID);
+    if (!rollout) {
+      console.error(`no rollout matches session ${SESSION_ID} — refusing to guess a different session's rollout. Start recording from the Codex session itself, or pass its rollout path explicitly.`);
+      process.exit(3);
+    }
+  } else {
+    rollout = newestRollout(process.cwd());
+  }
+}
 if (!rollout || !fs.existsSync(rollout)) {
   console.error('no rollout file found — pass one explicitly or start a Codex session first');
   process.exit(1);
@@ -169,20 +277,36 @@ if (!worker && !once) {
     LOG = centralLogFor(cwd);
   }
   const s = readState();
-  const cur = s[LOG];
+  // The registry is keyed by ROLLOUT path, not log — so a second /nightshift in
+  // another worktree that resolves the SAME rollout finds this lock and no-ops,
+  // instead of spawning a duplicate recorder that fans one session into N identical
+  // tapes (F1). One rollout is recorded exactly once.
+  const own = s[rollout]; // this rollout's own entry (its resume checkpoint lives here)
   const wantMode = meter ? 'meter' : 'full';
-  if (cur && cur.pid && alive(cur.pid)) {
-    if ((cur.mode || 'full') === wantMode) process.exit(0); // already tailing in this mode
-    try { process.kill(cur.pid); } catch { /* gone */ } // wrong mode (e.g. a pre-upgrade full tailer) → replace
+  // A live worker on this rollout — under the rollout key (new) OR any entry whose
+  // stored `rollout` matches (a pre-upgrade, log-keyed worker still tailing it) —
+  // means it is already recorded. Detecting the old-format worker too keeps the
+  // one-recorder guarantee across the registry-format migration.
+  let live = own && own.pid && alive(own.pid) ? own : null;
+  if (!live) for (const e of Object.values(s)) { if (e && e.rollout === rollout && e.pid && alive(e.pid)) { live = e; break; } }
+  if (live) {
+    if ((live.mode || 'full') === wantMode) {
+      if (live.log && live.log !== LOG) {
+        console.error(`already recording ${path.basename(rollout)} → ${live.log} (pid ${live.pid}); not double-recording it into ${LOG}`);
+      }
+      process.exit(0); // a live worker already tails this rollout in this mode
+    }
+    try { process.kill(live.pid); } catch { /* gone */ } // wrong mode (e.g. a pre-upgrade full tailer) → replace
   }
+  // No live worker (fresh, or a stale entry with a dead pid) → take it over.
   const out = fs.openSync(path.join(NS_HOME, 'codex-tail.log'), 'a');
   const child = spawn(process.execPath, [__filename, '--worker', rollout, '--log', LOG, ...(meter ? ['--meter'] : [])],
     { detached: true, stdio: ['ignore', out, out] });
   child.unref();
-  // Preserve a prior worker's resume snapshot when respawning on the SAME
-  // rollout+mode, so a restart continues instead of re-draining the whole tape.
-  const prev = cur && cur.rollout === rollout && (cur.mode || 'full') === wantMode ? cur : {};
-  s[LOG] = { ...prev, pid: child.pid, rollout, mode: wantMode };
+  // Preserve this rollout's resume snapshot when respawning in the SAME mode, so a
+  // restart continues instead of re-draining the whole tape.
+  const prev = own && (own.mode || 'full') === wantMode ? own : {};
+  s[rollout] = { ...prev, pid: child.pid, rollout, log: LOG, mode: wantMode };
   writeState(s);
   process.exit(0);
 }
@@ -504,7 +628,7 @@ function drain() {
 
 function cleanupState() {
   const s = readState();
-  if (s[LOG] && s[LOG].pid === process.pid) { delete s[LOG]; writeState(s); }
+  if (s[rollout] && s[rollout].pid === process.pid) { delete s[rollout]; writeState(s); }
 }
 
 // Checkpoint enough to resume after a restart/crash: the file position (so we
@@ -513,14 +637,20 @@ function cleanupState() {
 // command's classification at the seam is harmless; re-emitting 18k events isn't.
 function persist() {
   const s = readState();
-  if (!s[LOG] || s[LOG].pid !== process.pid) return; // a newer worker owns it
-  s[LOG] = {
-    ...s[LOG], rollout,
+  const e = s[rollout];
+  if (!e || e.pid !== process.pid) return; // a newer worker owns it
+  let logSize = 0; try { logSize = fs.statSync(LOG).size; } catch { /* not written yet */ }
+  s[rollout] = {
+    ...e, rollout, log: LOG,
     snap: {
       offset, partial, rolloutCwd, rolloutSessionId, emittedIdle, idleClosedCard,
       hasPlan: state.hasPlan, planComplete: state.planComplete,
       turnN: state.turnN, card: state.card, model: state.model,
       started: state.started, titled: state.titled, prsSeen: [...state.prsSeen],
+      // Destination-log byte length at this checkpoint. On restart we resume only
+      // if the log hasn't shrunk below it — a Reset/archive moves the log aside, and
+      // resuming mid-rollout into a fresh empty tape would skip the session's start.
+      logSize,
     },
   };
   writeState(s);
@@ -530,18 +660,52 @@ function persist() {
 // re-drain). Guarded: only if the file is the same and hasn't shrunk below our
 // mark (a shrink means rotation → start fresh).
 if (worker) {
-  const entry = readState()[LOG] || {};
+  // Learn this rollout's session id up front — drain() sets it from session_meta,
+  // but the re-attach guard below needs it before the first read.
+  rolloutSessionId = rolloutSessionIdOf(rollout) || rolloutSessionId;
+  const entry = readState()[rollout] || {};
   const snap = entry.snap;
   let size = 0; try { size = fs.statSync(rollout).size; } catch { /* gone */ }
-  if (snap && entry.rollout === rollout && typeof snap.offset === 'number' && snap.offset <= size) {
+  let logSize = 0; try { logSize = fs.statSync(LOG).size; } catch { /* none yet */ }
+  // The checkpoint is usable only if the rollout hasn't shrunk below our mark
+  // (rotation → start fresh) AND the destination log still holds what we wrote
+  // (logSize hasn't dropped below the checkpoint — a Reset/archive moves the log
+  // aside, and resuming mid-rollout into a fresh empty tape would skip the start).
+  const snapUsable = snap && entry.rollout === rollout
+    && typeof snap.offset === 'number' && snap.offset <= size
+    && logSize >= (snap.logSize || 0);
+  if (snapUsable) {
     offset = snap.offset; partial = snap.partial || ''; rolloutCwd = snap.rolloutCwd || null;
-    rolloutSessionId = snap.rolloutSessionId || null;
+    rolloutSessionId = snap.rolloutSessionId || rolloutSessionId;
     emittedIdle = !!snap.emittedIdle; idleClosedCard = snap.idleClosedCard || null;
     state.turnN = snap.turnN || 0; state.card = snap.card || null; state.model = snap.model || null;
     state.hasPlan = !!snap.hasPlan; state.planComplete = !!snap.planComplete;
     state.started = !!snap.started; state.titled = !!snap.titled;
     if (Array.isArray(snap.prsSeen)) state.prsSeen = new Set(snap.prsSeen);
     console.error(`resumed at offset ${offset} (turn ${state.turnN})`);
+  } else if (offset === 0 && logHasSession(LOG, rolloutSessionId)) {
+    // Re-attach guard (the n154 double): no usable checkpoint, but the destination
+    // log ALREADY holds this rollout's session — draining from zero would re-append
+    // the whole stream (that is what doubled n154 into 14k duplicate lines). Resume
+    // from the checkpoint offset if we still have one that fits the rollout;
+    // otherwise skip to the current end rather than re-draining and doubling.
+    const usedSnapOffset = snap && typeof snap.offset === 'number' && snap.offset <= size;
+    offset = usedSnapOffset ? snap.offset : size;
+    // The session's start already sits in the log, so mark it started — otherwise
+    // the idle gate (state.started, below) never lets a re-attached session go IDLE.
+    // Carry the checkpoint's turn/card numbering when it belongs to this rollout so a
+    // resumed turn keeps its id instead of minting a colliding fresh turn-1.
+    if (snap && entry.rollout === rollout) {
+      if (usedSnapOffset) partial = snap.partial || '';
+      rolloutCwd = snap.rolloutCwd || rolloutCwd;
+      emittedIdle = !!snap.emittedIdle; idleClosedCard = snap.idleClosedCard || null;
+      state.turnN = snap.turnN || 0; state.card = snap.card || null; state.model = snap.model || null;
+      state.hasPlan = !!snap.hasPlan; state.planComplete = !!snap.planComplete;
+      state.titled = !!snap.titled;
+      if (Array.isArray(snap.prsSeen)) state.prsSeen = new Set(snap.prsSeen);
+    }
+    state.started = true;
+    console.error(`re-attach guard: log already has session ${rolloutSessionId} — resuming at ${offset}, not re-draining from 0`);
   }
 }
 
@@ -556,6 +720,15 @@ if (!once) {
     if (idleTicks > 0 && idleTicks % 10 === 0) {
       const succ = findSuccessor(rolloutCwd, rollout, rolloutSessionId);
       if (succ) {
+        // Rotation → the registry is keyed by rollout path, so MOVE our lock from the
+        // old rollout to the successor. Otherwise the successor has no lock and a
+        // second attach could double-record it.
+        const s = readState();
+        if (s[rollout] && s[rollout].pid === process.pid) {
+          s[succ] = { ...s[rollout], rollout: succ };
+          delete s[rollout];
+          writeState(s);
+        }
         rollout = succ; offset = 0; partial = ''; idleTicks = 0; emittedIdle = false;
         persist(); // checkpoint the new file before reading it
         // turn/card/model state carries over → the tape stays one continuous session
