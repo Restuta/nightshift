@@ -248,6 +248,58 @@ setInterval(() => {
   for (const s of sessions.values()) if (s.clients.size) reconcilePRs(s);
 }, RECONCILE_MS).unref();
 
+// ------------------------------------------------------------------- fleet
+// Fleet home (/fleet page + /api/fleet data): one folded row per session — the
+// aggregate view an overnight run needs. Folding every tape on every ~15s poll
+// would re-parse tens of MB per request (the scanMeta pattern above re-reads the
+// whole file each call — deliberately NOT copied here). So each tape's fold is
+// CACHED by (size, mtime): a tape only re-folds when it actually grows. The
+// summary builder is the SAME pure fold the board uses (public/reducer.js via
+// public/fleet-summary.js), so Fleet numbers match the board. It's ESM and this
+// server is CommonJS, so it's brought in via dynamic import at boot.
+let fleetMod = null;
+const fleetReady = import(pathToFileURL(path.join(__dirname, 'public', 'fleet-summary.js')).href)
+  .then(m => { fleetMod = m; })
+  .catch(err => { console.error('fleet-summary failed to load:', err); });
+
+const fleetCache = new Map(); // file → { size, mtimeMs, id, base }
+
+// The cached half is time-INDEPENDENT (the expensive fold); freshness and the
+// 24h merge count are applied per request with the current clock, so a tape with
+// no new events still ages from live→stale without a re-fold.
+function fleetBase(s) {
+  let st;
+  try { st = fs.statSync(s.file); } catch { return null; }
+  const hit = fleetCache.get(s.file);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs && hit.id === s.id) return hit.base;
+  let raw = '';
+  try { raw = fs.readFileSync(s.file, 'utf8'); } catch { return null; }
+  const events = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let ev; try { ev = JSON.parse(line); } catch { continue; }
+    events.push(ev);
+  }
+  const base = fleetMod.summarizeBase(events, { id: s.id });
+  fleetCache.set(s.file, { size: st.size, mtimeMs: st.mtimeMs, id: s.id, base });
+  return base;
+}
+
+async function serveFleetApi(res) {
+  await fleetReady;
+  if (!fleetMod) { res.writeHead(503); return res.end('fleet summary unavailable'); }
+  const now = Date.now();
+  const out = [];
+  for (const s of sessions.values()) {
+    let row = null;
+    try { const base = fleetBase(s); if (base) row = fleetMod.applyNow(base, now); }
+    catch { /* one bad tape must not sink the whole fleet view */ }
+    if (row) out.push(row);
+  }
+  res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(out));
+}
+
 // ----------------------------------------------------------------- http bits
 const MIME = {
   '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript',
@@ -363,6 +415,19 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/sessions') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify([...sessions.values()].map(scanMeta)));
+    return;
+  }
+
+  if (url.pathname === '/api/fleet') { serveFleetApi(res); return; }
+
+  if (url.pathname === '/fleet') {
+    // The Fleet home page. Served explicitly (not via serveStatic, which would
+    // 404 an extensionless path) so the URL stays clean — /fleet, not /fleet.html.
+    fs.readFile(path.join(PUBLIC, 'fleet.html'), (err, body) => {
+      if (err) { res.writeHead(404); return res.end('not found'); }
+      res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
+      res.end(body);
+    });
     return;
   }
 
