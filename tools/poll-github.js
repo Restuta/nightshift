@@ -21,6 +21,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync, spawn } = require('child_process');
+const { randomUUID } = require('node:crypto');
 
 const argv = process.argv.slice(2);
 const flags = {};
@@ -271,7 +272,7 @@ function refreshKnown() {
 
 function append(ev) {
   fs.mkdirSync(path.dirname(LOG), { recursive: true });
-  fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), ...ev }) + '\n');
+  fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'poll-github', v: 2, ...ev }) + '\n');
   console.log(JSON.stringify(ev));
 }
 

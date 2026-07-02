@@ -30,7 +30,9 @@ try {
   try { st = JSON.parse(fs.readFileSync(tf, 'utf8')); } catch { process.exit(0); }
   if (!st || !st.card) process.exit(0);
 
-  fs.appendFileSync(log, JSON.stringify({ t: Date.now(), type: 'item', id: st.card, status: 'done' }) + '\n');
+  // Envelope v2: source + v. No UUID — this is an item event, so `id` is the
+  // work-item (card) id, the same identity the hook created it under.
+  fs.appendFileSync(log, JSON.stringify({ t: Date.now(), source: 'hook', v: 2, type: 'item', id: st.card, status: 'done' }) + '\n');
   // Forget the card but keep the turn counter: a later `/nightshift on` (continue)
   // resumes numbering instead of restarting at turn 1.
   st.card = null;

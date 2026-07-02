@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
 
 const MIN = 60e3;
 const TOTAL = 48 * MIN;
@@ -150,5 +151,7 @@ e(47.7, { type: 'ci', pr: 3, status: 'pass' });
 e(47.8, { type: 'session', phase: 'idle' });
 
 const out = path.join(__dirname, 'events.jsonl');
-fs.writeFileSync(out, events.map(ev => JSON.stringify(ev)).join('\n') + '\n');
+// Envelope v2: unique event id + source + v per line; `...ev` last so item
+// events keep their work-item id.
+fs.writeFileSync(out, events.map(ev => JSON.stringify({ id: randomUUID(), source: 'demo', v: 2, ...ev })).join('\n') + '\n');
 console.log(`wrote ${events.length} events → ${out}`);

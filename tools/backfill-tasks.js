@@ -13,6 +13,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
 const { emptyState, applyLine, toTodos, lineMayMatter, offsetAfterLastLine } = require('./tasks-fold.js');
 
 function arg(name) { const i = process.argv.indexOf(name); return i !== -1 ? process.argv[i + 1] : null; }
@@ -72,7 +73,7 @@ try {
   // Flow Claude's session name into the tape as the title (the board prefers it
   // over the worktree basename), only when it actually changed.
   if (customTitle && customTitle !== lastTitle) {
-    fs.appendFileSync(log, JSON.stringify({ t: Date.now(), type: 'session', title: customTitle }) + '\n');
+    fs.appendFileSync(log, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'backfill', v: 2, type: 'session', title: customTitle }) + '\n');
   }
 
   // Emit the snapshot, attached to a card so it shows: the open turn card if any,
@@ -83,7 +84,7 @@ try {
     try { card = JSON.parse(fs.readFileSync(path.join(NS_HOME, 'turns', sid + '.json'), 'utf8')).card; } catch { /* none */ }
     if (!card) card = lastCard;
     const ev = card ? { ...todos, item: card } : todos;
-    fs.appendFileSync(log, JSON.stringify({ t: Date.now(), ...ev }) + '\n');
+    fs.appendFileSync(log, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'backfill', v: 2, ...ev }) + '\n');
     process.stdout.write(`seeded ${todos.todos.length} task(s)\n`);
   }
 } catch { /* observability must never break the session */ }
