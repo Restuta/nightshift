@@ -253,13 +253,16 @@ function ghPrVerb(cmd) {
   return k > 0 && out[k - 1] === 'gh' ? (out[k + 1] || null) : null;
 }
 
-// PRs the session itself touches via gh, so the board shows THIS session's PRs
-// (not the repo's hundreds). State must be a recorded FACT, never an assumption:
-//   - create: gh prints the new PR's URL on success → that's the number, state open.
-//   - merge:  the COMMAND running proves nothing (it also runs for --auto, blocked,
-//     or failed merges); only the success line "Merged pull request #N" is proof.
-// Anything else (view/list/checks) is left to the poller, which reads gh state.
-function parseGhPr(cmd, out) {
+// PRs the session itself surfaces via gh become pr_ref SIGHTINGS, never state.
+// The hook no longer writes pr state at all (plan 1.4: poll-github is the SOLE
+// writer). A ref only tells the poller "this PR is relevant to this session"; the
+// poller then fetches authoritative state AND real fact-time (mergedAt/createdAt).
+//   - create: gh prints the new PR's URL on success → number + url.
+//   - merge:  the "Merged pull request #N" success line → number (+ repo url).
+// Both are only sightings now — even the merge success line: the poller confirms
+// within seconds and records the true merge time, so no prose/stdout state parsing
+// stays alive outside poll-github. Anything else (view/list/checks) is the poller's.
+function parseGhPrRef(cmd, out) {
   const verb = ghPrVerb(cmd);
   // Strip quoted segments before flag checks so a flag named inside a title/body
   // (e.g. --title "test --dry-run") isn't mistaken for a real flag.
@@ -272,19 +275,15 @@ function parseGhPr(cmd, out) {
     // uses ev.url directly, so a scheme-less one resolves under the nightshift host.
     const last = (out || '').replace(/\s+$/, '').split('\n').pop() || '';
     const m = last.match(/(?:https?:\/\/)?(github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))/);
-    return m ? { type: 'pr', number: Number(m[2]), url: 'https://' + m[1], state: 'open' } : null;
+    return m ? { type: 'pr_ref', number: Number(m[2]), url: 'https://' + m[1] } : null;
   }
   if (verb === 'merge') {
     // gh's success line is "Merged pull request owner/repo#N (...)" (older builds
-    // omit owner/repo). Keep the owner/repo as a URL when present — a cross-repo
-    // merge must carry its repo, or the poller would re-scope the bare number to
-    // the current repo and record the wrong PR.
+    // omit owner/repo). Keep the owner/repo as a URL when present so the poller can
+    // scope the number to the right repo (a bare number would re-scope to cwd).
     const m = (out || '').match(/Merged pull request\s+([\w.-]+\/[\w.-]+)?#(\d+)/i);
     if (!m) return null;
-    const ev = { type: 'pr', number: Number(m[2]), state: 'merged' };
-    // Repo from the output if gh printed it, else from the command's -R/--repo —
-    // an older gh prints a bare "#N", and a repo-less merged event would let the
-    // poller re-scope a cross-repo merge to the current repo.
+    const ev = { type: 'pr_ref', number: Number(m[2]) };
     const rf = (cmd || '').match(/(?:--repo|-R)[=\s]+["']?([\w.-]+\/[\w.-]+)/);
     const repo = m[1] || (rf && rf[1]);
     if (repo) ev.url = `https://github.com/${repo}/pull/${m[2]}`;
@@ -428,14 +427,14 @@ function main() {
         const c = parseCommit(out);
         if (c) { append(withItem(c)); return; }
       }
-      // Capture PRs only for Claude — a hook-mode Codex session's meter already
-      // emits pr events from the same rollout, so doing it here too would double
-      // them. Don't `return`: fall through to the activity event below so the
-      // session wakes (the reducer's pr case doesn't, but a tool event does — a
-      // gh pr run right after an approval prompt would otherwise stay in ATTENTION).
+      // Emit a pr_ref SIGHTING (never pr state) only for Claude — a hook-mode Codex
+      // session's meter already emits pr_ref from the same rollout, so doing it here
+      // too would double it. Don't `return`: fall through to the activity event below
+      // so the session wakes (the reducer's pr_ref case doesn't, but a tool event
+      // does — a gh pr run right after an approval prompt would otherwise stay ATTENTION).
       if (CENTRAL && agent === 'claude' && /\bgh\b[^\n]*\bpr\b/.test(inp.command || '')) {
-        const pr = parseGhPr(inp.command || '', out); // null unless it's a create/merge
-        if (pr) append(withItem(pr));
+        const ref = parseGhPrRef(inp.command || '', out); // null unless it's a create/merge
+        if (ref) append(withItem(ref));
       }
       const full = (inp.command || '').replace(/\s+/g, ' ').trim();
       if (full) {
