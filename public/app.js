@@ -879,6 +879,12 @@ function renderPRs() {
   const now = vtNow();
   const link = pr => (pr.url ? ` data-url="${esc(pr.url)}"` : ''); // whole row clickable
   const title = pr => pr.title ? `<span class="prtitle">${esc(pr.title)}</span>` : '';
+  // Repo prefix ONLY when the session spans more than one repo — otherwise the lone
+  // repo is obvious and a prefix is noise. This is what keeps two repos' #1 from
+  // reading as the same PR (plan 1.4: state.prs is keyed by repo#number).
+  const repos = new Set(all.map(p => p.repo).filter(Boolean));
+  const repoTag = pr => (repos.size > 1 && pr.repo)
+    ? `<span class="prrepo" style="color:var(--dim);font-family:var(--mono);font-size:11px;margin-right:4px">${esc(pr.repo.split('/').pop())}</span>` : '';
   // Toast / CI status, spelled out and always present so it leads each open row —
   // the colored chip is the one thing that means "status".
   const status = pr => {
@@ -889,10 +895,10 @@ function renderPRs() {
   };
 
   const openRows = open.map(pr =>
-    `<li class="pr-open"${link(pr)} title="open PR #${pr.number} on GitHub">${status(pr)}<b class="prnum">#${pr.number}</b>${title(pr)}` +
+    `<li class="pr-open"${link(pr)} title="open PR #${pr.number} on GitHub">${status(pr)}${repoTag(pr)}<b class="prnum">#${pr.number}</b>${title(pr)}` +
     `<span class="prage">${pr.openedAt ? ageText(now - pr.openedAt) : ''}</span></li>`).join('');
   const mergedRows = merged.slice(0, RECENT_MERGES).map(pr =>
-    `<li class="pr-merged"${link(pr)} title="open PR #${pr.number} on GitHub"><b class="prnum">#${pr.number}</b>${title(pr)}` +
+    `<li class="pr-merged"${link(pr)} title="open PR #${pr.number} on GitHub">${repoTag(pr)}<b class="prnum">#${pr.number}</b>${title(pr)}` +
     `<span class="prage">${pr.mergedAt ? ageText(now - pr.mergedAt) : ''}</span></li>`).join('');
   const more = merged.length > RECENT_MERGES
     ? `<li class="pr-more">+${merged.length - RECENT_MERGES} more merged</li>` : '';
