@@ -11,9 +11,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   splitEpisodes, buildItems, selectLanes, sessionPhases, attentionMarks,
-  dayBoundaries, densityTimes, buildModel,
+  dayBoundaries, densityTimes, buildModel, applyRetractions,
   EPISODE_GAP_MS, TOP_ITEMS, DAY_MS,
 } from '../public/lanes-model.js';
+import { fold } from '../public/reducer.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAPES = path.join(here, 'tapes');
@@ -153,4 +154,53 @@ test('buildModel folds the healthy golden tape into a coherent timeline', () => 
   assert.equal(m.more.count, 0);
   // buildModel is a pure function of the events — same input, identical output.
   assert.deepEqual(buildModel(readTape('healthy.jsonl')), m);
+});
+
+// --- retract: a recording bug is not history, so it must not resurrect on /lanes
+// Retraction is META-level (docs/EVENTS.md): a retracted card and everything
+// attributed to it vanish from the board, counts, and feed at EVERY scrub time.
+// The lanes page is a pure second fold over the same tape, so it must agree with
+// the reducer. Without this the junk fixture below resurrected a
+// `<task-notification>` lane with a phantom edit (regression guard).
+test('applyRetractions drops retracted items, their events, and the retract meta-events', () => {
+  const kept = applyRetractions(readTape('junk-cards.jsonl'));
+  assert.ok(!kept.some(e => e.type === 'retract'), 'retract meta-events are stripped');
+  for (const id of ['junk-1', 'junk-2', 'junk-3', 'junk-4'])
+    assert.ok(!kept.some(e => e.type === 'item' && e.id === id), `${id} item upserts dropped`);
+  assert.ok(!kept.some(e => e.item && String(e.item).startsWith('junk')),
+    'events attributed to a junk card drop out');
+  assert.ok(kept.some(e => e.type === 'item' && e.id === 'good-1'), 'the real card survives');
+});
+
+test('buildModel honors retract: junk cards get no lane and their activity is uncounted', () => {
+  const evs = readTape('junk-cards.jsonl');
+  const m = buildModel(evs);
+  const shown = [...m.lanes.map(l => l.id)];
+  for (const id of ['junk-1', 'junk-2', 'junk-3', 'junk-4'])
+    assert.ok(!shown.includes(id), `${id} must not render a lane`);
+  // The edit j1 was attributed to junk-1; retracted, it must not be counted on any
+  // lane (nor re-attributed to a real card via the activeDoing fallback).
+  const laneEdits = m.lanes.reduce((n, l) => n + l.edits, 0) +
+    (m.more.episodes || []).reduce((n, e) => n + e.count, 0);
+  assert.equal(laneEdits, 0, 'a retracted card leaves no activity in the lanes');
+  // Parity with the board: the reducer folds the same tape to zero edits and no
+  // junk items — the two second-folds now agree.
+  const s = fold(evs);
+  assert.equal(s.totals.edits, 0);
+  for (const id of ['junk-1', 'junk-2', 'junk-3', 'junk-4'])
+    assert.ok(!s.items.has(id), `${id} absent from the reducer too`);
+});
+
+test('buildModel honors retract by event id (target.event), dropping the retracted mark', () => {
+  const evs = [
+    { t: 0, type: 'session', phase: 'start' },
+    { t: 1000, type: 'item', id: 'wi-x', title: 'x', status: 'doing' },
+    { t: 2000, id: 'e-bad', type: 'commit', sha: 'deadbee', add: 5, del: 1, item: 'wi-x' },
+    { t: 3000, id: 'e-good', type: 'commit', sha: 'c0ffee0', add: 2, del: 0, item: 'wi-x' },
+    { t: 4000, type: 'retract', target: { event: 'e-bad' }, reason: 'phantom commit' },
+  ];
+  const x = buildModel(evs).lanes.find(l => l.id === 'wi-x');
+  assert.ok(x, 'wi-x still has a lane');
+  assert.equal(x.commits, 1, 'only the un-retracted commit is counted');
+  assert.deepEqual(x.commitMarks.map(c => c.sha), ['c0ffee0'], 'the retracted commit mark is gone');
 });
