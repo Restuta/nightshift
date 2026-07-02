@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleet · nightshift</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z' fill='%23F0E2C0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="fleet-page">
+
+<header class="masthead">
+  <div class="brand">
+    <svg class="logo" width="16" height="16" viewBox="0 0 16 16"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0"/></svg>
+    <span class="wordmark">nightshift</span>
+    <span class="crumb-sep">/</span>
+    <span class="session-title">fleet</span>
+  </div>
+  <div class="instruments">
+    <div class="fleet-agg" id="fleet-agg"></div>
+    <a class="icon-btn" href="/" title="back to the board" id="fleet-board-link">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="1.6" y="2.4" width="5.6" height="11.2" rx="1"/><rect x="9" y="2.4" width="5.4" height="6" rx="1"/></svg>
+    </a>
+  </div>
+</header>
+
+<main class="fleet-main">
+  <div class="fleet-head" id="fleet-head" hidden>
+    <span></span>
+    <span>session</span>
+    <span>latest</span>
+    <span>pull requests</span>
+    <span class="fh-num">cost</span>
+    <span class="fh-num">age</span>
+    <span></span>
+  </div>
+  <div class="fleet-rows" id="fleet-rows"></div>
+  <div class="fleet-empty" id="fleet-empty" hidden>No sessions recorded yet.</div>
+</main>
+
+<script type="module" src="fleet.js"></script>
+</body>
+</html>
