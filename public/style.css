@@ -1542,3 +1542,96 @@ body.fleet-page { overflow: auto; }
 
 .fleet-empty { color: var(--faint); font-size: 13px; padding: 40px 12px; text-align: center; }
 .fleet-empty[hidden] { display: none; }
+/* ------------------------------------------------------------ lane timeline */
+/* The /lanes page — a full-bleed canvas of the night's shape. Same near-black
+   Linear language as the board; mono for the row labels and legend. */
+
+.lanes-page { overflow: hidden; }
+
+.home-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: inherit;
+}
+.home-link:hover .wordmark { color: var(--ink); }
+.lanes-crumb { color: var(--dim); font-size: 13px; }
+.session-title.mono { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+
+.lanes-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.lanes-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+.lg-swatch { width: 16px; height: 8px; border-radius: 2px; display: inline-block; }
+.lg-swatch.lg-working { background: rgba(210, 153, 34, .55); }
+.lg-swatch.lg-idle { background: rgba(93, 103, 129, .5); }
+.lg-swatch.lg-attention { background: rgba(235, 110, 100, .6); }
+.lg-mark { width: 8px; height: 8px; display: inline-block; }
+.lg-mark.lg-commit { background: var(--yellow); transform: rotate(45deg); }
+.lg-mark.lg-pr { border: 1.4px solid var(--green); border-radius: 50%; }
+.lg-mark.lg-fail {
+  background:
+    linear-gradient(45deg, transparent 44%, var(--red) 44%, var(--red) 56%, transparent 56%),
+    linear-gradient(-45deg, transparent 44%, var(--red) 44%, var(--red) 56%, transparent 56%);
+}
+
+.lanes-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background:
+    radial-gradient(900px 340px at 78% -16%, rgba(20, 29, 56, .3) 0%, transparent 70%),
+    var(--bg);
+}
+#lanes-canvas { display: block; touch-action: none; }
+
+.lanes-tooltip {
+  position: absolute;
+  z-index: 5;
+  max-width: 340px;
+  padding: 6px 9px;
+  background: rgba(9, 12, 20, .96);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .45);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.lanes-tooltip[hidden] { display: none; }
+.lanes-tooltip .tt-t { color: var(--blue); margin-right: 8px; }
+.lanes-tooltip .tt-b { color: var(--dim); }
+
+.lanes-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.lanes-empty[hidden] { display: none; }
+
+.lanes-hint {
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  pointer-events: none;
+  opacity: .8;
+}
