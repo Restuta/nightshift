@@ -431,6 +431,18 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === '/events') {
+    // Whole-tape snapshot as newline-delimited JSON — a plain one-shot GET for
+    // consumers that fold the tape once and don't need the live SSE stream (the
+    // lane timeline). Same bytes SSE replays on connect, minus the framing.
+    const s = sessionFromQuery(url);
+    let raw = '';
+    try { raw = fs.readFileSync(s.file, 'utf8'); } catch { /* empty/gone → '' */ }
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
+    res.end(raw);
+    return;
+  }
+
   if (url.pathname === '/sse') {
     const s = sessionFromQuery(url);
     res.writeHead(200, {
@@ -492,6 +504,10 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+
+  // /lanes?session= is the lane-timeline page (a clean URL for the ?t= deep link
+  // target); the query is read client-side, so serve the static HTML as-is.
+  if (url.pathname === '/lanes') { req.url = '/lanes.html'; return serveStatic(req, res); }
 
   serveStatic(req, res);
 });
