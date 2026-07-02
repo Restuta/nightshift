@@ -348,10 +348,45 @@ export function reduce(state, ev) {
   return state;
 }
 
+// A `retract` corrects the tape itself — it says "this event / this card was a
+// recording bug, it was never real." That is META-level, so it applies at ALL
+// replay times, not just after its own t (a recording bug is not history — see
+// docs/EVENTS.md). So fold first pre-scans the ENTIRE array (ignoring untilT) for
+// retractions, then folds everything else while dropping what was retracted.
+function scanRetractions(events) {
+  const retractedEvents = new Set(); // envelope ids ({target:{event}})
+  const retractedItems = new Set();  // work-item ids ({target:{item}})
+  for (const ev of events) {
+    if (!ev || ev.type !== 'retract' || !ev.target) continue;
+    if (ev.target.event != null) retractedEvents.add(ev.target.event);
+    if (ev.target.item != null) retractedItems.add(ev.target.item);
+  }
+  return { retractedEvents, retractedItems };
+}
+
+function isRetracted(ev, retractedEvents, retractedItems) {
+  if (ev.type === 'retract') return true; // meta-event: applied in the pre-scan
+  if (ev.id != null && retractedEvents.has(ev.id)) return true;
+  // A retracted item vanishes completely: its own `item` upserts AND anything
+  // attributed to it (edit/commit/todos/ci/... carrying ev.item) drop out, so it
+  // leaves no trace in board, counts, or feed.
+  if (ev.type === 'item' && ev.id != null && retractedItems.has(ev.id)) return true;
+  if (ev.item != null && retractedItems.has(ev.item)) return true;
+  return false;
+}
+
 export function fold(events, untilT = Infinity) {
   const state = initialState();
+  const { retractedEvents, retractedItems } = scanRetractions(events);
   for (const ev of events) {
-    if (ev.t > untilT) break;
+    // `continue`, not `break`: the log is meant to be time-ordered, but a tape
+    // can be out of order (a late backfill, or the n154 re-append seam), so a
+    // single event whose t exceeds untilT must NOT stop the fold — skip just it
+    // and keep going. With `break`, an out-of-order tape made scrub-to-end and
+    // live-fold disagree (F4). Consumers sort by t; this is the guard for when
+    // they haven't. (See docs/EVENTS.md "Ordering".)
+    if (ev.t > untilT) continue;
+    if (isRetracted(ev, retractedEvents, retractedItems)) continue;
     reduce(state, ev);
   }
   return state;
