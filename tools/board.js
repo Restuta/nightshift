@@ -23,6 +23,10 @@ const stateFile = path.join(nsHome, 'board.json');
 const serverJs = path.join(__dirname, '..', 'server.js');
 const session = val('--session');
 
+// Is a process still running? (pid 0-signal probe — the same check the pollers
+// and codex-tail use.) Used with /whoami below to detect a live board robustly.
+const alivePid = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
 // Is OUR global board (serving `sessionsDir`) answering on this port? /whoami
 // distinguishes it from another nightshift server on the same port — e.g. a
 // `npm run demo` (single --log), which must NOT be reused.
@@ -98,6 +102,17 @@ function done(port) {
 // — never hand back a URL to a server that isn't ours.
 function start(preferred, attemptsLeft) {
   if (attemptsLeft <= 0) { process.stderr.write('could not start board\n'); return done(preferred); }
+  // Before claiming a port, make sure OUR board isn't already answering there —
+  // a supervised (launchd) board is pinned to 4173 and writes its own
+  // board.json, but if we got here with a missing/stale board.json we must still
+  // reuse it, never spawn a second board on 4174.
+  isBoard(preferred, mine => {
+    if (mine) return done(preferred);
+    startFresh(preferred, attemptsLeft);
+  });
+}
+
+function startFresh(preferred, attemptsLeft) {
   freePort(preferred, port => {
     fs.mkdirSync(sessionsDir, { recursive: true });
     const out = fs.openSync(path.join(nsHome, 'board.log'), 'a');
@@ -115,8 +130,18 @@ function start(preferred, attemptsLeft) {
 }
 
 const preferred = Number(val('--port')) || 4173;
-// Reuse the board we started before only if it's still OUR sessions board.
+// Reuse a board we already know about — the supervised (launchd) one or a
+// previous detached spawn — only if it's genuinely alive: its recorded pid is
+// running AND /whoami confirms OUR sessions board on that port. The supervised
+// server writes {port, pid, managed} to board.json itself, so this same check
+// detects it and we never spawn a second one. (pid absent → older format, fall
+// back to the /whoami check alone.)
+function reuse(prev, cb) {
+  if (!prev || !prev.port) return cb(false);
+  if (prev.pid != null && !alivePid(prev.pid)) return cb(false); // stale record — process gone
+  isBoard(prev.port, cb);
+}
+
 let prev = null;
 try { prev = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* none yet */ }
-if (prev && prev.port) isBoard(prev.port, ok => (ok ? done(prev.port) : start(preferred, 12)));
-else start(preferred, 12);
+reuse(prev, ok => (ok ? done(prev.port) : start(preferred, 12)));

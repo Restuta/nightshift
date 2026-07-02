@@ -33,8 +33,11 @@ including the ones building it.
   runs `poll-github --once` (on SSE connect + every 30s) with cwd = the session's
   repo, so merged PRs flip to merged within seconds of opening the board. This
   is the durable fix for "merged PR stuck showing open": freshness is tied to the
-  board being up (which it must be for anyone to see anything), NOT to a separate
-  detached poller surviving a laptop restart / crash / self-retirement. Still
+  board being up, NOT to a separate detached poller surviving a laptop restart /
+  crash / self-retirement. And "the board being up" is no longer left to luck — a
+  LaunchAgent (`tools/install-launchd.js`) supervises the board across restarts,
+  crashes, and logout, and in supervised (`--managed`) mode the server owns
+  `~/.nightshift/board.json` itself so nothing points at a dead pid. Still
   pure — the server records events, never renders fetched state.
 - `public/` — the board. `reducer.js` (pure fold), `app.js` (render, FLIP
   animations, tickers, replay engine), `style.css`, `index.html`.
@@ -67,11 +70,26 @@ including the ones building it.
   board.
 - `tools/resolve-log.js` — prints the log path `claude-hook.js` would use for the
   cwd, so the skill emits to / tails the right file.
-- `tools/board.js` — ensures one detached board server is running (serving
+- `tools/board.js` — ensures one board server is running (serving
   `~/.nightshift/sessions`), reused across sessions via `~/.nightshift/board.json`;
   prints the URL and, with `--open`, opens the browser at `?session=<slug>`. Emits
   the portless `http://<host>` URL instead of `localhost:<port>` when a host is
-  installed (see below).
+  installed (see below). Detection is robust: it reuses a board only when the
+  recorded pid is alive AND `/whoami` confirms our sessions dir — so it finds the
+  supervised (`--managed`) board and never spawns a rival, and ignores a stale
+  `board.json` left by a dead process.
+- `tools/install-launchd.js` — supervision (`--install` / `--remove` / `--status`).
+  Installs `~/Library/LaunchAgents/com.nightshift.board.plist` (RunAtLoad +
+  KeepAlive) running the board in the FOREGROUND — `node server.js --dir <sessions>
+  --port 4173 --managed` — with the node binary resolved to an absolute path (launchd
+  has a bare PATH) and logs to `~/.nightshift/logs/board.{out,err}.log`. Idempotent
+  (`launchctl bootout`+`bootstrap`, legacy `unload`/`load` fallback). If portless is
+  on PATH and supports a foreground run (`portless proxy start --foreground`), a
+  second agent (`com.nightshift.portless`) keeps the proxy alive too; if not, it
+  says so and skips (no hacks). Handles a busy port at install: `--stop-existing`
+  stops an old *nightshift* board (verified via `/whoami`) after which KeepAlive
+  takes over, else it notes the takeover-on-exit. This is why the board stopped
+  dying on every laptop restart.
 - `tools/install-host.js` + `tools/forward80.js` — optional portless URL.
   `sudo node tools/install-host.js` maps `nightshift.local` → loopback in
   `/etc/hosts` and installs a root LaunchDaemon (`com.nightshift.proxy`) running
