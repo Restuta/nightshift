@@ -1379,3 +1379,166 @@ body.report {
   font-variant-numeric: tabular-nums;
 }
 .rpt-usage b { color: var(--yellow); }
+/* ------------------------------------------------------------ fleet home */
+/* The aggregate view — one dense row per session, needs-input first. Reuses the
+   masthead / icon-btn / agent colors above; only the table itself is new. */
+
+body.fleet-page { overflow: auto; }
+
+/* Aggregate strip in the masthead: live/stale counts, merged 24h, failing CI, cost. */
+.fleet-agg { display: flex; align-items: center; gap: 18px; }
+.fa-stat { display: flex; align-items: baseline; gap: 5px; }
+.fa-stat b {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.fa-stat > span { font-size: 11px; color: var(--faint); }
+.fa-stat b.fa-live { color: var(--green); }
+.fa-stat b.fa-stale { color: var(--faint); }
+.fa-stat b.fa-merged { color: var(--merged); }
+.fa-stat b.fa-fail { color: var(--red); }
+.fa-stat b.fa-cost { color: var(--yellow); }
+
+.fleet-main { flex: 1; min-height: 0; padding: 8px 16px 40px; }
+
+/* One shared grid for the header and every row, so columns line up. */
+.fleet-head,
+.fleet-row {
+  display: grid;
+  grid-template-columns: 14px minmax(150px, 1.3fr) minmax(0, 2fr) auto 66px 60px 58px;
+  align-items: center;
+  gap: 12px;
+}
+
+.fleet-head {
+  padding: 6px 12px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 2;
+}
+.fleet-head[hidden] { display: none; }
+.fleet-head .fh-num { text-align: right; }
+
+.fleet-row {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  transition: background .1s ease;
+}
+.fleet-row:hover { background: var(--card); }
+.fleet-row.is-stale { opacity: .62; }
+.fleet-row.is-stale:hover { opacity: 1; }
+/* Needs-input sessions get a loud left accent so they read as a block at the top. */
+.fleet-row.needs-input {
+  border-left-color: var(--red);
+  background: #eb6e640c;
+}
+.fleet-row.needs-input:hover { background: #eb6e6416; }
+
+.fr-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.fr-dot.fr-live { background: var(--green); box-shadow: 0 0 0 3px #4cb78222; animation: blink 1.6s ease-in-out infinite; }
+.fr-dot.fr-recent { background: var(--yellow); }
+.fr-dot.fr-stale { background: var(--faint); opacity: .55; }
+
+.fr-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fr-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fr-agent {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--dim);
+}
+.fr-agent[hidden] { display: none; }
+.fr-agent.agent-claude { color: #d97757; }
+.fr-agent.agent-codex { color: #9fb3c8; }
+
+.fr-flare {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #ff9d97;
+  background: #eb6e6418;
+  border: 1px solid #eb6e6440;
+  animation: blink 1.4s ease-in-out infinite;
+}
+.fr-flare[hidden] { display: none; }
+
+.fr-say {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fr-say.fr-say-ask { color: #ff9d97; }
+
+.fr-prs { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.chip-open { color: var(--green); border-color: #4cb78233; }
+.chip-merged { color: var(--merged); border-color: #a371f733; }
+.chip-fail { color: var(--red); border-color: #eb6e6440; }
+
+.fr-cost {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--yellow);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.fr-age {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fr-report {
+  justify-self: end;
+  font-size: 11px;
+  color: var(--faint);
+  text-decoration: none;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+.fr-report:hover { color: var(--blue); border-color: var(--line); background: var(--card-hover); }
+
+.fleet-empty { color: var(--faint); font-size: 13px; padding: 40px 12px; text-align: center; }
+.fleet-empty[hidden] { display: none; }
