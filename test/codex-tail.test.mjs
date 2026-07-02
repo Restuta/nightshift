@@ -20,6 +20,9 @@ const TAIL = path.join(here, '..', 'tools', 'codex-tail.js');
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const readLines = f => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean) : []);
 const readEvents = f => readLines(f).map(l => JSON.parse(l));
+// Stream events only: `alive` heartbeats are legitimate per-attach traffic (a
+// worker beats on start), so re-drain assertions count everything BUT them.
+const streamLines = f => readEvents(f).filter(e => e.type !== 'alive');
 const readState = ns => { try { return JSON.parse(fs.readFileSync(path.join(ns, 'codex-tails.json'), 'utf8')); } catch { return {}; } }
 const writeState = (ns, s) => { fs.mkdirSync(ns, { recursive: true }); fs.writeFileSync(path.join(ns, 'codex-tails.json'), JSON.stringify(s) + '\n'); };
 
@@ -189,7 +192,7 @@ test('re-attach guard: no re-drain when the snapshot is lost but the log has the
     // First pass populates the log (a fresh --once drain).
     const seed = runTail(['--once', rollout, '--log', log], { home: sb.home, ns: sb.ns });
     assert.equal(seed.status, 0, seed.stderr);
-    const n = readLines(log).length;
+    const n = streamLines(log).length;
     assert.ok(n > 0, 'the first pass recorded the session');
     // The registry has NO checkpoint for this rollout (--once never persists).
     assert.ok(!readState(sb.ns)[rollout], 'no snapshot exists for the rollout');
@@ -198,7 +201,7 @@ test('re-attach guard: no re-drain when the snapshot is lost but the log has the
     // already in the log and refuse to re-drain, leaving the line count unchanged.
     const w = await runWorker([rollout, '--log', log], { home: sb.home, ns: sb.ns });
     assert.match(w.stderr, /re-attach guard/, 'the guard fired');
-    assert.equal(readLines(log).length, n, 'the stream was NOT re-appended (no double)');
+    assert.equal(streamLines(log).length, n, 'the stream was NOT re-appended (no double)');
   } finally { sb.cleanup(); }
 });
 
@@ -216,7 +219,7 @@ test('re-attach guard: no re-drain even when the log is far larger than the scan
     // Seed via --once (no checkpoint), exactly like an import/reset/crash-before-persist.
     const seed = runTail(['--once', rollout, '--log', log], { home: sb.home, ns: sb.ns });
     assert.equal(seed.status, 0, seed.stderr);
-    const n = readLines(log).length;
+    const n = streamLines(log).length;
     const bytes = fs.statSync(log).size;
     assert.ok(bytes > 262144, `the recorded log must exceed the 256KB scan window (was ${bytes} bytes)`);
     assert.ok(!readState(sb.ns)[rollout], 'no snapshot exists for the rollout');
@@ -225,7 +228,7 @@ test('re-attach guard: no re-drain even when the log is far larger than the scan
     // marker is nowhere near the tail) and refuse to re-drain.
     const w = await runWorker([rollout, '--log', log], { home: sb.home, ns: sb.ns });
     assert.match(w.stderr, /re-attach guard/, 'the guard fired despite the marker being outside a tail window');
-    assert.equal(readLines(log).length, n, 'the large stream was NOT re-appended (no double)');
+    assert.equal(streamLines(log).length, n, 'the large stream was NOT re-appended (no double)');
   } finally { sb.cleanup(); }
 });
 
