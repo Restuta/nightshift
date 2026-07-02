@@ -205,11 +205,20 @@ function openStream(id) {
     }
     renderAll(false);
     // deep link into the tape: ?at=0.45 (fraction) or ?at=620 (seconds from
-    // start). Only on the initial load — switching sessions starts live.
+    // start), or ?t=<epoch-ms> (absolute — how the Shift Report links a moment).
+    // Only on the initial load — switching sessions starts live.
     if (firstConnect) {
       firstConnect = false;
-      const at = new URLSearchParams(location.search).get('at');
-      if (at != null && log.length) {
+      const params = new URLSearchParams(location.search);
+      const t = params.get('t');
+      const at = params.get('at');
+      if (t != null && log.length) {
+        // Absolute timestamp from a /report deep link. Enter replay scrubbed to
+        // that moment when it falls within the tape; scrubTo clamps to the domain.
+        const tMs = parseInt(t, 10);
+        const t0 = log[0].t, t1 = log[log.length - 1].t;
+        if (!Number.isNaN(tMs) && tMs >= t0 && tMs <= t1) scrubTo(tMs);
+      } else if (at != null && log.length) {
         const t0 = log[0].t, t1 = log[log.length - 1].t;
         const v = parseFloat(at);
         if (!Number.isNaN(v)) scrubTo(v <= 1 ? t0 + v * (t1 - t0) : t0 + v * 1000);
