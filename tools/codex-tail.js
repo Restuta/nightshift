@@ -26,12 +26,14 @@ const worker = args.includes('--worker');
 const stop = args.includes('--stop');
 // Meter mode: a thin companion to hook-based recording. The agent-hook owns the
 // human-facing facts (cards, edits, tools, todos, commits, session start); the
-// rollout still has things hooks can't carry — token counts (cost), PR/CI
-// state, and the quiet signal for idle + card retirement. In --meter we emit
-// ONLY those, so the two recorders never double-count.
+// rollout still has things hooks can't carry — token counts (cost), PR sightings
+// (pr_ref), and the quiet signal for idle + card retirement. In --meter we emit
+// ONLY those, so the two recorders never double-count. PR/CI STATE is no longer
+// emitted here at all (plan 1.4: poll-github is the single writer) — we surface
+// only pr_ref sightings so the poller knows which PRs this session touched.
 const meter = args.includes('--meter');
 const meterKeep = e =>
-  e.type === 'usage' || e.type === 'pr' || e.type === 'ci' ||
+  e.type === 'usage' || e.type === 'pr_ref' ||
   (e.type === 'session' && e.phase === 'idle') ||
   e.type === 'item'; // in meter mode the only items emitted are idle-retire/reopen of the hook's card
 let rollout = args.find(a => !a.startsWith('--') && a !== val('--log'));
@@ -317,10 +319,8 @@ const state = {
   phase: null, model: null, lastActivityT: null, started: false, titled: false,
   turnN: 0, card: null, // one card per turn (prompt)
   lastToolKey: null, // dedupe Codex's same-instant double-logged commands
-  prsSeen: new Set(), // PR numbers we've already recorded a state for
-  toastPending: new Map(), // call_id → pr number (toast review-ci → ci status)
-  listPending: new Map(), // call_id → {filter, json} for `gh pr list` (state-aware)
-  createPending: new Set(), // call_ids of `gh pr create` (its url output means 'open')
+  prsSeen: new Set(), // PR numbers we've already sighted (pr_ref dedupe)
+  createPending: new Set(), // call_ids of `gh pr create` (its url output carries the new number)
   pending: new Map(), // call_id → t
 };
 
@@ -335,66 +335,47 @@ function parseCommitOutput(text, t) {
   };
 }
 
-// `gh pr create` prints the new PR's url on success — the ONE place a bare
-// pull url proves a PR is open. (A url appearing in any other output — a merged
-// list, a `pr view`, a comment — proves nothing about its state.)
-function prOpensFrom(text, t) {
+// In meter mode the agent-hook owns the cards; a pr_ref links to the SAME card the
+// hook has open (its per-session turn statefile). In full mode we use our own turn
+// card. hookCard()/rolloutSessionId are defined below (both live at call time).
+function curCard() {
+  return meter ? hookCard(rolloutSessionId) : state.card;
+}
+
+// One pr_ref SIGHTING, deduped. codex-tail no longer writes any pr/ci STATE — the
+// poller is the single writer (plan 1.4). A ref only tells the poller which PRs
+// this session touched and links the current card so the poller's real events can
+// carry it pr -> done.
+function prRef(n, repoPath, t) {
+  if (state.prsSeen.has(n)) return null;
+  state.prsSeen.add(n);
+  const ev = { t, type: 'pr_ref', number: n };
+  if (repoPath) ev.url = `https://github.com/${repoPath}/pull/${n}`;
+  const card = curCard();
+  if (card) ev.item = card;
+  return ev;
+}
+
+// `gh pr create` prints the new PR's url on success — the number lives only in that
+// output, so we scan it (createPending gates this to create calls; a url in a
+// list/view/comment dump is NOT scanned — that flooded the board with 747 stale
+// "open" rows).
+function prRefsFromCreate(text, t) {
   const evs = [];
   const re = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
   let m;
-  while ((m = re.exec(text))) {
-    const n = Number(m[2]);
-    if (state.prsSeen.has(n)) continue;
-    state.prsSeen.add(n);
-    evs.push({ t, type: 'pr', number: n, state: 'open', url: `https://github.com/${m[1]}/pull/${n}` });
-  }
+  while ((m = re.exec(text))) { const e = prRef(Number(m[2]), m[1], t); if (e) evs.push(e); }
   return evs;
 }
 
-// Parse gh's json PR output (a `--json` array, or jq-filtered ndjson) into rows.
-function parsePrRows(text) {
-  if (!text.includes('"number"')) return [];
-  let objs = [];
-  try { const a = JSON.parse(text); if (Array.isArray(a)) objs = a; } catch { /* not a clean array */ }
-  if (!objs.length) {
-    for (const line of text.split('\n')) {
-      const s = line.trim();
-      if (s[0] === '{') { try { objs.push(JSON.parse(s)); } catch { /* skip */ } }
-    }
-  }
-  return objs.filter(o => typeof o.number === 'number');
-}
-
-const prMeta = o => {
-  const ev = {};
-  if (o.title) ev.title = o.title;
-  else if (o.headRefName) ev.title = o.headRefName; // branch name as a fallback
-  if (o.url) ev.url = o.url;
-  return ev;
-};
-
-// Titles/urls (and an explicit state when the json carries one) from a single
-// `gh pr view --json ...` style output. A row WITHOUT an authoritative state is
-// `meta:true` — the reducer attaches its title/url but won't invent an open PR
-// (an unknown number defaulting to 'open' is exactly what flooded the panel).
-function prMetaFrom(text, t) {
-  return parsePrRows(text).map(o => {
-    const ev = { t, type: 'pr', number: o.number, ...prMeta(o) };
-    const st = o.state ? String(o.state).toLowerCase() : null;
-    if (st === 'open') ev.state = 'open';
-    else if (st === 'merged' || st === 'closed') ev.state = 'merged';
-    else ev.meta = true;
-    return ev;
-  });
-}
-
-// Map a toast review-ci result to a ci status. Toast's vocabulary: ready (good),
-// pending (running), needs_fix / blocked / github_blocked (action needed).
-function toastCi(text) {
-  if (/"status":\s*"(ready|pass|passing|clean)"/.test(text)) return 'pass';
-  if (/"status":\s*"(needs_fix|blocked|github_blocked|fail|failing|error)"/.test(text)) return 'fail';
-  if (/"status":\s*"(pending|in_progress|active|running|blocking)"/.test(text)) return 'pending';
-  return null;
+// A `gh pr merge` success line — "Merged pull request owner/repo#N" (older gh omits
+// owner/repo). Safe to scan any output: it's gh's distinctive success phrase, not a
+// state assertion — the poller confirms the real merge (and its true time) in secs.
+function prRefsFromMerge(text, t) {
+  const m = text.match(/Merged pull request\s+([\w.-]+\/[\w.-]+)?#(\d+)/i);
+  if (!m) return [];
+  const e = prRef(Number(m[2]), m[1] || null, t);
+  return e ? [e] : [];
 }
 
 // Returns an array of nightshift events for one rollout entry.
@@ -457,8 +438,8 @@ function step(e) {
       // `say` so the active card shows what the agent's doing. We deliberately do
       // NOT infer PR merges from this prose: narration is intent, not fact, and it
       // false-merged #404 (the agent wrote "merged" about a PR still open). Per
-      // invariant #4, terminal PR state comes only from authoritative gh output —
-      // `gh pr list --state merged` (below) and the poller's gh queries.
+      // invariant #4 and plan 1.4, PR state comes only from the poller's gh queries;
+      // codex-tail emits only pr_ref sightings (below), never state.
       const say = String(p.message).replace(/\s+/g, ' ').trim();
       if (say) out.push({ t, type: 'say', text: say.slice(0, 280), ...(state.card ? { item: state.card } : {}) });
     }
@@ -493,21 +474,11 @@ function step(e) {
           out.push({ t, type: 'tool', tool: 'run', text, ...(state.card ? { item: state.card } : {}) });
         }
         if (/git\s+.*commit/.test(cmd)) state.pending.set(p.call_id, t);
-        // NB: a `gh pr merge N` command is NOT proof of merge — these go through
-        // a Toast gate and are often blocked. Merge state comes only from the
-        // authoritative open-list reconciliation below.
-        if (/\btoast\b/.test(cmd)) {
-          const tt = cmd.match(/--pr\s+(\d+)/);
-          if (tt) state.toastPending.set(p.call_id, Number(tt[1]));
-        }
-        // `gh pr list` is state-aware: remember its --state filter (gh defaults
-        // to open) and whether it's --json (parseable) so the output handler
-        // classifies by what was actually queried — not by urls in the dump.
-        if (/gh pr list\b/.test(cmd) && !/--head/.test(cmd)) {
-          const sm = cmd.match(/--state\s+(\w+)/);
-          state.listPending.set(p.call_id, { filter: sm ? sm[1].toLowerCase() : 'open', json: /--json\b/.test(cmd) });
-        }
-        // A freshly created PR's url output is a real 'open' signal.
+        // A freshly created PR's number lives only in its url OUTPUT — flag the call
+        // so the output handler scans it for a sighting. All state classification
+        // (toast ci, `gh pr list` open/merged) is gone: the poller is the single
+        // writer of pr/ci now (plan 1.4). A `gh pr merge` success line is read from
+        // any output below; `gh pr view/merge N` numbers ride the hook's tool event.
         if (/gh pr create\b/.test(cmd)) state.createPending.add(p.call_id);
       }
     } else if (p.type === 'function_call_output') {
@@ -518,36 +489,13 @@ function step(e) {
         const c = parseCommitOutput(o, ct);
         if (c) { if (state.card) c.item = state.card; out.push(c); }
       }
-      if (state.toastPending.has(p.call_id)) {
-        const n = state.toastPending.get(p.call_id);
-        state.toastPending.delete(p.call_id);
-        const ci = toastCi(o);
-        if (ci) out.push({ t, type: 'ci', pr: n, status: ci });
-      }
-      if (state.listPending.has(p.call_id)) {
-        // Classify the listed PRs by what was queried, not by urls in the dump.
-        const { filter, json } = state.listPending.get(p.call_id);
-        state.listPending.delete(p.call_id);
-        if (json) {
-          const rows = parsePrRows(o);
-          if (filter === 'open') {
-            // Listed → open. We do NOT infer merged from absence: open lists get
-            // truncated by --limit or narrowed by filters, so a missing PR isn't
-            // proof it merged (that false-merged the one real open PR). Merges
-            // come only from positive signals (merged list, narration, state).
-            for (const r of rows) { state.prsSeen.add(r.number); out.push({ t, type: 'pr', number: r.number, state: 'open', ...prMeta(r) }); }
-          } else if (filter === 'merged' || filter === 'closed') {
-            for (const r of rows) { state.prsSeen.add(r.number); out.push({ t, type: 'pr', number: r.number, state: 'merged', ...prMeta(r) }); }
-          } else { // 'all' or unknown — trust each row's own state field if present
-            for (const r of rows) out.push(...prMetaFrom(JSON.stringify(r), t));
-          }
-        }
-      } else if (state.createPending.has(p.call_id)) {
+      // PR SIGHTINGS only (plan 1.4) — no state parsing. A created PR's number comes
+      // from its url output; a merge success line is a sighting from any output.
+      if (state.createPending.has(p.call_id)) {
         state.createPending.delete(p.call_id);
-        out.push(...prOpensFrom(o, t)); // the new PR's url → open
-      } else {
-        out.push(...prMetaFrom(o, t)); // titles/urls (+ explicit state) only
+        out.push(...prRefsFromCreate(o, t));
       }
+      out.push(...prRefsFromMerge(o, t));
     }
   }
   return out;
