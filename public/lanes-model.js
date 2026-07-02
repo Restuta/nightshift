@@ -21,6 +21,35 @@ function byT(events) {
   return [...events].sort((a, b) => (a.t || 0) - (b.t || 0));
 }
 
+// A `retract` corrects the tape itself — "this event / this card was a recording
+// bug, it was never real." Retraction is META-level: it applies at ALL times,
+// exactly as the reducer's fold() does (docs/EVENTS.md: "vanishes from board,
+// counts, and feed"). The /lanes page is a pure SECOND fold over the same tape,
+// so it must honor retracts too — otherwise a retracted `<task-notification>`
+// card resurrects as a lane and its events get counted, diverging from the board.
+// Pre-scan the whole array for retracts, then drop the retracted events + items
+// (and the retract meta-events) before any derivation runs. Mirrors reducer.js
+// scanRetractions/isRetracted so the two stay in lock-step.
+export function applyRetractions(events) {
+  const retractedEvents = new Set(); // envelope ids ({target:{event}})
+  const retractedItems = new Set();  // work-item ids ({target:{item}})
+  for (const ev of events) {
+    if (!ev || ev.type !== 'retract' || !ev.target) continue;
+    if (ev.target.event != null) retractedEvents.add(ev.target.event);
+    if (ev.target.item != null) retractedItems.add(ev.target.item);
+  }
+  return events.filter(ev => {
+    if (!ev) return false;
+    if (ev.type === 'retract') return false; // meta-event: applied in the pre-scan
+    if (ev.id != null && retractedEvents.has(ev.id)) return false;
+    // A retracted item vanishes completely: its own `item` upserts AND anything
+    // attributed to it (edit/commit/todos/ci/... carrying ev.item) drop out.
+    if (ev.type === 'item' && ev.id != null && retractedItems.has(ev.id)) return false;
+    if (ev.item != null && retractedItems.has(ev.item)) return false;
+    return true;
+  });
+}
+
 // Consecutive timestamps become one episode until a gap wider than `gapMs`.
 // Input need not be sorted. Returns [{start, end, count}] (start<=end).
 export function splitEpisodes(ts, gapMs = EPISODE_GAP_MS) {
@@ -222,7 +251,9 @@ export function densityTimes(events) {
 
 // Compose the whole model the page renders. Pure over the event array.
 export function buildModel(events) {
-  const evs = byT(events);
+  // Honor retracts before anything else folds: a retracted card must leave no
+  // lane, mark, or count — the same META-level rule the reducer applies in fold().
+  const evs = byT(applyRetractions(events));
   const t0 = evs.length ? evs[0].t : 0;
   const t1 = evs.length ? evs[evs.length - 1].t : t0 + 60000;
   const itemsMap = buildItems(evs);
