@@ -39,11 +39,23 @@
     <div class="stat" id="stat-cost-wrap" hidden><span class="stat-value cost" id="stat-cost">$0</span><span class="stat-label">est. cost</span></div>
     <div class="stat"><span class="stat-value" id="stat-elapsed">00:00</span><span class="stat-label">elapsed</span></div>
     <div class="badge" id="status-badge"><i class="badge-dot"></i><span id="status-text">CONNECTING</span></div>
+    <a class="icon-btn" id="report-link" href="/report" target="_blank" rel="noopener" title="shift report — what happened overnight">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 2.5h6l2.5 2.5v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 8h5M5.5 10.5h5"/></svg>
+    </a>
     <button class="icon-btn" id="tape-toggle" title="toggle activity tape">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2.5" width="13" height="11" rx="2.5"/><line x1="10.5" y1="3" x2="10.5" y2="13"/></svg>
     </button>
   </div>
 </header>
+<script>
+  // Point the report link at the session currently on the board (trivial, and
+  // kept out of app.js which owns only the ?t= deep link).
+  (function () {
+    var s = new URLSearchParams(location.search).get('session');
+    var a = document.getElementById('report-link');
+    if (a && s) a.href = '/report?session=' + encodeURIComponent(s);
+  })();
+</script>
 
 <div class="attention" id="attention" hidden>
   <i class="badge-dot"></i>
