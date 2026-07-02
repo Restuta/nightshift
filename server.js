@@ -10,6 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { randomUUID } = require('node:crypto');
 
 const args = process.argv.slice(2);
 function flag(name, fallback) {
@@ -39,7 +40,7 @@ for (let i = 0; i < args.length; i++) {
 }
 if (!logPaths.length) logPaths.push(path.resolve(path.join('.nightshift', 'events.jsonl')));
 
-const sessions = new Map(); // id → {id, file, offset, partial, clients}
+const sessions = new Map(); // id → {id, file, offset, partial, clients, seen}
 const usedIds = new Set();
 function addSession(file) {
   if ([...sessions.values()].some(s => s.file === file)) return null; // already served
@@ -49,7 +50,11 @@ function addSession(file) {
   usedIds.add(id);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (!fs.existsSync(file)) fs.writeFileSync(file, '');
-  const s = { id, file, offset: fs.statSync(file).size, partial: '', clients: new Set() };
+  // `seen`: envelope ids we've observed being appended to this log while the
+  // board is up (populated by drain() below + accepted POSTs). The POST /event
+  // dedupe guard consults it so a client re-posting the same event id is acked
+  // but not appended again — killing the "same event twice" class at the door.
+  const s = { id, file, offset: fs.statSync(file).size, partial: '', clients: new Set(), seen: new Set() };
   sessions.set(id, s);
   try { fs.watch(s.file, () => drain(s)); } catch { /* polling covers it */ }
   return s;
@@ -84,9 +89,17 @@ function scanMeta(s) {
   let title = null, agent = null, cwd = null, phase = null, count = 0, lastT = 0;
   let raw = '';
   try { raw = fs.readFileSync(s.file, 'utf8'); } catch { /* gone */ }
+  // Sort by t so the latest session phase/title wins by time, not by file
+  // position — an out-of-order tape must not report a stale phase (stable sort
+  // keeps file order among equal t).
+  const evs = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let ev; try { ev = JSON.parse(line); } catch { continue; }
+    evs.push(ev);
+  }
+  evs.sort((a, b) => (a.t || 0) - (b.t || 0));
+  for (const ev of evs) {
     count++;
     if (typeof ev.t === 'number') lastT = ev.t;
     if (ev.type === 'session') {
@@ -121,6 +134,12 @@ function drain(s) {
     s.partial = lines.pop();
     for (const line of lines) {
       if (!line.trim()) continue;
+      // Record each appended event's id so a later duplicate POST is caught. Any
+      // writer's appends flow through here (hooks, tailers, our own POST), so the
+      // guard sees them all. Direct file-writers still can't be deduped at write
+      // time — that's Phase 1's single-recorder lock; tape-doctor --dedupe is the
+      // offline cure for already-doubled tapes.
+      try { const ev = JSON.parse(line); if (ev && ev.id != null) s.seen.add(ev.id); } catch { /* keep streaming */ }
       for (const res of s.clients) res.write(`data: ${line}\n\n`);
     }
   });
@@ -159,9 +178,16 @@ function prScan(s) {
   try { raw = fs.readFileSync(s.file, 'utf8'); } catch { return { cwd: null, open: 0 }; }
   let cwd = null;
   const st = new Map();
+  // Sort by t first: pr state is last-write-wins, so on an out-of-order tape the
+  // latest state by time must win, not the last line in the file.
+  const evs = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let ev; try { ev = JSON.parse(line); } catch { continue; }
+    evs.push(ev);
+  }
+  evs.sort((a, b) => (a.t || 0) - (b.t || 0));
+  for (const ev of evs) {
     if (ev.type === 'session' && ev.cwd) cwd = ev.cwd;
     else if (ev.type === 'pr' && ev.number != null && ev.state) st.set(ev.number, ev.state);
   }
@@ -274,6 +300,17 @@ const server = http.createServer((req, res) => {
         const ev = JSON.parse(body);
         if (typeof ev.type !== 'string') throw new Error('missing type');
         if (typeof ev.t !== 'number') ev.t = Date.now();
+        // Envelope v2: stamp id + source + v only if missing, so a client that
+        // already stamped (the board UI) keeps its own, and an item event keeps
+        // its work-item id as its identity.
+        if (ev.id == null) ev.id = randomUUID();
+        if (ev.source == null) ev.source = 'ui';
+        if (ev.v == null) ev.v = 2;
+        // Dedupe guard: an id we've already appended this session is acked but
+        // not written again (add to `seen` synchronously so two racing POSTs with
+        // the same id can't both slip through before drain() catches up).
+        if (s.seen.has(ev.id)) { res.writeHead(204); res.end(); return; }
+        s.seen.add(ev.id);
         fs.appendFileSync(s.file, JSON.stringify(ev) + '\n');
         res.writeHead(204); res.end();
       } catch (e) {
