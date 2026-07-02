@@ -120,6 +120,8 @@ let retry = 0;          // backoff counter for explicit reconnects
 // here so a bare reconnect (openStream) can re-sync without clearing the board.
 function connect(id) {
   sessionId = id;
+  const lanesLink = $('#lanes-link');
+  if (lanesLink) lanesLink.href = '/lanes?session=' + encodeURIComponent(id);
   log.length = 0;
   state = initialState();
   cursor = 0;
