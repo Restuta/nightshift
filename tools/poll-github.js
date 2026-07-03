@@ -96,7 +96,37 @@ if (!REPO) {
 
 // gh's real fact-times (createdAt/mergedAt/closedAt) ride along so the reducer can
 // record occurredAt — replay then shows the 2am merge at 2am, not at poll time.
-const PR_FIELDS = 'number,title,url,state,mergedAt,closedAt,createdAt,statusCheckRollup';
+// baseRefName lets us resolve the stacked-PR chain: if a PR's base branch is itself
+// another PR's head in this repo, that other PR is its base (see resolveBase).
+const PR_FIELDS = 'number,title,url,state,mergedAt,closedAt,createdAt,baseRefName,statusCheckRollup';
+
+// head branch → PR number, for the whole repo, fetched once per run and cached.
+// A PR whose baseRefName matches one of these heads is stacked on that PR — the
+// `base` field the /graph view draws the chain from. Lazy + best-effort: if gh
+// fails, base stays unresolved and no chain edge is drawn (old-tape behavior).
+let headMap = null;
+function headNumberMap() {
+  if (headMap) return headMap;
+  headMap = new Map();
+  try {
+    const args = ['pr', 'list', '--state', 'all', '--limit', String(LIMIT), '--json', 'number,headRefName'];
+    if (flags.repo) args.push('--repo', flags.repo);
+    for (const p of JSON.parse(execFileSync('gh', args, { encoding: 'utf8' }))) {
+      if (p.headRefName != null) headMap.set(p.headRefName, p.number);
+    }
+  } catch { /* leave empty → base unresolved */ }
+  return headMap;
+}
+
+// The PR number a PR is stacked on: its base branch resolved to that branch's own
+// PR, when one exists in the known set. null when the base is a plain branch
+// (e.g. main) or unresolvable — the reducer then stores no base and draws no edge.
+function resolveBase(pr) {
+  const ref = pr && pr.baseRefName;
+  if (!ref) return null;
+  const n = headNumberMap().get(ref);
+  return n != null && n !== pr.number ? n : null;
+}
 
 function ghPrs() {
   const args = ['pr', 'list', '--state', 'all', '--limit', String(LIMIT), '--json', PR_FIELDS];
@@ -287,7 +317,8 @@ function refreshKnown() {
     for (const line of chunk.slice(0, complete).split('\n').filter(Boolean)) {
       let ev; try { ev = JSON.parse(line); } catch { continue; }
       if (ev.type === 'pr' && ev.number != null && mine(ev)) {
-        known.set(ev.number, { ...(known.get(ev.number) || {}), state: ev.state });
+        const prev = known.get(ev.number) || {};
+        known.set(ev.number, { ...prev, state: ev.state, base: ev.base != null ? ev.base : prev.base });
       } else if (ev.type === 'ci' && ev.pr != null && mine(ev)) {
         known.set(ev.pr, { ...(known.get(ev.pr) || {}), ci: ev.status });
       }
@@ -337,16 +368,26 @@ function emitPr(pr) {
   const ci = (td && toastCi(td)) || rollupCi(pr.statusCheckRollup);
   const tbase = td && (((td.status || '') + '').toLowerCase().split(':')[0]);
   if (tbase === 'merged' && state === 'open') state = 'merged';
+  const base = resolveBase(pr); // stacked-PR chain target, or null
   const k = known.get(pr.number) || {};
   if (k.state !== state) {
     const ev = { type: 'pr', number: pr.number, title: pr.title, url: pr.url, state };
     if (REPO) ev.repo = REPO;
+    if (base != null) ev.base = base;
     const created = tsMs(pr.createdAt);
     if (created != null) ev.createdAt = created;
     const occ = occurredMs(pr, state);
     if (occ != null) ev.occurredAt = occ;
     append(ev);
-    known.set(pr.number, { ...known.get(pr.number), state });
+    known.set(pr.number, { ...known.get(pr.number), state, base: base != null ? base : k.base });
+  } else if (base != null && k.base == null) {
+    // State unchanged but the base chain just resolved (the base PR was opened
+    // after this one) — record the link so the graph can draw the chain. A bare
+    // state-echo the reducer merges base onto; it moves no card.
+    const ev = { type: 'pr', number: pr.number, state, base };
+    if (REPO) ev.repo = REPO;
+    append(ev);
+    known.set(pr.number, { ...known.get(pr.number), base });
   }
   if (ci != null && k.ci !== ci) {
     const ev = { type: 'ci', pr: pr.number, status: ci };

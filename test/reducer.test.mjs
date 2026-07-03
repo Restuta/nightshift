@@ -169,3 +169,17 @@ test('pr-parking tape: turn-5 sits in PR until #381 merges', () => {
   assert.equal(final.items.get('turn-5').status, 'done');
   assert.equal(final.items.get('turn-5').pr.state, 'merged');
 });
+
+// The `base` field (stacked-PR chain) rides through the reducer onto state.prs,
+// and is sticky — a later state-only event without base keeps the earlier link.
+// The /graph view draws the chain edge from it; old tapes (no base) draw none.
+test('pr base is stored on state.prs and is sticky across later state events', () => {
+  const x = stream();
+  x.emit({ type: 'pr', number: 1, repo: 'o/r', state: 'merged', source: 'poll-github', v: 2 });
+  x.emit({ type: 'pr', number: 2, repo: 'o/r', state: 'open', base: 1, source: 'poll-github', v: 2 });
+  assert.equal(x.state.prs.get('o/r#2').base, 1, 'base recorded from the pr event');
+  // a later state-only event (the merge) carries no base — the link must persist
+  x.emit({ type: 'pr', number: 2, repo: 'o/r', state: 'merged', source: 'poll-github', v: 2 });
+  assert.equal(x.state.prs.get('o/r#2').base, 1, 'base survives a later state-only event');
+  assert.equal(x.state.prs.get('o/r#1').base, null, 'a PR with no base stays null');
+});
