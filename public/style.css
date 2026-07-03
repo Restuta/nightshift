@@ -581,6 +581,22 @@ body.tape-collapsed .tape-resize { display: none; }
    live spinner — the turn finished without it, it isn't actively running. */
 .todo-list li.unfinished { color: var(--dim); opacity: .6; }
 .todo-list li.unfinished::before { border-color: var(--faint); border-style: dashed; }
+/* A step the plan DROPPED while it was still in_progress — the agent reworded or
+   removed it and moved on. A ticking timer on a dead step is a lie, so it freezes:
+   dimmed + struck, a distinct hollow DOTTED glyph (not the green check, not the
+   live spinner), its run time frozen and a faint "· superseded" tag instead. */
+.todo-list li.superseded { color: var(--faint); opacity: .55; text-decoration: line-through; text-decoration-color: #5e646e55; }
+.todo-list li.superseded::before { border-color: var(--faint); border-style: dotted; background: none; animation: none; }
+.todo-list li.superseded .steptime { color: var(--faint); text-decoration: none; }
+.todo-list li .suptag {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--faint);
+  margin-left: 6px;
+  opacity: .85;
+  white-space: nowrap;
+  text-decoration: none;
+}
 /* "+N earlier steps" — the collapsed-delta affordance on a long turn. No bullet;
    quiet, italic; text aligns with the steps. Clicking the card expands the list. */
 .todo-list li.more { color: var(--faint); font-size: 11px; font-style: italic; }
