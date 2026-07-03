@@ -94,6 +94,26 @@ function readLog(LOG) {
   } catch { return []; }
 }
 
+// Turn-card ids are NAMESPACED per session — `turn-<sid8>-<n>` — so two sessions
+// writing ONE central log never collide on `turn-3` and never close each other's
+// live card (plan 1.3). sid8 = the session id's first 8 hex chars. The shared
+// browser copy lives in public/turn-id.js (kept in sync by hand — no build step).
+const sid8 = s => String(s || '').toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8);
+
+// Highest turn number already minted in namespace `s8` in the log — the tape is the
+// truth. When a session's per-sid counter file is lost, we resume numbering from
+// here so a fresh turn-1 can't re-collide with a card this same session wrote.
+function maxTurnN(LOG, s8) {
+  if (!s8) return 0;
+  let max = 0;
+  for (const ev of readLog(LOG)) {
+    if (ev.type !== 'item' || !ev.id) continue;
+    const m = new RegExp('^turn-' + s8 + '-(\\d+)$').exec(ev.id);
+    if (m) { const n = Number(m[1]); if (n > max) max = n; }
+  }
+  return max;
+}
+
 // Per-turn card state, persisted per session (hooks are separate processes, so
 // the turn counter can't live in memory). One card per user prompt — the Codex
 // "product invariant" the rollout tailer produced, now driven by the hook.
@@ -376,9 +396,20 @@ function main() {
     const synth = sid && isHumanPrompt(hook.prompt) && (agent === 'codex' || !SELF);
     if (synth) {
       const st = turnState(sid);
+      // Restart continuity (plan 1.3): if this session's per-sid counter was lost
+      // (state file deleted/rolled) but it already minted cards into the log, resume
+      // numbering from the log's highest n in MY namespace — the tape is the truth —
+      // so a fresh turn-1 can't re-collide with a card this same session wrote. No-op
+      // on a genuine first turn (the scan finds nothing).
+      if (st.turnN === 0) st.turnN = maxTurnN(LOG, sid8(sid));
+      // Closing the prior card only ever touches THIS session's own card (turnState
+      // is keyed by session id), so it stays within our namespace by construction.
       if (st.card) append({ type: 'item', id: st.card, status: 'done' });
       st.turnN++;
-      st.card = `turn-${st.turnN}`;
+      // Namespace the card by this session's sid8 so two sessions on one central log
+      // never mint the same id. Degrade to the legacy shape only if sid is unknown.
+      const ns = sid8(sid);
+      st.card = ns ? `turn-${ns}-${st.turnN}` : `turn-${st.turnN}`;
       append({ type: 'item', id: st.card, title: promptTitle(hook.prompt) || `turn ${st.turnN}`, status: 'doing' });
       append({ type: 'session', phase: 'resume', agent, session: sid });
       saveTurn(sid, st);

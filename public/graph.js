@@ -13,6 +13,7 @@
 import { fold, liveness } from './reducer.js';
 import { buildGraphModel, COLUMNS } from './graph-model.js';
 import { sessionLabel } from './session-label.js';
+import { turnLabel } from './turn-id.js';
 import { initSessionPicker } from './session-picker.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -631,7 +632,7 @@ function tooltipHtml(n) {
     return head(label) + body((n.title || '') + '\n' + bits.join(' · ') + (when ? '\n' + when : '') + size + (n.base != null ? `\nbased on #${n.base}` : ''));
   }
   if (n.kind === 'intent') {
-    return head(n.itemId) + body(`${n.title}\n${n.status}${n.abandoned ? ' · abandoned?' : ''}\n${n.commits} commits · ${n.edits} edits · +${n.add.toLocaleString()} / −${n.del.toLocaleString()} lines`);
+    return head(turnLabel(n.itemId)) + body(`${n.title}\n${n.status}${n.abandoned ? ' · abandoned?' : ''}\n${n.commits} commits · ${n.edits} edits · +${n.add.toLocaleString()} / −${n.del.toLocaleString()} lines`);
   }
   if (n.kind === 'plan') return head('Plan') + body(`${n.counts.completed} done · ${n.counts.in_progress} in progress · ${n.counts.pending} pending`);
   if (n.kind === 'session') return head(n.title) + body(`${n.agent || 'agent'}\n${costText(n.cost)} · ${n.commits} commits\nsince ${n.startedAt ? hhmm(n.startedAt) : '—'}`);

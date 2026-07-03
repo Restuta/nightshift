@@ -116,7 +116,10 @@ including the ones building it.
   central or locally-attached) — skipping harness-injected turns like `<task-notification>`
   so they don't litter the board; maps `apply_patch`→edit, `update_plan`→todos,
   `TodoWrite`→todos, `Bash`→commit/activity and `gh pr create|merge`→`pr_ref` (a
-  sighting — never pr state; the poller is the single writer, plan 1.4). Claude's
+  sighting — never pr state; the poller is the single writer, plan 1.4). Per-turn
+  cards get a session-NAMESPACED id `turn-<sid8>-<n>` (plan 1.3) so two sessions
+  sharing one central log never collide on `turn-3`; the counter resumes from the
+  log's own namespace if the per-sid state file is lost. Claude's
   newer task tools (`TaskCreate`/`TaskUpdate`) live only in the transcript and
   aren't in the hook matcher, so on every firing tool the hook tails the transcript
   (by byte offset) and folds the task list into `todos` snapshots — live without a
@@ -147,7 +150,10 @@ including the ones building it.
   keeps the resume checkpoint); it follows rotation within the same session id and
   resumes on restart. On re-attach with a lost checkpoint but a log that already
   holds this session, it resumes from the log instead of re-draining from zero (the
-  n154 double-record).
+  n154 double-record). Full-mode turn cards carry the session-NAMESPACED id
+  `turn-<sid8>-<n>` (plan 1.3), and a worker retires/reopens only cards in its own
+  namespace — so two rollouts of one project on one log never close each other's
+  live card; a lost checkpoint reseeds `n` from the log's own namespace.
 - `tools/poll-github.js` — the **SOLE writer of `pr`/`ci` events (plan 1.4)**; folds
   the log's known state each tick and appends only deltas (stateless, idempotent).
   CI/review status comes from **toast review-ci** (Orba's CI — fast, authoritative)

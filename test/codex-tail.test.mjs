@@ -13,6 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { fold } from '../public/reducer.js';
+import { sid8 } from '../public/turn-id.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAIL = path.join(here, '..', 'tools', 'codex-tail.js');
@@ -62,6 +64,33 @@ function writeBigRollout(sessions, { id, cwd, prompts }) {
   }
   fs.writeFileSync(file, lines.join('\n') + '\n');
   return file;
+}
+
+// A multi-turn rollout: session_meta + N user prompts at rising timestamps (60s
+// apart from t0). Full mode mints one namespaced card per prompt, closing the
+// prior one — so a 2-prompt rollout emits card 1 doing → card 1 done + card 2 doing.
+function writeConvo(sessions, { id, cwd, prompts, t0 }) {
+  const iso = t => new Date(t).toISOString();
+  const file = path.join(sessions, `rollout-${iso(t0).replace(/[:.]/g, '-')}-${id}.jsonl`);
+  const lines = [JSON.stringify({ timestamp: iso(t0), type: 'session_meta', payload: { session_id: id, id, timestamp: iso(t0), cwd, originator: 'codex-tui', source: 'cli', thread_source: 'user' } })];
+  for (let i = 0; i < prompts; i++) {
+    lines.push(JSON.stringify({ timestamp: iso(t0 + (i + 1) * 60000), type: 'event_msg', payload: { type: 'user_message', message: `prompt ${i + 1}` } }));
+  }
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+  return file;
+}
+
+// Append one more user prompt to a live rollout (a fresh turn arriving).
+function appendPrompt(file, { message, t }) {
+  fs.appendFileSync(file, JSON.stringify({ timestamp: new Date(t).toISOString(), type: 'event_msg', payload: { type: 'user_message', message } }) + '\n');
+}
+
+const delay = ms => new Promise(r => setTimeout(r, ms));
+function workerEnv({ home, ns }) {
+  const env = { ...process.env };
+  delete env.CODEX_THREAD_ID; delete env.NIGHTSHIFT_LOG; delete env.NIGHTSHIFT;
+  if (home) env.HOME = home; if (ns) env.NIGHTSHIFT_HOME = ns;
+  return env;
 }
 
 // Run codex-tail synchronously (default entry, --once, --status, --stop) with a
@@ -295,4 +324,105 @@ test('stop/status: scoped by destination log; a scoped stop keeps the resume che
     assert.ok(!e.pid, 'the pid is cleared (worker stopped)');
     assert.equal(e.snap.offset, 4242, 'the resume checkpoint survives the pause');
   } finally { try { sleeper.kill('SIGKILL'); } catch { /* gone */ } sb.cleanup(); }
+});
+
+// (8) Namespaced turn ids (plan 1.3). Two rollouts of the SAME project — legal
+// under the rollout-keyed lock — resolve to ONE central log. Before, both minted
+// `turn-1`, so one worker's retire closed the other's live card (the board showed a
+// running session with nothing in progress). Namespacing by sid8 makes the ids
+// disjoint: each worker retires only ITS OWN card, and the second session's active
+// card survives the first's retire.
+test('two rollouts, one log: namespaced ids never collide; a retire closes only its own card (1.3)', () => {
+  const sb = sandbox();
+  try {
+    const base = Date.parse('2026-07-01T01:00:00.000Z');
+    const CWD = '/Users/dev/main-repo';                 // same project → same central log
+    // B opens its turn FIRST; A retires its own turn LATER. Pre-fix, A's `turn-1 done`
+    // closed B's live `turn-1`. Namespacing makes that impossible.
+    const rollB = writeConvo(sb.sessions, { id: B, cwd: CWD, prompts: 1, t0: base });
+    const rollA = writeConvo(sb.sessions, { id: A, cwd: CWD, prompts: 2, t0: base + 3600_000 });
+    const log = path.join(sb.ns, 'sessions', 'main-repo.jsonl');
+
+    assert.equal(runTail(['--once', rollB, '--log', log], { home: sb.home, ns: sb.ns }).status, 0);
+    assert.equal(runTail(['--once', rollA, '--log', log], { home: sb.home, ns: sb.ns }).status, 0);
+
+    const a8 = sid8(A), b8 = sid8(B);
+    assert.notEqual(a8, b8, 'the two sessions have distinct namespaces');
+
+    const items = readEvents(log).filter(e => e.type === 'item');
+    const ids = new Set(items.map(e => e.id));
+    assert.ok(ids.has(`turn-${a8}-1`) && ids.has(`turn-${b8}-1`), 'both sessions minted a namespaced card 1');
+    assert.ok(!ids.has('turn-1'), 'no un-namespaced (colliding) turn-1 was minted');
+    assert.ok(items.some(e => e.id === `turn-${a8}-1` && e.status === 'done'), 'A closed its OWN card');
+    assert.ok(!items.some(e => e.id === `turn-${b8}-1` && e.status === 'done'), "A's retire never touched B's card");
+
+    // The reducer agrees: B's active card survives A's retire.
+    const s = fold(readEvents(log).sort((x, y) => x.t - y.t));
+    assert.equal(s.items.get(`turn-${b8}-1`).status, 'doing', "B's card is still in progress");
+    assert.equal(s.items.get(`turn-${a8}-1`).status, 'done', "A's first card is done");
+    assert.equal(s.items.get(`turn-${a8}-2`).status, 'doing', "A's second card is in progress");
+  } finally { sb.cleanup(); }
+});
+
+// (9) Restart continuity (plan 1.3): a worker whose checkpoint is gone must resume
+// turn numbering from the log's own namespace, so a new turn continues at -(max+1)
+// instead of re-minting -1 and colliding with a card this session already wrote.
+test('restart: a lost checkpoint resumes turn numbering from the log, never re-mints turn 1 (1.3)', async () => {
+  const sb = sandbox();
+  try {
+    const base = Date.parse('2026-07-01T01:00:00.000Z');
+    const rollout = writeConvo(sb.sessions, { id: A, cwd: '/Users/dev/wt/feature-a', prompts: 2, t0: base });
+    const log = path.join(sb.ns, 'sessions', 'feature-a.jsonl');
+    const a8 = sid8(A);
+    // A fresh --once drains the two turns but persists NO checkpoint (an import, a
+    // reset, or a crash before persist — the lost-checkpoint condition).
+    assert.equal(runTail(['--once', rollout, '--log', log], { home: sb.home, ns: sb.ns }).status, 0);
+    assert.ok(readEvents(log).some(e => e.type === 'item' && e.id === `turn-${a8}-2`), 'card 2 was minted');
+    assert.ok(!readState(sb.ns)[rollout], 'no checkpoint persisted (lost-checkpoint condition)');
+
+    // Restart a --worker (no checkpoint). Once up, a NEW prompt (turn 3) lands. The
+    // worker must number it turn-<a8>-3, continuing from the log — not re-mint -1.
+    const child = spawn(process.execPath, [TAIL, '--worker', rollout, '--log', log], { env: workerEnv(sb), stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', d => (err += d));
+    await delay(450);
+    appendPrompt(rollout, { message: 'the third turn', t: base + 3 * 60000 });
+    await delay(1000);
+    child.kill('SIGTERM');
+    await new Promise(res => child.on('exit', res));
+
+    assert.match(err, /re-attach guard/, 'the guard fired (checkpoint was lost)');
+    const items = readEvents(log).filter(e => e.type === 'item');
+    assert.ok(items.some(e => e.id === `turn-${a8}-3` && e.status === 'doing'), 'the new turn continued as -3');
+    assert.equal(items.filter(e => e.id === `turn-${a8}-1` && e.status === 'doing').length, 1, 'turn 1 was NOT re-minted');
+  } finally { sb.cleanup(); }
+});
+
+// (10) Explicit attribution (plan 1.3): every card-attributable event codex-tail
+// emits (say / tool / edit / …) stamps the namespaced card as `item`, so the
+// reducer never has to fall back to most-recently-touched-doing — which would
+// cross-attribute between two sessions interleaved on one shared tape.
+test('full mode stamps explicit item (namespaced) on say + tool events (1.3)', () => {
+  const sb = sandbox();
+  try {
+    const ts = '2026-07-01T01:00:00.000Z';
+    const file = path.join(sb.sessions, `rollout-${ts.replace(/[:.]/g, '-')}-${A}.jsonl`);
+    const j = o => JSON.stringify(o);
+    fs.writeFileSync(file, [
+      j({ timestamp: ts, type: 'session_meta', payload: { session_id: A, id: A, cwd: '/Users/dev/wt/feature-a', thread_source: 'user' } }),
+      j({ timestamp: ts, type: 'event_msg', payload: { type: 'user_message', message: 'do the thing' } }),
+      j({ timestamp: ts, type: 'event_msg', payload: { type: 'agent_message', message: 'waiting one more interval for the harvest' } }),
+      j({ timestamp: ts, type: 'response_item', payload: { type: 'function_call', name: 'shell', call_id: 'c1', arguments: j({ cmd: 'ls -la' }) } }),
+    ].join('\n') + '\n');
+
+    const log = path.join(sb.ns, 'out.jsonl');
+    assert.equal(runTail(['--once', file, '--log', log], { home: sb.home, ns: sb.ns, sid: A }).status, 0);
+
+    const a8 = sid8(A);
+    const evs = readEvents(log);
+    const say = evs.find(e => e.type === 'say');
+    const tool = evs.find(e => e.type === 'tool');
+    assert.equal(say && say.item, `turn-${a8}-1`, 'the say event carries the namespaced card as explicit item');
+    assert.equal(tool && tool.item, `turn-${a8}-1`, 'the tool event carries the namespaced card as explicit item');
+  } finally { sb.cleanup(); }
 });

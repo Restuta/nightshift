@@ -80,6 +80,22 @@ Work item upsert — the kanban cards. `{id, title?, status?, note?, emoji?}`
   `inbox` cards may also come from the UI or another human).
 - Partial updates merge by `id`: `{type:"item", id:"wi-2", status:"pr"}` just
   moves the card.
+- **Turn-card id scheme (plan 1.3).** Synthesized per-prompt turn cards (the
+  hook and codex-tail's full mode) use a NAMESPACED id: `turn-<sid8>-<n>`, where
+  `sid8` = the first 8 hex chars of the producing session's id (Codex rollout
+  `session_id` / Claude hook `session_id`) and `n` is that session's per-turn
+  counter. The namespace makes ids collision-proof across workers, sessions, and
+  restarts: two recorders legitimately sharing one central log (two rollouts of
+  one project) can no longer both mint `turn-3` and have one's retire close the
+  other's live card. A producer upserts/closes/retires ONLY ids in its own
+  namespace, and stamps `item:<turn id>` explicitly on the tool/edit/say/todos it
+  emits so the reducer never cross-attributes between interleaved sessions. On
+  restart with a lost checkpoint, a producer seeds its counter from the highest
+  `n` already present in ITS namespace in the log (the tape is the truth), so it
+  continues numbering instead of re-colliding with itself. **Legacy `turn-<n>`
+  ids stay valid forever** (old tapes fold and render unchanged); ids are opaque
+  to the reducer. The board/graph short-form a namespaced id to `turn <n>` for
+  display (shared helper `public/turn-id.js`); legacy ids display as-is.
 
 ### `todos`
 Replaces the current fine-grained plan (the drill-in view on the active card).
