@@ -183,3 +183,26 @@ test('pr base is stored on state.prs and is sticky across later state events', (
   assert.equal(x.state.prs.get('o/r#2').base, 1, 'base survives a later state-only event');
   assert.equal(x.state.prs.get('o/r#1').base, null, 'a PR with no base stays null');
 });
+
+// PR diff size (add/del) rides through the reducer onto state.prs and is sticky —
+// a later state-only echo (a merge with no numbers) must NOT erase the size, so the
+// /graph diff chip keeps rendering. Absent on old tapes → undefined (no chip).
+test('pr add/del are stored on state.prs and are sticky across a size-less echo', () => {
+  const x = stream();
+  // First sighting carries the diff size.
+  x.emit({ type: 'pr', number: 7, repo: 'o/r', state: 'open', add: 1284, del: 56, source: 'poll-github', v: 2 });
+  assert.equal(x.state.prs.get('o/r#7').add, 1284, 'add recorded from the pr event');
+  assert.equal(x.state.prs.get('o/r#7').del, 56, 'del recorded from the pr event');
+  // The merge is a state-only echo (no add/del) — the numbers must persist.
+  x.emit({ type: 'pr', number: 7, repo: 'o/r', state: 'merged', source: 'poll-github', v: 2 });
+  assert.equal(x.state.prs.get('o/r#7').add, 1284, 'add survives a later size-less event');
+  assert.equal(x.state.prs.get('o/r#7').del, 56, 'del survives a later size-less event');
+  assert.equal(x.state.prs.get('o/r#7').state, 'merged', 'the echo still applied the state change');
+});
+
+test('a pr event with no size leaves state.prs without add/del (old-tape / no chip)', () => {
+  const x = stream();
+  x.emit({ type: 'pr', number: 8, repo: 'o/r', state: 'open', source: 'poll-github', v: 2 });
+  assert.equal(x.state.prs.get('o/r#8').add, undefined, 'no size event → no add (chip omitted)');
+  assert.equal(x.state.prs.get('o/r#8').del, undefined, 'no size event → no del');
+});

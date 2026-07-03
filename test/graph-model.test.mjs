@@ -51,6 +51,37 @@ test('nodes come from PRs / plan / intent items / session — NOT turn-cards', (
   assert.equal(pr1.repo, 'o/r');
 });
 
+// --- diff-size chips --------------------------------------------------------
+test('PR nodes expose diff size (add/del), sticky across a size-less merge echo', () => {
+  const m = buildGraphModel(readTape('graph.jsonl'));
+  // #1 was sighted open with size 1284/56, then merged with a size-less echo — the
+  // node must still carry the sticky numbers the chip renders.
+  const pr1 = nodeById(m, 'pr:o/r#1');
+  assert.equal(pr1.add, 1284, 'PR node exposes additions');
+  assert.equal(pr1.del, 56, 'PR node exposes deletions');
+  assert.equal(pr1.prState, 'merged', 'and the sticky size survived the merge');
+});
+
+test('a PR with no recorded size exposes add=0/del=0 → the view draws no chip', () => {
+  const m = buildGraphModel(readTape('graph.jsonl'));
+  // #3 was never given a size (an old-style pr event) → 0/0, so hasSize() is false.
+  const pr3 = nodeById(m, 'pr:o/r#3');
+  assert.equal(pr3.add, 0, 'absent size folds to 0');
+  assert.equal(pr3.del, 0, 'absent size folds to 0');
+});
+
+test('intent nodes expose commit-derived diff size for the chip', () => {
+  const m = buildGraphModel(readTape('graph.jsonl'));
+  // wi-schema accrued one commit of +120/-8 (event g5) — surfaced on the node.
+  const wi = nodeById(m, 'intent:wi-schema');
+  assert.equal(wi.add, 120, 'intent node exposes attributed additions');
+  assert.equal(wi.del, 8, 'intent node exposes attributed deletions');
+  // wi-ui is inbox-only (no commits) → no size, so no chip.
+  const ui = nodeById(m, 'intent:wi-ui');
+  assert.equal(ui.add, 0);
+  assert.equal(ui.del, 0);
+});
+
 test('a v1 pr with no repo but a URL still shows repo#number from the URL', () => {
   const evs = [
     { t: 1, type: 'session', phase: 'start', title: 't' },

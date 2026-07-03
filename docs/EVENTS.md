@@ -105,7 +105,7 @@ A SIGHTING that a PR is relevant to this session. `{number, url?, title?, item?}
   state has exactly one writer**, and a sighting is not a state.
 
 ### `pr`
-`{number, repo?, title?, url?, state: "open" | "merged" | "closed", base?, occurredAt?, createdAt?}`
+`{number, repo?, title?, url?, state: "open" | "merged" | "closed", base?, add?, del?, occurredAt?, createdAt?}`
 - **Single writer (plan 1.4).** Only `poll-github` — and the offline whole-tape
   synthesizers `emit` / `import` / `demo` — may author a v2 `pr` STATE event. A v2
   `pr` from any other source (`hook`, `codex-tail`, …) is IGNORED by the reducer
@@ -131,6 +131,12 @@ A SIGHTING that a PR is relevant to this session. `{number, url?, title?, item?}
   `/graph` view draws the stacked-PR chain edge from it. **Old tapes lack the field
   → no edge, never inferred from titles.** Only the PR authorities (`poll-github`,
   `emit`, `import`, `demo`) may author it.
+- `add` / `del` — the PR's diff size (lines added / removed), read by `poll-github`
+  from gh's `additions`/`deletions`. Optional and **sticky** on `state.prs` — a
+  later state-only echo (e.g. the merge) without them keeps the earlier numbers, so
+  the `/graph` diff chip keeps rendering. Stamped only when gh reports them.
+  **Merged PRs are terminal and never re-polled, so historical merged PRs won't
+  gain sizes — the chip appears for PRs polled from now on.** Absent → no chip.
 - Freshness is reconciled by the board server (which spawns `poll-github`), not a
   standalone daemon — see `server.js`. A merge that lands while no poller was alive
   still appears the next time the board is opened.

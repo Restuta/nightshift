@@ -66,6 +66,10 @@ function prNodes(state) {
       prState: pr.state || 'open',
       ci: pr.ci || null,
       url: pr.url || null,
+      // Diff size — a recorded fact (poll-github stamps it from gh). 0 when the tape
+      // carries none, so the view renders a chip only for PRs that HAVE size data.
+      add: pr.add || 0,
+      del: pr.del || 0,
       base: pr.base != null ? pr.base : null,
       openedAt: pr.openedAt || null,
       mergedAt: pr.mergedAt || null,
