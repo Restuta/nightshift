@@ -21,6 +21,7 @@ function stream() {
     state: s,
     emit(o) { reduce(s, { t: (t += 1000), ...o }); return s; },
     item: id => s.items.get(id),
+    at: () => t,           // the t of the last emitted event (for frozen-time asserts)
   };
 }
 
@@ -126,6 +127,123 @@ test('steps already done when first seen are not attributed to a turn', () => {
   ] });
   assert.equal(delta(x.item('turn-1')).length, 0, "pre-done work is not this turn's delta");
   assert.equal(x.state.todos.filter(t => t.done).length, 2, 'but the sidebar plan still shows them done');
+});
+
+// Plan fossils: agents rewrite the plan constantly. A step witnessed in_progress
+// on a card, then DROPPED from the next snapshot, must not keep ticking forever —
+// it freezes as 'superseded' with its run time frozen at the moment it vanished.
+const dEntry = (it, text) => it.delta && it.delta.get(text);
+
+test('a step dropped from the plan while in_progress freezes as superseded', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'A', status: 'pending' }, { text: 'B', status: 'pending' },
+  ] });
+  // A completes, B goes in_progress → both witnessed into turn-1's delta.
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'A', status: 'completed' }, { text: 'B', status: 'in_progress' },
+  ] });
+  const startedAt = x.at();
+  assert.equal(dEntry(x.item('turn-1'), 'B').status, 'in_progress', 'B is a live delta step');
+
+  // Next snapshot reworded the plan: B is gone, replaced by C. B is now a fossil.
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'A', status: 'completed' }, { text: 'C', status: 'in_progress' },
+  ] });
+  const supersededAt = x.at();
+  const b = dEntry(x.item('turn-1'), 'B');
+  assert.equal(b.status, 'superseded', 'a dropped in_progress step is marked superseded');
+  assert.equal(b.supersededAt, supersededAt, 'frozen at the snapshot that dropped it');
+  assert.equal(b.startedAt, startedAt, 'startedAt is kept → elapsed freezes as supersededAt − startedAt');
+  assert.equal(b.doneAt, undefined, 'a superseded step never completed');
+  // A (completed) is untouched by the sweep — only in_progress fossils freeze.
+  assert.equal(dEntry(x.item('turn-1'), 'A').status, 'completed', 'a completed step is not swept');
+});
+
+test('a superseded fossil freezes on EVERY card, not just the active one', () => {
+  const x = stream();
+  // turn-1 starts step S, then its turn ends without S ever completing.
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'S', status: 'pending' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'S', status: 'in_progress' }] });
+  x.emit({ type: 'item', id: 'turn-1', status: 'done' });
+  // turn-2 opens with a wholly rewritten plan that no longer contains S.
+  x.emit({ type: 'item', id: 'turn-2', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-2', todos: [{ text: 'T', status: 'pending' }] });
+  assert.equal(dEntry(x.item('turn-1'), 'S').status, 'superseded',
+    "turn-1's fossil freezes even though turn-2 is the active card");
+});
+
+test('a superseded step that reappears and completes lands completed, not stuck', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'pending' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'in_progress' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'X', status: 'in_progress' }] }); // drops B
+  assert.equal(dEntry(x.item('turn-1'), 'B').status, 'superseded', 'B fossilized');
+
+  // The agent restores B and it goes in_progress again → the fossil un-freezes.
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'B', status: 'in_progress' }, { text: 'X', status: 'in_progress' },
+  ] });
+  assert.equal(dEntry(x.item('turn-1'), 'B').status, 'in_progress', 'a restored step resumes witnessing');
+  assert.equal(dEntry(x.item('turn-1'), 'B').supersededAt, undefined, 'the frozen stamp is cleared on resume');
+
+  // …and then completes → completed, never stranded superseded.
+  x.emit({ type: 'todos', item: 'turn-1', todos: [
+    { text: 'B', status: 'completed' }, { text: 'X', status: 'in_progress' },
+  ] });
+  assert.equal(dEntry(x.item('turn-1'), 'B').status, 'completed', 'the restored step completes normally');
+  assert.ok(dEntry(x.item('turn-1'), 'B').doneAt, 'and carries a real completion time');
+});
+
+test('a fossil that reappears DIRECTLY as completed still counts (no in_progress step between)', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'pending' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'in_progress' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'X', status: 'in_progress' }] }); // drops B
+  assert.equal(dEntry(x.item('turn-1'), 'B').status, 'superseded');
+  // Directly reintroduced as completed (no in_progress snapshot in between).
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'completed' }] });
+  assert.equal(dEntry(x.item('turn-1'), 'B').status, 'completed', 'a restored-and-completed fossil is completed');
+});
+
+test('superseded folding is replay-pure: incremental reduce == fold at the end and mid-scrub', () => {
+  const events = [
+    { t: 1000, type: 'item', id: 'turn-1', status: 'doing' },
+    { t: 2000, type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'pending' }] },
+    { t: 3000, type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'in_progress' }] },
+    { t: 4000, type: 'todos', item: 'turn-1', todos: [{ text: 'C', status: 'in_progress' }] }, // drop B
+    { t: 5000, type: 'todos', item: 'turn-1', todos: [{ text: 'B', status: 'completed' }, { text: 'C', status: 'in_progress' }] },
+  ];
+  const norm = st => [...(st.items.get('turn-1').delta || new Map()).entries()]
+    .map(([k, v]) => [k, v.status, v.startedAt || 0, v.doneAt || 0, v.supersededAt || 0]).sort();
+
+  // Incremental reduce (the live path) equals a whole-tape fold (replay to end).
+  const incr = initialState();
+  for (const ev of events) reduce(incr, ev);
+  assert.deepEqual(norm(fold(events)), norm(incr), 'end-of-tape fold == incremental live reduce');
+
+  // Mid-scrub (t=4500, after the drop, before the restore): B reads superseded.
+  const mid = fold(events, 4500);
+  assert.equal(mid.items.get('turn-1').delta.get('B').status, 'superseded',
+    'scrubbed to the fossil window, B is superseded at that replay time');
+  assert.equal(mid.items.get('turn-1').delta.get('B').supersededAt, 4000, 'frozen at the drop, not "now"');
+});
+
+test('a plan that never drops a step gains no superseded entries (v1 behavior unchanged)', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'pending' }, { text: 'b', status: 'pending' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'in_progress' }, { text: 'b', status: 'pending' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'completed' }, { text: 'b', status: 'in_progress' }] });
+  x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'completed' }, { text: 'b', status: 'completed' }] });
+  const entries = delta(x.item('turn-1'));
+  assert.ok(entries.every(e => e.status !== 'superseded'), 'no step ever dropped → nothing superseded');
+  assert.ok(entries.every(e => e.supersededAt === undefined), 'no supersededAt is ever stamped');
+  assert.deepEqual(entries.map(e => [e.text, e.status]).sort(), [['a', 'completed'], ['b', 'completed']]);
 });
 
 // The live "now" line: a card surfaces the latest of its narration / commands so
