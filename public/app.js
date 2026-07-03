@@ -122,6 +122,8 @@ function connect(id) {
   sessionId = id;
   const lanesLink = $('#lanes-link');
   if (lanesLink) lanesLink.href = '/lanes?session=' + encodeURIComponent(id);
+  const graphLink = $('#graph-link');
+  if (graphLink) graphLink.href = '/graph?session=' + encodeURIComponent(id);
   log.length = 0;
   state = initialState();
   cursor = 0;

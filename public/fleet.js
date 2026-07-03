@@ -95,13 +95,15 @@ function makeRow(r) {
     '<div class="fr-prs"></div>' +
     '<div class="fr-cost"></div>' +
     '<div class="fr-age"></div>' +
+    '<a class="fr-graph" title="open the work-structure graph for this session">graph</a>' +
     '<a class="fr-report" title="open the shift report for this session">report</a>';
-  // The whole row is a link to that session on the board; the report link is the
-  // one exception (it opens the debrief), so it stops the row's own navigation.
+  // The whole row is a link to that session on the board; the graph + report links
+  // are the exceptions (they open other views), so they stop the row's navigation.
   el.addEventListener('click', () => {
     location.href = '/?session=' + encodeURIComponent(el.dataset.id);
   });
   el.querySelector('.fr-report').addEventListener('click', e => e.stopPropagation());
+  el.querySelector('.fr-graph').addEventListener('click', e => e.stopPropagation());
   el._refs = {
     dot: el.querySelector('.fr-dot'),
     name: el.querySelector('.fr-name'),
@@ -111,6 +113,7 @@ function makeRow(r) {
     prs: el.querySelector('.fr-prs'),
     cost: el.querySelector('.fr-cost'),
     age: el.querySelector('.fr-age'),
+    graph: el.querySelector('.fr-graph'),
     report: el.querySelector('.fr-report'),
   };
   return el;
@@ -165,6 +168,7 @@ function updateRow(el, r, now) {
   R.cost.textContent = costText(r.cost);
   R.age.textContent = r.lastEventAt ? ageText(now - r.lastEventAt) : '';
   R.age.title = r.span ? `ran ${ageText(r.span)}` : '';
+  R.graph.href = '/graph?session=' + encodeURIComponent(r.id);
   R.report.href = '/report?session=' + encodeURIComponent(r.id);
 }
 
