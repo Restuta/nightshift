@@ -3,7 +3,7 @@
 // render path goes through renderAll(); animation only happens on forward,
 // incremental application of events, never on rebuilds (scrub/refresh).
 
-import { initialState, reduce, fold, activeItemId, hotFiles, prList, liveness, STATUSES } from './reducer.js';
+import { initialState, reduce, fold, activeItemId, hotFiles, prList, liveness, sessionPausedAt, STATUSES } from './reducer.js';
 import { initSessionPicker } from './session-picker.js';
 import { turnLabel } from './turn-id.js';
 
@@ -527,6 +527,13 @@ const pinnedCols = new Set();   // empty columns the user clicked open (session-
 // (so a stalled card is visible at a glance).
 function cardTiming(el) {
   if (el._status === 'done') return el._activeMs > 0 ? `took ${ageText(el._activeMs)}` : '';
+  // Paused (Fix A): the session went truly idle with this card still in `doing`.
+  // The work timer must NOT advance — nothing is running — so the header reads
+  // "paused Xm" (idle-age = time since the session went quiet), not a ticking clock.
+  if (el._paused) {
+    const idle = el._pausedAt != null ? Math.max(0, vtNow() - el._pausedAt) : 0;
+    return `<span class="paused">paused ${ageText(idle)}</span>`;
+  }
   // The in-flight gap accrues to the active card ONLY while a recorder is fresh
   // and keyed on PRODUCER activity (lastProducerAt), never any event — so a dead
   // recorder's card freezes at its real worked time instead of ticking phantom
@@ -641,6 +648,17 @@ function updateCard(el, it, animate, activeId) {
   el._activeLive = it.id === activeId && state.session.phase === 'working';
   el._touchedAt = it.touchedAt;
   el._status = it.status;
+  // Paused / abandoned classification (computed once, reused below). Abandoned
+  // (walked away — a session `end`, or a doing card untouched 6h) is a STRONGER
+  // state and wins; attention cards flare (phase 'attention') and are never paused.
+  // PAUSED = the session went TRULY idle (recorded phase 'idle', not the stale
+  // inference) with this card still `doing`: unfinished but nothing running.
+  const ABANDON_TTL = 6 * 3600e3;
+  const staleDoing = it.status === 'doing' && (vtNow() - (it.touchedAt || vtNow())) > ABANDON_TTL;
+  const abandoned = it.abandoned && it.status === 'doing';
+  const paused = it.status === 'doing' && state.session.phase === 'idle' && !abandoned && !staleDoing;
+  el._paused = paused;
+  el._pausedAt = paused ? sessionPausedAt(state) : null;
   R.age.innerHTML = cardTiming(el);
 
   const hasDiff = !!(it.add || it.del);
@@ -682,11 +700,20 @@ function updateCard(el, it, animate, activeId) {
     const li = t => {
       const now = t.status === 'in_progress';
       const superseded = t.status === 'superseded';
-      const cls = t.status === 'completed' ? 'done' : superseded ? 'superseded' : now ? 'now' : 'unfinished';
-      const tm = stepTime(t, now);
+      // A running step on a PAUSED card is stilled: keep it in_progress but swap the
+      // spinner for a static pause glyph (the `paused` class), freeze its timer at
+      // the idle moment, and tag it "· paused" — nothing is actually advancing.
+      const stepPaused = now && paused;
+      const cls = t.status === 'completed' ? 'done' : superseded ? 'superseded'
+        : now ? (stepPaused ? 'now paused' : 'now') : 'unfinished';
+      const tm = stepPaused
+        ? (t.startedAt && el._pausedAt != null ? ageText(Math.max(0, el._pausedAt - t.startedAt)) : '')
+        : stepTime(t, now);
       // A superseded step (the plan dropped it mid-flight) reads as history, not a
-      // live claim: a faint "· superseded" tag, never a ticking timer.
-      const tag = superseded ? '<span class="suptag">· superseded</span>' : '';
+      // live claim: a faint "· superseded" tag, never a ticking timer. A paused
+      // running step reads as stilled: a faint "· paused" tag, frozen timer.
+      const tag = superseded ? '<span class="suptag">· superseded</span>'
+        : stepPaused ? '<span class="suptag">· paused</span>' : '';
       return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}${tag}</li>`;
     };
     R.tlist.innerHTML =
@@ -715,10 +742,8 @@ function updateCard(el, it, animate, activeId) {
   // Abandoned: a card still in `doing` at a session `end` (reducer-set, definite)
   // OR — for a tape that just STOPS with no end — a doing card untouched for 6h
   // (display-only inference, state is never mutated). Both dim the card and show a
-  // chip; the "?" distinguishes the inference from the recorded fact.
-  const ABANDON_TTL = 6 * 3600e3;
-  const staleDoing = it.status === 'doing' && (vtNow() - (it.touchedAt || vtNow())) > ABANDON_TTL;
-  const abandoned = it.abandoned && it.status === 'doing';
+  // chip; the "?" distinguishes the inference from the recorded fact. (Classified
+  // once, up top, alongside `paused`.)
   if (abandoned || staleDoing) {
     R.abFlag.hidden = false;
     R.abFlag.textContent = abandoned ? 'abandoned' : 'abandoned?';
@@ -727,6 +752,7 @@ function updateCard(el, it, animate, activeId) {
     R.abFlag.hidden = true;
   }
   el.classList.toggle('is-abandoned', abandoned || staleDoing);
+  el.classList.toggle('is-paused', paused);
 
   el.classList.toggle('is-done', it.status === 'done');
   el.classList.toggle('is-active', it.id === activeId);
