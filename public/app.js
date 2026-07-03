@@ -541,8 +541,13 @@ function cardTiming(el) {
 }
 
 // Per-plan-step timing: a done step shows how long it took; the running step
-// shows how long it's been in progress.
+// shows how long it's been in progress; a superseded step shows its FROZEN run
+// time ("ran 39m") — the plan moved on, so it never ticks.
 function stepTime(t, isNow) {
+  if (t.status === 'superseded') {
+    const d = t.supersededAt && t.startedAt ? Math.max(0, t.supersededAt - t.startedAt) : 0;
+    return d >= 1000 ? `ran ${ageText(d)}` : '';
+  }
   if (t.done) {
     // Prefer the producer's real duration; fall back to the snapshot-delta estimate.
     const d = t.elapsedMs != null
@@ -657,11 +662,12 @@ function updateCard(el, it, animate, activeId) {
   if (hasDelta) {
     // A card's delta is a changelog of what this turn advanced — ordered by when
     // each step reached its CURRENT state: completed steps by completion time,
+    // superseded (dropped-mid-flight) steps by when the plan moved past them, and
     // running steps last (they haven't arrived anywhere yet — their time is "now"),
     // so the live edge always sits at the bottom, above the now-line. Pure start-
     // time chronology buried a long-running umbrella step mid-list whenever later
     // steps finished after it started.
-    const when = t => t.doneAt || Infinity;
+    const when = t => t.doneAt || t.supersededAt || Infinity;
     const began = t => t.startedAt || t.firstSeenAt || 0;
     steps.sort((x, y) => (when(x) - when(y)) || (began(x) - began(y)));
     el._todos = steps;
@@ -675,9 +681,13 @@ function updateCard(el, it, animate, activeId) {
     const shown = hidden ? steps.slice(hidden) : steps;
     const li = t => {
       const now = t.status === 'in_progress';
-      const cls = t.status === 'completed' ? 'done' : now ? 'now' : 'unfinished';
+      const superseded = t.status === 'superseded';
+      const cls = t.status === 'completed' ? 'done' : superseded ? 'superseded' : now ? 'now' : 'unfinished';
       const tm = stepTime(t, now);
-      return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}</li>`;
+      // A superseded step (the plan dropped it mid-flight) reads as history, not a
+      // live claim: a faint "· superseded" tag, never a ticking timer.
+      const tag = superseded ? '<span class="suptag">· superseded</span>' : '';
+      return `<li class="${cls}">${esc(t.text)}${tm ? `<span class="steptime">${tm}</span>` : ''}${tag}</li>`;
     };
     R.tlist.innerHTML =
       (hidden ? `<li class="more">+${hidden} earlier step${hidden > 1 ? 's' : ''}</li>` : '') +
