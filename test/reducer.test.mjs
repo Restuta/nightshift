@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initialState, reduce, fold } from '../public/reducer.js';
+import { initialState, reduce, fold, sessionPausedAt } from '../public/reducer.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -323,4 +323,31 @@ test('a pr event with no size leaves state.prs without add/del (old-tape / no ch
   x.emit({ type: 'pr', number: 8, repo: 'o/r', state: 'open', source: 'poll-github', v: 2 });
   assert.equal(x.state.prs.get('o/r#8').add, undefined, 'no size event → no add (chip omitted)');
   assert.equal(x.state.prs.get('o/r#8').del, undefined, 'no size event → no del');
+});
+
+// sessionPausedAt — the pure display helper behind the paused board card (Fix A)
+// and the paused /graph step node (Fix B). Non-null ONLY on the recorded idle
+// phase, frozen to the last producer moment; a working / attention / stale-but-
+// working session returns null (nothing is paused).
+test('sessionPausedAt returns the quiet moment on recorded idle, null otherwise', () => {
+  const x = stream();
+  x.emit({ type: 'session', phase: 'start' });
+  x.emit({ type: 'item', id: 'wi', title: 'work', status: 'doing' });
+  const workAt = x.emit({ type: 'edit', path: 'a.js' }) && x.at();
+  assert.equal(sessionPausedAt(x.state), null, 'a working session is not paused');
+
+  // The turn ends: the recorder emits a real idle phase.
+  const idleAt = x.emit({ type: 'session', phase: 'idle' }) && x.at();
+  assert.equal(sessionPausedAt(x.state), idleAt, 'idle → frozen at the last producer event (the idle mark)');
+
+  // A reconcile append (poll-github) after idle must NOT move the frozen moment —
+  // it isn't producer work, so the paused clock stays put (else it ticks phantom).
+  x.emit({ type: 'pr', number: 1, repo: 'o/r', state: 'open', source: 'poll-github', v: 2 });
+  assert.equal(sessionPausedAt(x.state), idleAt, 'a reconcile append does not advance the frozen moment');
+  assert.ok(idleAt > workAt);
+
+  // Any real activity wakes the session (awake) → back to working → not paused.
+  x.emit({ type: 'edit', path: 'b.js' });
+  assert.equal(x.state.session.phase, 'working');
+  assert.equal(sessionPausedAt(x.state), null, 'resumed work clears the paused state');
 });

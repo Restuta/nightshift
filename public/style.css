@@ -646,6 +646,28 @@ body.tape-collapsed .tape-resize { display: none; }
   100% { box-shadow: 0 0 0 0 rgba(210, 153, 34, 0); }
 }
 
+/* Paused (Fix A): a `doing` card whose session went TRULY idle (recorded phase
+   'idle') — the work is unfinished (it stays in "In progress") but nothing is
+   running. Honesty about motion, not relocation: dim the card slightly and STILL
+   every animation — the running-step spinner becomes a static pause glyph, the
+   now-line drops its pulse — while the header reads "paused Xm" (idle-age). Lighter
+   than done (.55 shipped) or abandoned (.72 walked away): this work will resume. */
+.card.is-paused { opacity: .85; }
+.card.is-paused .now-doing .nd-pulse { animation: none; background: var(--faint); opacity: .5; }
+.age .paused { color: var(--faint); }
+.todo-list li.now.paused { color: var(--dim); }
+/* static pause glyph (two bars) in place of the spinning dashed ring */
+.todo-list li.now.paused::before {
+  animation: none;
+  border: none;
+  border-radius: 1px;
+  left: 1px; top: 6px;
+  width: 2.4px; height: 9px;
+  background: var(--faint);
+  box-shadow: 4px 0 0 var(--faint);
+}
+.todo-list li.now.paused .steptime { color: var(--faint); }
+
 .add-card { padding: 0 8px 10px; }
 
 .add-card input {
@@ -1709,6 +1731,8 @@ body.fleet-page { overflow: auto; }
 .gedge.e-item { stroke: #38507e; stroke-width: 1.6; }
 .gedge.e-base { stroke: var(--merged); stroke-width: 1.6; stroke-dasharray: 1 0; opacity: .7; }
 .gedge.e-plan { stroke: #2d6f52; stroke-width: 1.4; opacity: .6; }
+/* plan → running step: a dashed leader from the cluster to its live moving part. */
+.gedge.e-step { stroke: #6b5320; stroke-width: 1.4; stroke-dasharray: 4 4; opacity: .6; }
 .gedge.e-session { stroke: var(--line-soft); stroke-width: 1.1; stroke-dasharray: 3 4; opacity: .5; }
 .gedge.pulse { animation: edgePulse 1.3s ease-out; }
 @keyframes edgePulse {
@@ -1792,6 +1816,26 @@ body.fleet-page { overflow: auto; }
 .gnode-collapsed:hover .gnode-box { stroke: #33405f; }
 .gn-stack { stroke: var(--faint); opacity: .6; }
 .gn-collapsed-txt { font-family: var(--mono); font-size: 11px; fill: var(--dim); text-anchor: middle; }
+
+/* running plan-step node (Fix B) — the live "moving part" the /graph was missing.
+   A dashed spinner ring = still running; a truly-idle session freezes it paused
+   (static pause glyph, neutral tint, frozen duration), the same honesty as the
+   board's paused card. Compact + capped so a busy plan can't wall the column. */
+.gnode-step .gnode-box { fill: #14100a; stroke: #3a2f14; }
+.gnode-step.paused .gnode-box { fill: var(--card); stroke: var(--line); }
+.gn-step-ring {
+  stroke: var(--yellow); stroke-width: 1.7; stroke-dasharray: 3.4 3.2;
+  transform-box: fill-box; transform-origin: center;
+  animation: gstepspin 6s linear infinite;
+}
+@keyframes gstepspin { to { transform: rotate(360deg); } }
+.gn-step-pause { fill: var(--faint); }
+.gn-step-text { font-family: var(--sans); font-size: 11.5px; fill: var(--ink); }
+.gn-step-text.paused { fill: var(--dim); }
+.gn-step-dur { font-family: var(--mono); font-size: 10px; fill: var(--yellow); }
+.gn-step-dur.paused { fill: var(--faint); }
+.gnode-step-more .gnode-box { fill: transparent; stroke: var(--line); stroke-dasharray: 4 4; }
+.gnode-step-more:hover .gnode-box { stroke: #33405f; }
 
 .graph-tooltip {
   position: absolute;

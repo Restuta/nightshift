@@ -616,3 +616,16 @@ export function liveness(state, now) {
   if (at != null && now - at > ttl) return { state: 'stale', dataEndsAt: at };
   return { state: 'live' };
 }
+
+// Display helper (pure): the moment a session went QUIET, or null when it isn't
+// idle. Keyed on the *recorded* phase 'idle' — the true idle the recorder emitted,
+// NOT the display-side stale inference (liveness → 'stale') — so a paused card/step
+// freezes only when the agent genuinely stopped its turn, never merely because a
+// hook recorder went silent mid-work. The frozen "now": the last producer event
+// (the same clock the board's "quiet Xm" uses), so a paused step's timer stops at
+// the value it held at idle instead of ticking phantom motion. Used by the board
+// (paused doing card) and /graph (paused step node) so both tell the same truth.
+export function sessionPausedAt(state) {
+  if (state.session.phase !== 'idle') return null;
+  return state.session.lastProducerAt ?? state.session.lastAt ?? null;
+}
