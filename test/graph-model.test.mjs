@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildGraphModel, COLUMNS, MAX_PER_COL, TURN_RE } from '../public/graph-model.js';
+import { buildGraphModel, COLUMNS, MAX_PER_COL, STEP_CAP, TURN_RE } from '../public/graph-model.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAPES = path.join(here, 'tapes');
@@ -285,6 +285,78 @@ test('activity derivation is pure/deterministic (no Date.now, order-independent)
   const b = activityOf(buildGraphModel(evs.slice().reverse()));
   assert.deepEqual(a, b, 'same events (any order) → identical activity block');
   assert.equal(a.now.t, 3, 'the now timestamp is the say event t, not wall-clock');
+});
+
+// --- running plan-step nodes (Fix B) ----------------------------------------
+test('an in_progress plan step yields an ACTIVE step node linked to the plan cluster', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start', title: 's' },
+    { t: 2, type: 'todos', todos: [
+      { text: 'wire the recorder', status: 'completed' },
+      { text: 'Update E-B4 tracker rows', status: 'in_progress' },
+      { text: 'ship it', status: 'pending' },
+    ] },
+  ]);
+  const step = m.nodes.find(n => n.kind === 'step');
+  assert.ok(step, 'the running step becomes a node');
+  assert.equal(step.text, 'Update E-B4 tracker rows');
+  assert.equal(step.col, 1, 'the step node sits in ACTIVE');
+  assert.equal(step.paused, false, 'a working session is not paused');
+  assert.equal(step.startedAt, 2, 'startedAt is the moment it went in_progress');
+  assert.equal(step.lastTouched, 2, 'the deep-link targets the step start');
+  assert.ok(hasEdge(m, 'plan', step.id, 'plan-step'), 'a dashed edge links back to the plan cluster');
+  // exactly one running-step node — the completed / pending steps are not nodes
+  assert.equal(m.nodes.filter(n => n.kind === 'step').length, 1);
+});
+
+test('a completed or vanished step drops its node (no fossils)', () => {
+  // in_progress → completed: the node is gone next fold
+  const done = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'todos', todos: [{ text: 'a', status: 'in_progress' }] },
+    { t: 3, type: 'todos', todos: [{ text: 'a', status: 'completed' }] },
+  ]);
+  assert.equal(done.nodes.filter(n => n.kind === 'step').length, 0, 'a finished step has no step node');
+
+  // dropped from the plan entirely: also gone (the superseded sweep handles the
+  // card-side fossil; the node just isn't sourced)
+  const gone = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'todos', todos: [{ text: 'a', status: 'in_progress' }] },
+    { t: 3, type: 'todos', todos: [{ text: 'b', status: 'pending' }] },
+  ]);
+  assert.equal(gone.nodes.filter(n => n.kind === 'step').length, 0, 'a vanished step has no step node');
+});
+
+test('idle phase renders the step node paused with a frozen duration', () => {
+  const m = buildGraphModel([
+    { t: 1000, type: 'session', phase: 'start' },
+    { t: 2000, type: 'todos', todos: [{ text: 'long step', status: 'in_progress' }] },
+    { t: 5000, type: 'session', phase: 'idle' },
+  ]);
+  const step = m.nodes.find(n => n.kind === 'step');
+  assert.ok(step, 'the step node persists through idle');
+  assert.equal(step.paused, true, 'idle marks it paused');
+  assert.equal(step.startedAt, 2000);
+  assert.equal(step.pausedAt, 5000, 'the frozen "now" is when the session went idle');
+  // frozen elapsed = pausedAt − startedAt = 3s, never a live tick
+  assert.equal(step.pausedAt - step.startedAt, 3000);
+});
+
+test('more than STEP_CAP in_progress steps: the freshest cap render + a "…N more" node', () => {
+  const todos = [];
+  for (let i = 1; i <= STEP_CAP + 2; i++) todos.push({ text: 'step ' + i, status: 'in_progress' });
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'todos', todos },
+  ]);
+  const steps = m.nodes.filter(n => n.kind === 'step');
+  assert.equal(steps.length, STEP_CAP, 'capped at STEP_CAP step nodes');
+  const more = m.nodes.find(n => n.kind === 'step-more');
+  assert.ok(more, 'the overflow folds into one step-more node');
+  assert.equal(more.count, 2, 'it hides exactly the overflow');
+  assert.equal(more.col, 1, 'the overflow node lives in ACTIVE too');
+  for (const s of [...steps, more]) assert.ok(hasEdge(m, 'plan', s.id, 'plan-step'), 'all link to the plan');
 });
 
 // --- empty / degenerate -----------------------------------------------------

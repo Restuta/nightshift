@@ -15,7 +15,7 @@
 // honors retracts (a recording bug is not history), so the graph agrees with the
 // board at every replay time for free.
 
-import { fold } from './reducer.js';
+import { fold, sessionPausedAt } from './reducer.js';
 import { TURN_RE, turnLabel } from './turn-id.js';
 
 // A work item whose id is a turn-card id (legacy `turn-<n>` OR namespaced
@@ -135,6 +135,49 @@ function planNode(state) {
   };
 }
 
+// Past this many concurrent in-progress steps, the freshest STEP_CAP get their own
+// node and the rest fold into one "…N more" node — a runaway plan can't wall the
+// ACTIVE column.
+export const STEP_CAP = 3;
+
+// The CURRENT plan's in-progress steps, as compact ACTIVE-column nodes — the live
+// "moving part" the /graph was missing. Turn cards are (correctly) excluded, so
+// when the only in-flight work is a running plan step, ACTIVE/REVIEW sit empty and
+// progress reads as nothing; a step node gives that motion a home. Freshest first
+// (by startedAt), capped at STEP_CAP + a fold node. A step that leaves in_progress
+// (completed, or dropped from the plan) simply isn't in this list next fold — no
+// fossil node. When the session is truly idle (recorded phase, via sessionPausedAt)
+// the node is paused-tinted with a FROZEN duration, same language as the board's
+// paused card. Pure over the fold: `pausedAt` is a recorded timestamp, the view
+// does the (display-side) Date.now() ticking for the live case.
+function stepNodes(state) {
+  const idleAt = sessionPausedAt(state);   // non-null only when phase === 'idle'
+  const paused = idleAt != null;
+  const running = (state.todos || [])
+    .filter(td => (td.status || (td.done ? 'completed' : 'pending')) === 'in_progress')
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  const shown = running.slice(0, STEP_CAP);
+  const out = shown.map(td => ({
+    id: 'step:' + td.text,
+    kind: 'step',
+    text: td.text,
+    startedAt: td.startedAt || td.firstSeenAt || 0,
+    paused,
+    pausedAt: idleAt,   // frozen "now" for the duration while paused (null when live)
+    lastTouched: td.startedAt || td.firstSeenAt || 0,
+  }));
+  if (running.length > shown.length) {
+    out.push({
+      id: 'step:more',
+      kind: 'step-more',
+      count: running.length - shown.length,
+      paused,
+      lastTouched: shown.length ? shown[shown.length - 1].lastTouched : 0,
+    });
+  }
+  return out;
+}
+
 // The session's LIVE activity strip — the current prompt, the agent's latest
 // narration ("now" line), and the attention state, folded straight off the
 // reducer. This is the ONE place a turn-card's title is welcome in the graph: a
@@ -232,12 +275,16 @@ function buildEdges(nodes) {
   }
 
   // plan step → intent item (the step advanced under that item — the reducer's
-  // delta already witnessed it). One edge per (plan, item) pair.
+  // delta already witnessed it). One edge per (plan, item) pair. And plan → running
+  // step node (the live moving part; a dashed leader back to its source cluster).
   const plan = byId.get('plan');
   if (plan) {
     for (const n of nodes) {
       if (n.kind === 'intent' && n.deltaSteps.length) {
         edges.push({ from: 'plan', to: n.id, kind: 'plan-item' });
+      }
+      if (n.kind === 'step' || n.kind === 'step-more') {
+        edges.push({ from: 'plan', to: n.id, kind: 'plan-step' });
       }
     }
   }
@@ -335,18 +382,22 @@ export function buildGraphModel(events) {
   const plan = planNode(state);
   const intents = intentNodes(state);
   const prs = prNodes(state);
+  const steps = stepNodes(state);
 
   // Column assignment. PRs first (so an intent item can follow its PR's column),
-  // then plan (always column 0) and intent items.
+  // then plan (always column 0) and intent items. Running plan steps always live in
+  // ACTIVE — that IS "in progress".
   const prCol = new Map(); // PR number → column key
   for (const n of prs) { const key = prColumn(n); n.col = COL_INDEX[key]; prCol.set(n.number, key); }
   if (plan) plan.col = COL_INDEX.plan;
   for (const n of intents) n.col = COL_INDEX[intentColumn(n, prCol)];
+  for (const n of steps) n.col = COL_INDEX.active;
 
   const placed = [];
   if (plan) placed.push(plan);
   for (const n of intents) placed.push(n);
   for (const n of prs) placed.push(n);
+  for (const n of steps) placed.push(n);
 
   // Edges first (over the full node set), so base chains resolve before collapse.
   assignChainDepth([...prs]);
@@ -366,10 +417,11 @@ export function buildGraphModel(events) {
     const col = columns[c];
     col.sort(byRecency);
     if (col.length <= MAX_PER_COL) continue;
-    // Keep failing-CI PRs and the plan cluster pinned; fill the rest by recency,
-    // fold the overflow into one "N more" node pinned to the column's bottom.
+    // Keep failing-CI PRs, the plan cluster, and the live step nodes pinned; fill
+    // the rest by recency, fold the overflow into one "N more" node pinned to the
+    // column's bottom.
     const pinned = [], rest = [];
-    for (const n of col) ((n.kind === 'pr' && n.ci === 'fail') || n.kind === 'plan' ? pinned : rest).push(n);
+    for (const n of col) ((n.kind === 'pr' && n.ci === 'fail') || n.kind === 'plan' || n.kind === 'step' || n.kind === 'step-more' ? pinned : rest).push(n);
     const keep = rest.slice(0, Math.max(0, MAX_PER_COL - pinned.length));
     const hidden = rest.slice(keep.length);
     if (hidden.length) {

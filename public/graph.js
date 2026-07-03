@@ -39,8 +39,13 @@ const DIM = {
   pr: { w: 218, h: 66 },
   collapsed: { w: 182, h: 48 },
   plan: { w: 250 }, // height computed from step count
+  step: { w: 214 },  // compact running-step node; height computed from wrapped text
+  'step-more': { w: 182, h: 42 },
 };
 const PLAN_HEAD = 30, PLAN_ROW = 18, PLAN_MAX_ROWS = 7, PLAN_PAD = 12;
+// Running-step node geometry: a glyph column on the left, up-to-2 wrapped text
+// lines, then a duration row.
+const STEP_TXT_X = 34, STEP_PAD_TOP = 14, STEP_LINE = 15, STEP_DUR_ROW = 15, STEP_PAD_BOT = 11;
 
 // A PR / intent node grows by one row when it carries diff-size data, so the
 // "+N −N" chip gets its own line without crowding the title/meta. These nodes are
@@ -209,6 +214,10 @@ function measureHeight(n) {
     const av = n._av = activityView(n); // cache so buildNode paints the measured size
     return av ? av.height : DIM.session.h;
   }
+  if (n.kind === 'step') {
+    const nLines = Math.max(1, wrapLines(n.text, DIM.step.w - (STEP_TXT_X + 8), SANS_SM, 2).length);
+    return STEP_PAD_TOP + nLines * STEP_LINE + STEP_DUR_ROW + STEP_PAD_BOT;
+  }
   // PR / intent nodes grow one row for the diff chip, but only when sized — an
   // absent-size node keeps its compact original height (no "+0 −0" gap).
   if ((n.kind === 'pr' || n.kind === 'intent') && hasSize(n)) return DIM[n.kind].h + DIFF_ROW;
@@ -263,6 +272,10 @@ function sigOf(n) {
     case 'pr': return `${n.prState}|${n.ci}|${n.add}|${n.del}|${n.lastTouched}`;
     case 'intent': return `${n.status}|${n.commits}|${n.edits}|${n.add}|${n.del}|${n.lastTouched}`;
     case 'plan': return `${n.total}|${n.counts.completed}|${n.counts.in_progress}|${n.lastTouched}`;
+    // A step's startedAt (identity) or paused flip re-signs the node so a newly
+    // running / just-paused step glows. A step leaving in_progress drops the node.
+    case 'step': return `${n.text}|${n.startedAt}|${n.paused}`;
+    case 'step-more': return `${n.count}|${n.paused}`;
     case 'session': {
       // Include the live-activity fields so a new say/tool (now.t), a phase flip,
       // or a changed prompt/attention re-signs the root — otherwise a fresh
@@ -295,7 +308,7 @@ function edgePath(a, b) {
 }
 
 // --------------------------------------------------------------- paint
-const EDGE_CLASS = { 'item-pr': 'e-item', 'pr-base': 'e-base', 'plan-item': 'e-plan', session: 'e-session' };
+const EDGE_CLASS = { 'item-pr': 'e-item', 'pr-base': 'e-base', 'plan-item': 'e-plan', 'plan-step': 'e-step', session: 'e-session' };
 
 function paintColumns() {
   gCols.textContent = '';
@@ -398,6 +411,33 @@ function buildNode(n) {
     g.setAttribute('class', 'gnode gnode-collapsed');
     g.appendChild(el('path', { d: `M6 8 h${n.w - 12} M4 14 h${n.w - 8} M2 20 h${n.w - 4}`, class: 'gn-stack', fill: 'none' }));
     g.appendChild(text(n.w / 2, n.h / 2 + 8, n.label, 'gn-collapsed-txt'));
+  } else if (n.kind === 'step') {
+    if (n.paused) g.classList.add('paused');
+    const gy = 19;
+    g.appendChild(el('rect', { x: 0, y: 0, width: 4, height: n.h, rx: 2, class: 'gnode-accent', fill: n.paused ? '#5d6781' : '#d29922' }));
+    if (n.paused) {
+      // Static pause glyph (two bars) — the spinner is a lie while the session is
+      // idle; nothing is advancing.
+      g.appendChild(el('rect', { x: 14, y: gy - 5, width: 2.6, height: 10, rx: 1, class: 'gn-step-pause' }));
+      g.appendChild(el('rect', { x: 19.4, y: gy - 5, width: 2.6, height: 10, rx: 1, class: 'gn-step-pause' }));
+    } else {
+      // Dashed spinner ring — the live "still running" motion (motion = liveness).
+      g.appendChild(el('circle', { cx: 18, cy: gy, r: 6, class: 'gn-step-ring', fill: 'none' }));
+    }
+    const lines = wrapLines(n.text, n.w - (STEP_TXT_X + 8), SANS_SM, 2);
+    let ty = STEP_PAD_TOP + 2;
+    for (const line of lines) { g.appendChild(text(STEP_TXT_X, ty, line, 'gn-step-text' + (n.paused ? ' paused' : ''))); ty += STEP_LINE; }
+    // Running duration from startedAt; frozen at the idle moment when paused.
+    const ms = n.paused
+      ? (n.pausedAt != null && n.startedAt ? Math.max(0, n.pausedAt - n.startedAt) : null)
+      : (n.startedAt ? Math.max(0, Date.now() - n.startedAt) : null);
+    if (ms != null) {
+      const label = n.paused ? `paused · ${ageText(ms)}` : ageText(ms);
+      g.appendChild(text(STEP_TXT_X, n.h - STEP_PAD_BOT, label, 'gn-step-dur' + (n.paused ? ' paused' : '')));
+    }
+  } else if (n.kind === 'step-more') {
+    g.setAttribute('class', 'gnode gnode-step-more' + (n.paused ? ' paused' : ''));
+    g.appendChild(text(n.w / 2, n.h / 2 + 4, `…${n.count} more running`, 'gn-collapsed-txt'));
   }
   return g;
 }
@@ -598,9 +638,10 @@ function onNodeClick(n, e) {
   // PR external-link affordance opens the gh URL, not replay.
   const ext = e.target.closest('.gn-ext');
   if (ext && ext.dataset.url) { window.open(ext.dataset.url, '_blank', 'noopener'); return; }
-  if (n.kind === 'collapsed') return; // nothing to deep-link into (aggregate)
+  if (n.kind === 'collapsed' || n.kind === 'step-more') return; // aggregate — nothing to deep-link into
   const q = new URLSearchParams();
   if (sessionId) q.set('session', sessionId);
+  // A step node deep-links to when the step STARTED running (n.lastTouched = startedAt).
   if (n.lastTouched) q.set('t', String(Math.round(n.lastTouched)));
   location.href = '/?' + q.toString();
 }
@@ -635,6 +676,14 @@ function tooltipHtml(n) {
     return head(turnLabel(n.itemId)) + body(`${n.title}\n${n.status}${n.abandoned ? ' · abandoned?' : ''}\n${n.commits} commits · ${n.edits} edits · +${n.add.toLocaleString()} / −${n.del.toLocaleString()} lines`);
   }
   if (n.kind === 'plan') return head('Plan') + body(`${n.counts.completed} done · ${n.counts.in_progress} in progress · ${n.counts.pending} pending`);
+  if (n.kind === 'step') {
+    const ms = n.paused
+      ? (n.pausedAt != null && n.startedAt ? Math.max(0, n.pausedAt - n.startedAt) : null)
+      : (n.startedAt ? Math.max(0, Date.now() - n.startedAt) : null);
+    const when = ms != null ? (n.paused ? `paused · ${ageText(ms)}` : `running ${ageText(ms)}`) : (n.paused ? 'paused' : 'running');
+    return head(n.paused ? 'paused step' : 'running step') + body(`${n.text}\n${when}`);
+  }
+  if (n.kind === 'step-more') return head(`${n.count} more running`) + body('additional in-progress plan steps, folded to keep the graph legible');
   if (n.kind === 'session') return head(n.title) + body(`${n.agent || 'agent'}\n${costText(n.cost)} · ${n.commits} commits\nsince ${n.startedAt ? hhmm(n.startedAt) : '—'}`);
   if (n.kind === 'collapsed') return head(n.label) + body('the oldest PRs in this column, folded to keep the graph legible');
   return head(n.kind);
