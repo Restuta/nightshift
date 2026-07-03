@@ -1,0 +1,376 @@
+// Pure model for the /graph view — the work-structure node canvas. Zero deps, no
+// DOM, no fetches: a deterministic function of the event array, exactly like the
+// reducer and lanes-model. Extracted so the load-bearing derivations (node
+// sourcing, edge derivation, column assignment, deterministic layer ordering) are
+// unit-testable on golden tapes (see test/graph-model.test.mjs).
+//
+// The design decision (see the /graph task): nodes are the REAL entities in the
+// tape, NOT the turn-cards. Turn-cards are chat turns with prompt-fragment titles
+// ("s", "hold on…") — a graph over them would just repeat the kanban's collapse.
+// So we FOLD the tape with the pure reducer (which already attributes commits,
+// edits, plan deltas, PRs, and CI to the right entity) and read nodes off the
+// resulting state: PRs, plan steps, explicitly-declared work items, the session.
+//
+// This is a SECOND pure pass that does NOT modify the reducer. fold() already
+// honors retracts (a recording bug is not history), so the graph agrees with the
+// board at every replay time for free.
+
+import { fold } from './reducer.js';
+
+// A work item whose id is `turn-<n>` is a synthesized chat turn, never a node.
+export const TURN_RE = /^turn-\d+$/;
+
+// Left→right pipeline: backlog → in-progress → shipped. The session node lives in
+// a root gutter to the left of column 0.
+export const COLUMNS = [
+  { key: 'plan', label: 'Plan' },
+  { key: 'active', label: 'Active' },
+  { key: 'review', label: 'Review' },
+  { key: 'landed', label: 'Landed' },
+];
+const COL_INDEX = { plan: 0, active: 1, review: 2, landed: 3 };
+
+// Past this many nodes in one column, the oldest collapse into a single "N more"
+// stack node so a 59-PR session stays legible (grade-v7-n154). Failing-CI PRs are
+// always pinned visible — they're the loud ones you must not scroll past.
+export const MAX_PER_COL = 12;
+
+// owner/repo for a github PR URL, or null — so a v1 pr event (no `repo`, but a URL)
+// still renders `repo#number`.
+function repoFromUrl(url) {
+  const m = (url || '').match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/);
+  return m ? m[1] : null;
+}
+
+// The freshest timestamp we can attribute to a PR — used for recency ordering and
+// the replay deep link.
+function prTouchedAt(pr) {
+  return pr.t != null ? pr.t : pr.mergedAt != null ? pr.mergedAt : pr.openedAt || 0;
+}
+
+// --------------------------------------------------------------- node sources
+
+// PR nodes — the strongest nodes. status ring (open/merged/closed), CI glyph,
+// repo#number + title, age. Keyed by the reducer's own repo#number key.
+function prNodes(state) {
+  const out = [];
+  for (const [key, pr] of state.prs) {
+    const repo = pr.repo || repoFromUrl(pr.url);
+    out.push({
+      id: 'pr:' + key,
+      kind: 'pr',
+      key,
+      number: pr.number,
+      repo,
+      title: pr.title || null,
+      prState: pr.state || 'open',
+      ci: pr.ci || null,
+      url: pr.url || null,
+      base: pr.base != null ? pr.base : null,
+      openedAt: pr.openedAt || null,
+      mergedAt: pr.mergedAt || null,
+      lastTouched: prTouchedAt(pr),
+      chainDepth: 0, // filled once base edges are resolved
+    });
+  }
+  return out;
+}
+
+// Intent nodes — explicitly-registered work items (id NOT turn-<n>): real declared
+// work, e.g. via tools/emit.js. Carry status + commit/edit stats and the plan
+// steps that advanced under them (the reducer's delta Map witnesses this).
+function intentNodes(state) {
+  const out = [];
+  for (const it of state.items.values()) {
+    if (TURN_RE.test(it.id)) continue; // a turn-card is never a node
+    out.push({
+      id: 'intent:' + it.id,
+      kind: 'intent',
+      itemId: it.id,
+      title: it.title || it.id,
+      status: it.status,
+      abandoned: !!it.abandoned,
+      commits: it.commits || 0,
+      edits: it.edits || 0,
+      add: it.add || 0,
+      del: it.del || 0,
+      prNumber: it.pr && it.pr.number != null ? it.pr.number : null,
+      prRepo: it.pr && it.pr.repo ? it.pr.repo : null,
+      deltaSteps: it.delta ? [...it.delta.keys()] : [],
+      lastTouched: it.touchedAt || it.createdAt || 0,
+    });
+  }
+  return out;
+}
+
+// The plan cluster — the whole session plan as ONE grouped node (compact task
+// rows inside it), not one node per step, so it reads as a single column/cluster
+// and never scatters 30 tiny nodes. null when the session has no plan.
+function planNode(state) {
+  const steps = state.todos || [];
+  if (!steps.length) return null;
+  let last = 0;
+  const counts = { pending: 0, in_progress: 0, completed: 0 };
+  const rows = steps.map(td => {
+    const status = td.status || (td.done ? 'completed' : 'pending');
+    if (counts[status] != null) counts[status]++;
+    const t = td.doneAt || td.startedAt || td.firstSeenAt || 0;
+    if (t > last) last = t;
+    return { text: td.text, status };
+  });
+  return {
+    id: 'plan',
+    kind: 'plan',
+    steps: rows,
+    counts,
+    total: rows.length,
+    lastTouched: last,
+  };
+}
+
+// The session root — one node per session (agent badge, cost, span). Always
+// present so an empty tape still shows the shift.
+function sessionNode(state) {
+  const s = state.session;
+  return {
+    id: 'session',
+    kind: 'session',
+    title: s.title || 'session',
+    agent: s.agent || null,
+    cost: state.totals.cost || 0,
+    commits: state.totals.commits || 0,
+    add: state.totals.add || 0,
+    del: state.totals.del || 0,
+    startedAt: s.startedAt || null,
+    lastTouched: s.lastAt || s.startedAt || 0,
+    phase: s.phase || null,
+  };
+}
+
+// --------------------------------------------------------------- columns
+
+// Which column a PR node belongs to. Deterministic, pure over the node's fields.
+function prColumn(node) {
+  if (node.prState === 'merged' || node.prState === 'closed') return 'landed';
+  if (node.prState === 'open' && node.ci === 'pending') return 'active';
+  return 'review';
+}
+
+// Which column an intent item belongs to. An item with an open PR (the reducer
+// promotes it to status 'pr') sits WITH its PR's column, so the two read together
+// and the item→PR edge stays short; otherwise it's placed by its own status.
+// `prCol` maps a PR number → its column key when the item's PR is known.
+function intentColumn(node, prCol) {
+  if (node.status === 'done') return 'landed';
+  if (node.status === 'pr' && node.prNumber != null && prCol.has(node.prNumber)) return prCol.get(node.prNumber);
+  if (node.status === 'pr') return 'review';
+  if (node.status === 'doing') return 'active';
+  return 'plan'; // inbox / backlog
+}
+
+// --------------------------------------------------------------- edges
+
+function buildEdges(nodes) {
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const prByNumber = new Map(); // number → node (first wins, deterministic order)
+  for (const n of nodes) if (n.kind === 'pr' && !prByNumber.has(n.number)) prByNumber.set(n.number, n);
+  const edges = [];
+
+  // intent item → its PR (matched by number, repo when both carry it).
+  for (const n of nodes) {
+    if (n.kind !== 'intent' || n.prNumber == null) continue;
+    const target = prByNumber.get(n.prNumber);
+    if (target && (!n.prRepo || !target.repo || n.prRepo === target.repo)) {
+      edges.push({ from: n.id, to: target.id, kind: 'item-pr' });
+    }
+  }
+
+  // PR → base PR (the stacked-chain edge) when the data carries a base number and
+  // that base is itself a known PR head in this session. Old tapes lack base →
+  // no edge, never inferred.
+  for (const n of nodes) {
+    if (n.kind !== 'pr' || n.base == null) continue;
+    const target = prByNumber.get(n.base);
+    if (target && target.id !== n.id) edges.push({ from: n.id, to: target.id, kind: 'pr-base' });
+  }
+
+  // plan step → intent item (the step advanced under that item — the reducer's
+  // delta already witnessed it). One edge per (plan, item) pair.
+  const plan = byId.get('plan');
+  if (plan) {
+    for (const n of nodes) {
+      if (n.kind === 'intent' && n.deltaSteps.length) {
+        edges.push({ from: 'plan', to: n.id, kind: 'plan-item' });
+      }
+    }
+  }
+
+  return edges;
+}
+
+// chainDepth: how many base-ancestors a PR has, so the view can offset stacked
+// PRs rightward and the chain reads left→right. Cycle-guarded, deterministic.
+function assignChainDepth(nodes) {
+  const prByNumber = new Map();
+  for (const n of nodes) if (n.kind === 'pr' && !prByNumber.has(n.number)) prByNumber.set(n.number, n);
+  const depth = (n, seen) => {
+    if (n.base == null) return 0;
+    const base = prByNumber.get(n.base);
+    if (!base || base === n || seen.has(base.id)) return 0;
+    seen.add(n.id);
+    return 1 + depth(base, seen);
+  };
+  for (const n of nodes) if (n.kind === 'pr') n.chainDepth = depth(n, new Set());
+}
+
+// --------------------------------------------------------------- collapse
+
+// A collapsed "N more" stack node, so a column never renders a wall of PRs.
+function collapsedNode(colKey, hidden) {
+  let merged = 0, closed = 0, open = 0;
+  for (const n of hidden) {
+    if (n.prState === 'merged') merged++;
+    else if (n.prState === 'closed') closed++;
+    else open++;
+  }
+  let label;
+  if (merged && !closed && !open) label = `${hidden.length} more merged`;
+  else if (open && !merged && !closed) label = `${hidden.length} more open`;
+  else label = `${hidden.length} more`;
+  return {
+    id: 'collapsed:' + colKey,
+    kind: 'collapsed',
+    col: COL_INDEX[colKey],
+    colKey,
+    count: hidden.length,
+    label,
+    hiddenIds: hidden.map(n => n.id),
+    // deep link into the oldest hidden node's moment
+    lastTouched: Math.max(0, ...hidden.map(n => n.lastTouched || 0)),
+  };
+}
+
+// --------------------------------------------------------------- layout order
+
+// Barycenter crossing-minimization: reorder nodes within each column by the mean
+// order of their neighbors in the adjacent column. A handful of sweeps; nodes with
+// no cross-column neighbor keep their recency position (stable). Deterministic.
+function barycenterOrder(columns, edges) {
+  const adj = new Map(); // nodeId → [neighborId]
+  const push = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); };
+  for (const e of edges) { push(e.from, e.to); push(e.to, e.from); }
+
+  const orderOf = new Map();
+  const reindex = () => {
+    for (const col of columns) col.forEach((n, i) => orderOf.set(n.id, i));
+  };
+  reindex();
+
+  const sweep = () => {
+    for (const col of columns) {
+      const keyed = col.map((n, i) => {
+        // mean of neighbor orders; no neighbor → keep current index (stable)
+        const ns = (adj.get(n.id) || []).map(id => orderOf.get(id)).filter(v => v != null);
+        const bary = ns.length ? ns.reduce((a, b) => a + b, 0) / ns.length : i;
+        return { n, bary, i };
+      });
+      keyed.sort((a, b) => a.bary - b.bary || a.i - b.i);
+      col.length = 0;
+      for (const k of keyed) col.push(k.n);
+    }
+    reindex();
+  };
+
+  // A few passes converge these shallow graphs.
+  for (let pass = 0; pass < 3; pass++) sweep();
+}
+
+// --------------------------------------------------------------- assembly
+
+export function buildGraphModel(events) {
+  // Consumers sort by t (docs/EVENTS.md "Ordering"): a tape can arrive out of
+  // order, and last-write-wins state (PR status, item column) must reflect the
+  // latest fact by TIME, not by file position. Stable sort → equal t keeps order.
+  const sorted = [...events].sort((a, b) => (a.t || 0) - (b.t || 0));
+  const state = fold(sorted);
+
+  const session = sessionNode(state);
+  const plan = planNode(state);
+  const intents = intentNodes(state);
+  const prs = prNodes(state);
+
+  // Column assignment. PRs first (so an intent item can follow its PR's column),
+  // then plan (always column 0) and intent items.
+  const prCol = new Map(); // PR number → column key
+  for (const n of prs) { const key = prColumn(n); n.col = COL_INDEX[key]; prCol.set(n.number, key); }
+  if (plan) plan.col = COL_INDEX.plan;
+  for (const n of intents) n.col = COL_INDEX[intentColumn(n, prCol)];
+
+  const placed = [];
+  if (plan) placed.push(plan);
+  for (const n of intents) placed.push(n);
+  for (const n of prs) placed.push(n);
+
+  // Edges first (over the full node set), so base chains resolve before collapse.
+  assignChainDepth([...prs]);
+  let edges = buildEdges([session, ...placed]);
+
+  // PRs that are the target of an item-pr/pr-base edge are "owned"; the rest are
+  // top-level and hang off the session for containment.
+  const owned = new Set();
+  for (const e of edges) if (e.kind === 'item-pr' || e.kind === 'pr-base') owned.add(e.to);
+
+  // Group into columns, order by recency (newest first), then collapse overflow.
+  const columns = [[], [], [], []];
+  for (const n of placed) columns[n.col].push(n);
+
+  const byRecency = (a, b) => (b.lastTouched || 0) - (a.lastTouched || 0) || (a.id < b.id ? -1 : 1);
+  for (let c = 0; c < columns.length; c++) {
+    const col = columns[c];
+    col.sort(byRecency);
+    if (col.length <= MAX_PER_COL) continue;
+    // Keep failing-CI PRs and the plan cluster pinned; fill the rest by recency,
+    // fold the overflow into one "N more" node pinned to the column's bottom.
+    const pinned = [], rest = [];
+    for (const n of col) ((n.kind === 'pr' && n.ci === 'fail') || n.kind === 'plan' ? pinned : rest).push(n);
+    const keep = rest.slice(0, Math.max(0, MAX_PER_COL - pinned.length));
+    const hidden = rest.slice(keep.length);
+    if (hidden.length) {
+      const cn = collapsedNode(COLUMNS[c].key, hidden);
+      columns[c] = [...[...pinned, ...keep].sort(byRecency), cn];
+    }
+  }
+
+  // Session containment edges: to the plan, to every intent node, and to every
+  // VISIBLE top-level (unowned) PR or collapsed node. Subtle leader lines, capped
+  // by the per-column collapse above so the root never becomes a hairball.
+  const visibleIds = new Set();
+  for (const col of columns) for (const n of col) visibleIds.add(n.id);
+  for (const col of columns) {
+    for (const n of col) {
+      if (n.kind === 'plan' || n.kind === 'intent') edges.push({ from: 'session', to: n.id, kind: 'session' });
+      else if (n.kind === 'collapsed') edges.push({ from: 'session', to: n.id, kind: 'session' });
+      else if (n.kind === 'pr' && !owned.has(n.id)) edges.push({ from: 'session', to: n.id, kind: 'session' });
+    }
+  }
+  // Drop edges pointing at a node that got collapsed away (not individually shown).
+  edges = edges.filter(e =>
+    (e.from === 'session' || visibleIds.has(e.from)) &&
+    (e.to === 'session' || visibleIds.has(e.to)));
+
+  // Crossing-minimization within columns (over the structural edges only).
+  const structural = edges.filter(e => e.kind !== 'session');
+  barycenterOrder(columns, structural);
+
+  // Emit the flat node list with (col, order); the view turns that into pixels.
+  const nodes = [{ ...session, col: -1, order: 0 }];
+  for (let c = 0; c < columns.length; c++) {
+    columns[c].forEach((n, i) => nodes.push({ ...n, col: c, order: i }));
+  }
+
+  return {
+    nodes,
+    edges,
+    columns: COLUMNS.map((c, i) => ({ ...c, index: i, count: columns[i].length })),
+  };
+}
