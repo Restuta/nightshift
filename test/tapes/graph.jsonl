@@ -5,7 +5,7 @@
 {"t":1700000180000,"id":"g3","source":"demo","v":2,"type":"edit","path":"reducer.js","item":"wi-schema"}
 {"t":1700000240000,"id":"g4","source":"demo","v":2,"type":"todos","item":"wi-schema","todos":[{"text":"design envelope","status":"completed"},{"text":"write reducer","status":"in_progress"}]}
 {"t":1700000300000,"id":"g5","source":"demo","v":2,"type":"commit","sha":"a11a11a","message":"schema + reducer","add":120,"del":8,"files":3,"item":"wi-schema"}
-{"t":1700000360000,"id":"g6","source":"poll-github","v":2,"type":"pr","number":1,"repo":"o/r","title":"Foundation: schema + reducer","url":"https://github.com/o/r/pull/1","state":"open","item":"wi-schema","createdAt":1700000360000}
+{"t":1700000360000,"id":"g6","source":"poll-github","v":2,"type":"pr","number":1,"repo":"o/r","title":"Foundation: schema + reducer","url":"https://github.com/o/r/pull/1","state":"open","item":"wi-schema","add":1284,"del":56,"createdAt":1700000360000}
 {"t":1700000420000,"id":"g7","source":"poll-github","v":2,"type":"ci","pr":1,"repo":"o/r","status":"pass"}
 {"t":1700000480000,"id":"g8","source":"poll-github","v":2,"type":"pr","number":1,"repo":"o/r","state":"merged","occurredAt":1700000480000}
 {"t":1700000540000,"source":"demo","v":2,"type":"item","id":"wi-schema","status":"done"}

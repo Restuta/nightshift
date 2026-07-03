@@ -41,6 +41,13 @@ const DIM = {
 };
 const PLAN_HEAD = 30, PLAN_ROW = 18, PLAN_MAX_ROWS = 7, PLAN_PAD = 12;
 
+// A PR / intent node grows by one row when it carries diff-size data, so the
+// "+N −N" chip gets its own line without crowding the title/meta. These nodes are
+// fixed-height (unlike the measured session root), so measureHeight() adds this
+// row iff the node HAS size — an absent-size node keeps its original height.
+const DIFF_ROW = 17;
+const hasSize = n => (n.add || 0) > 0 || (n.del || 0) > 0;
+
 // The session root's live activity strip. Past this age the "now" line is honestly
 // re-tensed to "last seen Xm ago: …" and loses its pulse — the same 10-min TTL the
 // board uses, so a dead recorder's 1am narration stops reading as current at 9am.
@@ -128,6 +135,17 @@ function text(x, y, str, cls, font) {
   return t;
 }
 
+// A compact mono diff chip — "+1,234 −56", adds green / dels red, the same palette
+// as the masthead adds/dels counters and the session root's line. Two tspans so
+// each number colors independently inside one <text>; the true minus sign (−)
+// reads cleaner than a hyphen at this size.
+function diffChip(x, y, add, del) {
+  const t = el('text', { x, y, class: 'gn-diff' });
+  t.appendChild(el('tspan', { class: 'a' }, '+' + Number(add || 0).toLocaleString()));
+  t.appendChild(el('tspan', { class: 'd', dx: 7 }, '−' + Number(del || 0).toLocaleString()));
+  return t;
+}
+
 // --------------------------------------------------------------- state
 let sessionId = new URLSearchParams(location.search).get('session');
 let sessionsMeta = [];          // /sessions list (for title/agent fallback)
@@ -190,6 +208,9 @@ function measureHeight(n) {
     const av = n._av = activityView(n); // cache so buildNode paints the measured size
     return av ? av.height : DIM.session.h;
   }
+  // PR / intent nodes grow one row for the diff chip, but only when sized — an
+  // absent-size node keeps its compact original height (no "+0 −0" gap).
+  if ((n.kind === 'pr' || n.kind === 'intent') && hasSize(n)) return DIM[n.kind].h + DIFF_ROW;
   return DIM[n.kind].h;
 }
 function widthOf(n) { return DIM[n.kind].w; }
@@ -238,7 +259,7 @@ function layout() {
 // --------------------------------------------------------------- node signatures
 function sigOf(n) {
   switch (n.kind) {
-    case 'pr': return `${n.prState}|${n.ci}|${n.lastTouched}`;
+    case 'pr': return `${n.prState}|${n.ci}|${n.add}|${n.del}|${n.lastTouched}`;
     case 'intent': return `${n.status}|${n.commits}|${n.edits}|${n.add}|${n.del}|${n.lastTouched}`;
     case 'plan': return `${n.total}|${n.counts.completed}|${n.counts.in_progress}|${n.lastTouched}`;
     case 'session': {
@@ -340,8 +361,10 @@ function buildNode(n) {
     const stats = [];
     if (n.commits) stats.push(`${n.commits} commit${n.commits > 1 ? 's' : ''}`);
     if (n.edits) stats.push(`${n.edits} edit${n.edits > 1 ? 's' : ''}`);
-    if (n.add || n.del) stats.push(`+${n.add}/-${n.del}`);
     g.appendChild(text(16, 46, truncate(stats.join(' · ') || n.status, n.w - 26, MONO_SM), 'gn-meta'));
+    // Diff size as its own colored chip line (the size of the work at a glance),
+    // rendered only when the item's attributed commits carry any lines.
+    if (hasSize(n)) g.appendChild(diffChip(16, 63, n.add, n.del));
     const chip = n.abandoned ? 'abandoned?' : n.status;
     g.appendChild(text(n.w - 12, n.h - 10, chip, 'gn-chip ' + (n.abandoned ? 'abandoned' : '')));
   } else if (n.kind === 'pr') {
@@ -356,6 +379,9 @@ function buildNode(n) {
     g.appendChild(text(34, 46, truncate(label, n.w - 92, MONO_SM), 'gn-meta'));
     const at = n.mergedAt || n.openedAt || n.lastTouched;
     if (at) g.appendChild(text(n.w - 12, 46, ageText(Date.now() - at), 'gn-age'));
+    // Diff size as a colored chip line (only when the PR has recorded size — old
+    // tapes and never-polled merged PRs render nothing, no "+0 −0" noise).
+    if (hasSize(n)) g.appendChild(diffChip(34, 63, n.add, n.del));
     // CI glyph, top-right
     if (n.ci === 'fail') g.appendChild(ciMark(n.w - 20, 20, 'fail'));
     else if (n.ci === 'pass') g.appendChild(ciMark(n.w - 20, 20, 'pass'));
@@ -601,10 +627,11 @@ function tooltipHtml(n) {
     const bits = [`${n.prState}`];
     if (n.ci) bits.push(`CI ${n.ci}`);
     const when = n.mergedAt ? `merged ${hhmm(n.mergedAt)}` : n.openedAt ? `opened ${hhmm(n.openedAt)}` : '';
-    return head(label) + body((n.title || '') + '\n' + bits.join(' · ') + (when ? '\n' + when : '') + (n.base != null ? `\nbased on #${n.base}` : ''));
+    const size = hasSize(n) ? `\n+${n.add.toLocaleString()} / −${n.del.toLocaleString()} lines` : '';
+    return head(label) + body((n.title || '') + '\n' + bits.join(' · ') + (when ? '\n' + when : '') + size + (n.base != null ? `\nbased on #${n.base}` : ''));
   }
   if (n.kind === 'intent') {
-    return head(n.itemId) + body(`${n.title}\n${n.status}${n.abandoned ? ' · abandoned?' : ''}\n${n.commits} commits · ${n.edits} edits · +${n.add}/-${n.del}`);
+    return head(n.itemId) + body(`${n.title}\n${n.status}${n.abandoned ? ' · abandoned?' : ''}\n${n.commits} commits · ${n.edits} edits · +${n.add.toLocaleString()} / −${n.del.toLocaleString()} lines`);
   }
   if (n.kind === 'plan') return head('Plan') + body(`${n.counts.completed} done · ${n.counts.in_progress} in progress · ${n.counts.pending} pending`);
   if (n.kind === 'session') return head(n.title) + body(`${n.agent || 'agent'}\n${costText(n.cost)} · ${n.commits} commits\nsince ${n.startedAt ? hhmm(n.startedAt) : '—'}`);
