@@ -655,12 +655,15 @@ function updateCard(el, it, animate, activeId) {
   el.classList.toggle('has-todos', hasDelta);
   if (!hasDelta) el.classList.remove('expanded');
   if (hasDelta) {
-    // A card's delta is a changelog of what this turn advanced — so read it
-    // chronologically, top→bottom in time order ("did this, then started this").
-    // The running step is the latest action, so it naturally lands at the bottom;
-    // pinning it to the top instead made it sit *above* steps finished earlier.
-    const when = t => t.doneAt || t.startedAt || t.firstSeenAt || 0;
-    steps.sort((x, y) => when(x) - when(y));
+    // A card's delta is a changelog of what this turn advanced — ordered by when
+    // each step reached its CURRENT state: completed steps by completion time,
+    // running steps last (they haven't arrived anywhere yet — their time is "now"),
+    // so the live edge always sits at the bottom, above the now-line. Pure start-
+    // time chronology buried a long-running umbrella step mid-list whenever later
+    // steps finished after it started.
+    const when = t => t.doneAt || Infinity;
+    const began = t => t.startedAt || t.firstSeenAt || 0;
+    steps.sort((x, y) => (when(x) - when(y)) || (began(x) - began(y)));
     el._todos = steps;
     // A long autonomous turn (one Codex card can span dozens of plan steps) would
     // otherwise render a wall of checklist items taller than the screen. Collapsed,
