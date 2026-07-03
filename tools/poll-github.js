@@ -98,7 +98,9 @@ if (!REPO) {
 // record occurredAt — replay then shows the 2am merge at 2am, not at poll time.
 // baseRefName lets us resolve the stacked-PR chain: if a PR's base branch is itself
 // another PR's head in this repo, that other PR is its base (see resolveBase).
-const PR_FIELDS = 'number,title,url,state,mergedAt,closedAt,createdAt,baseRefName,statusCheckRollup';
+// additions/deletions are the PR's diff size — recorded facts (add/del) the /graph
+// view renders as a compact chip, so "size of work at a glance" survives replay.
+const PR_FIELDS = 'number,title,url,state,mergedAt,closedAt,createdAt,baseRefName,statusCheckRollup,additions,deletions';
 
 // head branch → PR number, for the whole repo, fetched once per run and cached.
 // A PR whose baseRefName matches one of these heads is stacked on that PR — the
@@ -374,6 +376,10 @@ function emitPr(pr) {
     const ev = { type: 'pr', number: pr.number, title: pr.title, url: pr.url, state };
     if (REPO) ev.repo = REPO;
     if (base != null) ev.base = base;
+    // Diff size (add/del) — stamped only when gh reports it, so old-tape replays and
+    // metadata-thin events stay untouched. The reducer stores these sticky on the PR.
+    if (pr.additions != null) ev.add = pr.additions;
+    if (pr.deletions != null) ev.del = pr.deletions;
     const created = tsMs(pr.createdAt);
     if (created != null) ev.createdAt = created;
     const occ = occurredMs(pr, state);

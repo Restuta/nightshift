@@ -379,6 +379,11 @@ export function reduce(state, ev) {
         // a later state-only event without base keeps it. The /graph view draws
         // the stacked-PR chain from it; old tapes lack it and draw no edge.
         if (ev.base != null) pr.base = ev.base;
+        // add/del: the PR's diff size (poll-github reads it from gh). Sticky — a
+        // later state-only echo (a merge with no size) must NOT erase the numbers,
+        // so the /graph diff chip keeps rendering. Absent until a sized event lands.
+        if (ev.add != null) pr.add = ev.add;
+        if (ev.del != null) pr.del = ev.del;
         if (ev.createdAt != null) pr.openedAt = ev.createdAt;      // gh's real open time
         if (ev.state === 'merged' && pr.mergedAt == null) pr.mergedAt = when;
         if (ev.state === 'open') pr.mergedAt = null; // reopened / corrected
