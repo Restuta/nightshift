@@ -509,6 +509,10 @@ const server = http.createServer((req, res) => {
   // target); the query is read client-side, so serve the static HTML as-is.
   if (url.pathname === '/lanes') { req.url = '/lanes.html'; return serveStatic(req, res); }
 
+  // /graph?session= is the work-structure node canvas — same additive pattern as
+  // /lanes: a clean URL, query read client-side, static HTML served as-is.
+  if (url.pathname === '/graph') { req.url = '/graph.html'; return serveStatic(req, res); }
+
   serveStatic(req, res);
 });
 

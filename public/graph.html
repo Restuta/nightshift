@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nightshift — graph</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z' fill='%23F0E2C0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="graph-page">
+
+<header class="masthead">
+  <div class="brand">
+    <a class="home-link" href="/" title="board home">
+      <svg class="logo" width="16" height="16" viewBox="0 0 16 16"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0"/></svg>
+      <span class="wordmark">nightshift</span>
+    </a>
+    <span class="crumb-sep">/</span>
+    <span class="lanes-crumb">graph</span>
+    <span class="crumb-sep">/</span>
+    <span class="session-title mono" id="session-title">no session</span>
+    <span class="agent-badge" id="agent-badge" hidden></span>
+    <span class="badge" id="status-badge" hidden><i class="badge-dot"></i><span id="status-text"></span></span>
+  </div>
+  <div class="instruments">
+    <span class="graph-legend" id="graph-legend">
+      <span class="lg"><i class="gl-ring gl-open"></i>open</span>
+      <span class="lg"><i class="gl-ring gl-merged"></i>merged</span>
+      <span class="lg"><i class="gl-ring gl-closed"></i>closed</span>
+      <span class="lg"><i class="gl-mark gl-fail"></i>CI fail</span>
+      <span class="lg"><i class="gl-dot gl-intent"></i>work item</span>
+    </span>
+    <button class="icon-btn" id="btn-fit" title="zoom to fit">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2 5.5V2.5h3M11 2.5h3v3M14 10.5v3h-3M5 13.5H2v-3"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-reset" title="reset layout (clear dragged positions)">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.2V5h-2.8"/></svg>
+    </button>
+    <a class="icon-btn" id="board-link" href="/" title="open the board">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="3.4" height="12" rx="1"/><rect x="6.3" y="2" width="3.4" height="8" rx="1"/><rect x="11.1" y="2" width="3.4" height="10" rx="1"/></svg>
+    </a>
+  </div>
+</header>
+
+<main class="graph-main" id="graph-main">
+  <svg id="graph-svg" xmlns="http://www.w3.org/2000/svg">
+    <g id="graph-cols"></g>
+    <g id="graph-edges"></g>
+    <g id="graph-nodes"></g>
+  </svg>
+  <div class="graph-tooltip" id="graph-tooltip" hidden></div>
+  <div class="graph-empty" id="graph-empty" hidden>no entities on this tape yet</div>
+  <div class="graph-hint">scroll to zoom · drag canvas to pan · drag a node to arrange · click to replay</div>
+</main>
+
+<script type="module" src="graph.js"></script>
+</body>
+</html>
