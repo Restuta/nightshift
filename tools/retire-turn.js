@@ -31,7 +31,10 @@ try {
   if (!st || !st.card) process.exit(0);
 
   // Envelope v2: source + v. No UUID — this is an item event, so `id` is the
-  // work-item (card) id, the same identity the hook created it under.
+  // work-item (card) id, the same identity the hook created it under. `st.card`
+  // carries the full namespaced id (turn-<sid8>-<n>) from THIS session's turnState,
+  // so a scoped retire only ever closes our own card, never another session's on a
+  // shared tape (plan 1.3).
   fs.appendFileSync(log, JSON.stringify({ t: Date.now(), source: 'hook', v: 2, type: 'item', id: st.card, status: 'done' }) + '\n');
   // Forget the card but keep the turn counter: a later `/nightshift on` (continue)
   // resumes numbering instead of restarting at turn 1.

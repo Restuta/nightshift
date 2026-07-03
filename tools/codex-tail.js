@@ -19,6 +19,29 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { randomUUID } = require('node:crypto');
 
+// Turn-card ids are NAMESPACED per producing session — `turn-<sid8>-<n>` — so two
+// recorders on two rollouts of one project (allowed by the rollout-keyed lock)
+// writing ONE central log never collide on `turn-3` and never close each other's
+// live card (plan 1.3). sid8 = the session id's first 8 hex chars. The shared
+// browser copy of this helper lives in public/turn-id.js (kept in sync by hand —
+// this is CJS, that is an ES module, and we run no build step).
+const sid8 = s => String(s || '').toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8);
+
+// The highest turn number already minted in namespace `s8` in the destination log
+// — the tape is the truth. On worker start with a lost checkpoint we seed the turn
+// counter from this so a resumed session continues numbering (…-6, -7) instead of
+// restarting at -1 and re-colliding with a card IT ITSELF already wrote. One read
+// at startup; matches both the item `id` and any `item:` reference of a card.
+function maxTurnInLog(log, s8) {
+  if (!s8 || !log) return 0;
+  let text = '';
+  try { text = fs.readFileSync(log, 'utf8'); } catch { return 0; }
+  const re = new RegExp('turn-' + s8 + '-(\\d+)', 'g');
+  let max = 0, m;
+  while ((m = re.exec(text))) { const n = Number(m[1]); if (n > max) max = n; }
+  return max;
+}
+
 const args = process.argv.slice(2);
 const val = f => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
 const once = args.includes('--once');
@@ -343,6 +366,18 @@ function curCard() {
   return meter ? hookCard(rolloutSessionId) : state.card;
 }
 
+// Own-cards-only guard (plan 1.3). On a SHARED tape a worker may retire/reopen ONLY
+// cards in ITS OWN session namespace — never the other recorder's live card. A
+// namespaced id must carry my sid8; a legacy un-namespaced `turn-<n>` (an old
+// checkpoint) is treated as mine (single-writer era). Applied on the quiet-retire
+// and drain-reopen paths, where the card is read indirectly (hookCard / a restored
+// checkpoint) and could in principle be foreign.
+function myCard(id) {
+  if (!id) return false;
+  const m = /^turn-([0-9a-f]{8})-\d+$/.exec(id);
+  return m ? m[1] === sid8(rolloutSessionId) : true;
+}
+
 // One pr_ref SIGHTING, deduped. codex-tail no longer writes any pr/ci STATE — the
 // poller is the single writer (plan 1.4). A ref only tells the poller which PRs
 // this session touched and links the current card so the poller's real events can
@@ -410,7 +445,11 @@ function step(e) {
       // could close an active card (codex review P1).
       if (state.card && !meter) out.push({ t, type: 'item', id: state.card, status: 'done' });
       state.turnN++;
-      state.card = `turn-${state.turnN}`;
+      // Namespace the card by THIS session's sid8 so two full-mode recorders on one
+      // central log never mint the same id (plan 1.3). Degrade to the legacy shape
+      // only if the session id is somehow unknown (still valid, still single-writer).
+      const ns = sid8(rolloutSessionId);
+      state.card = ns ? `turn-${ns}-${state.turnN}` : `turn-${state.turnN}`;
       state.hasPlan = false; state.planComplete = false; // fresh turn, no plan yet
       if (!meter) out.push({ t, type: 'item', id: state.card, title: title || `turn ${state.turnN}`, status: 'doing' });
       out.push({ t, type: 'session', phase: 'resume', agent: 'codex', ...(state.titled ? {} : { title }) });
@@ -564,7 +603,7 @@ function drain() {
   // only reopen). Target the hook's card; only reopen if it's still the card we
   // retired (a fresh prompt would have moved the hook to a new card).
   const reopen = meter ? hookCard(rolloutSessionId) : state.card;
-  if (idleClosedCard && idleClosedCard === reopen) {
+  if (idleClosedCard && idleClosedCard === reopen && myCard(reopen)) {
     events.push({ t: Date.now(), type: 'item', id: reopen, status: 'doing' });
   }
   idleClosedCard = null;
@@ -661,6 +700,15 @@ if (worker) {
     state.started = true;
     console.error(`re-attach guard: log already has session ${rolloutSessionId} — resuming at ${offset}, not re-draining from 0`);
   }
+  // Restart continuity (plan 1.3): if no checkpoint restored a counter (turnN still
+  // 0) but this session already minted cards into the log, resume numbering from the
+  // log's highest n in MY namespace — the tape is the truth — so the next turn is
+  // …-(max+1), never a fresh -1 that re-collides with a card this session wrote
+  // before the checkpoint was lost. Full mode only (the meter mints no cards).
+  if (!meter && state.turnN === 0) {
+    const s8 = sid8(rolloutSessionId);
+    if (s8) state.turnN = maxTurnInLog(LOG, s8);
+  }
 }
 
 drain();
@@ -706,7 +754,7 @@ if (!once) {
       // completed turn — retiring it would falsely mark the card done.
       const turnDone = !state.hasPlan || state.planComplete;
       const card = meter ? hookCard(rolloutSessionId) : state.card;
-      if (card && idleClosedCard !== card && turnDone) {
+      if (card && idleClosedCard !== card && turnDone && myCard(card)) {
         idleClosedCard = card;
         evs.push({ t: Date.now(), type: 'item', id: card, status: 'done' });
       }

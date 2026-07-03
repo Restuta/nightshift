@@ -16,9 +16,12 @@
 // board at every replay time for free.
 
 import { fold } from './reducer.js';
+import { TURN_RE, turnLabel } from './turn-id.js';
 
-// A work item whose id is `turn-<n>` is a synthesized chat turn, never a node.
-export const TURN_RE = /^turn-\d+$/;
+// A work item whose id is a turn-card id (legacy `turn-<n>` OR namespaced
+// `turn-<sid8>-<n>`) is a synthesized chat turn, never a node. Re-exported from the
+// shared helper so both shapes are excluded and existing importers keep working.
+export { TURN_RE };
 
 // Left→right pipeline: backlog → in-progress → shipped. The session node lives in
 // a root gutter to the left of column 0.
@@ -152,7 +155,7 @@ function sessionActivity(state) {
   let now = active && active.now ? { text: active.now.text, kind: active.now.kind, t: active.now.t } : null;
   if (!now && s.lastSay) now = { text: s.lastSay, kind: 'say', t: s.lastProducerAt || s.lastAt || 0 };
   return {
-    prompt: active ? (active.title || active.id) : null,
+    prompt: active ? (active.title || turnLabel(active.id)) : null,
     now,
     phase: s.phase || null,
     attentionText: s.attentionText || null,

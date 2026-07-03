@@ -5,6 +5,7 @@
 
 import { initialState, reduce, fold, activeItemId, hotFiles, prList, liveness, STATUSES } from './reducer.js';
 import { initSessionPicker } from './session-picker.js';
+import { turnLabel } from './turn-id.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -624,7 +625,9 @@ function updateCard(el, it, animate, activeId) {
   const R = el._refs;
   el._it = it; el._activeId = activeId; // remembered so a click can re-render in place
   R.emoji.textContent = cardEmoji(it);
-  R.cid.textContent = it.id;
+  // Namespaced turn ids (turn-<sid8>-<n>) show SHORT as "turn <n>" — the sid8 is
+  // collision-avoidance plumbing, noise to a reader. Legacy/real ids pass through.
+  R.cid.textContent = turnLabel(it.id);
   R.title.textContent = it.title || it.id;
 
   // Time worked, not time since touched. The active `doing` card keeps
