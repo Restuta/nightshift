@@ -101,6 +101,25 @@ Work item upsert — the kanban cards. `{id, title?, status?, note?, emoji?}`
 Replaces the current fine-grained plan (the drill-in view on the active card).
 `{todos: [{text, done}], item?}`
 
+- **Superseded steps (a derived display, not an event).** The plan is session-scoped
+  and agents rewrite the list constantly. Each card keeps a DELTA — the steps
+  witnessed advancing while it was active, keyed by exact text. When a step that was
+  `in_progress` in some card's delta is dropped or reworded in the next snapshot, its
+  delta entry is a fossil: without correction it stays `in_progress` forever with a
+  ticking elapsed timer on a step the plan has abandoned — misinformation. So after
+  each snapshot the reducer sweeps every delta entry still `in_progress` whose exact
+  text is ABSENT from the new snapshot and marks it `superseded`, stamping
+  `supersededAt = ev.t` (keeping `startedAt`, so its elapsed freezes at
+  `supersededAt − startedAt`). The sweep spans ALL cards, not just the snapshot's
+  target: the whole plan is one session stream, so any card's still-ticking fossil is
+  equally stale. If a later snapshot re-introduces the exact text (the agent restored
+  the step), normal witnessing resumes — an `in_progress`/`completed` sighting
+  overwrites the frozen entry. This is purely derived in the fold (no `superseded`
+  event exists, no `Date.now()`), so replay and live agree. The card UI renders a
+  superseded step dimmed and struck with a hollow dotted glyph and a faint
+  `· superseded` tag instead of a live timer; the sidebar Plan panel is unaffected
+  (it only ever shows the current snapshot's steps).
+
 ### `edit`
 A file was touched. `{path, tool?}` — emitted by the PostToolUse hook for
 Edit/Write tools. Feeds the activity column and per-item "warmth".
