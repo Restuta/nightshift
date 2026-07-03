@@ -265,8 +265,16 @@ export function reduce(state, ev) {
         // turn, or a checklist written pre-checked) was not moved here — which is
         // what stops a long first turn absorbing the whole backlog.
         const was = prev.get(td.text);
-        const advanced = was != null && was !== 'completed' && status !== was &&
-          (status === 'completed' || status === 'in_progress');
+        // A step witnessed in_progress on this card, then dropped from the plan (frozen
+        // 'superseded' by the sweep below), that now REAPPEARS: the agent restored it,
+        // so resume witnessing. todoPrev dropped the text when it left the plan, so the
+        // frozen entry stands in for its prior state — any advance (in_progress or
+        // completed) overwrites the fossil with a live entry again.
+        const frozen = target && target.delta && target.delta.get(td.text);
+        const resuming = !!frozen && frozen.status === 'superseded' &&
+          (status === 'in_progress' || status === 'completed');
+        const advanced = resuming || (was != null && was !== 'completed' && status !== was &&
+          (status === 'completed' || status === 'in_progress'));
         if (advanced && target) {
           const d = target.delta || (target.delta = new Map());
           d.set(td.text, { text: td.text, status, startedAt: tm.startedAt, doneAt: tm.doneAt, elapsedMs: td.elapsedMs });
@@ -283,6 +291,25 @@ export function reduce(state, ev) {
         };
       });
       state.todos = todos;
+      // Fossil sweep: the plan is session-scoped and agents rewrite it constantly. Any
+      // delta entry still in_progress whose exact text is ABSENT from this snapshot is
+      // a step the plan moved past without ever finishing — freeze it 'superseded'
+      // (keep startedAt so elapsed = supersededAt − startedAt; no live tick, no green
+      // check). A ticking timer on a dead step is misinformation. Swept across ALL
+      // cards, not just the active one: the whole plan is one session stream, so every
+      // card's still-ticking fossil is equally stale (their turns are over). A later
+      // snapshot that reintroduces the exact text resumes witnessing (see `resuming`
+      // above). Pure over the log — supersededAt is ev.t, never Date.now().
+      const present = new Set(todos.map(t => t.text));
+      for (const it of state.items.values()) {
+        if (!it.delta) continue;
+        for (const d of it.delta.values()) {
+          if (d.status === 'in_progress' && !present.has(d.text)) {
+            d.status = 'superseded';
+            d.supersededAt = ev.t;
+          }
+        }
+      }
       // An unchanged re-emit refreshes the reference but isn't real activity on
       // the card, so it must not bump touchedAt (which drives ordering / "active
       // card") — only a genuine plan change counts as touching it.
