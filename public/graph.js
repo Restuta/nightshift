@@ -13,6 +13,7 @@
 import { fold, liveness } from './reducer.js';
 import { buildGraphModel, COLUMNS } from './graph-model.js';
 import { sessionLabel } from './session-label.js';
+import { initSessionPicker } from './session-picker.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const $ = sel => document.querySelector(sel);
@@ -94,6 +95,7 @@ function text(x, y, str, cls, font) {
 
 // --------------------------------------------------------------- state
 let sessionId = new URLSearchParams(location.search).get('session');
+let sessionsMeta = [];          // /sessions list (for title/agent fallback)
 let events = [];
 let model = null;
 let nodeById = new Map();       // id → laid-out node (with x,y,w,h)
@@ -537,14 +539,35 @@ function sizeSvg() {
 window.addEventListener('resize', () => { sizeSvg(); });
 
 // --------------------------------------------------------------- data load + live
+// Mount the shared session switcher, resolve the tape to open, then load it. The
+// picker fetches /sessions once; we reuse that list for the title/agent fallback.
 async function load() {
-  let metaList = [];
-  try { metaList = await (await fetch('/sessions')).json(); } catch { /* single-log */ }
-  if (!sessionId && metaList.length) {
-    metaList.sort((a, b) => (b.lastT || 0) - (a.lastT || 0));
-    sessionId = metaList[0].id;
-  }
-  const meta = metaList.find(s => s.id === sessionId) || null;
+  const picker = await initSessionPicker({
+    mount: $('#session-picker'),
+    currentId: sessionId,
+    onSelect: id => {
+      const p = new URLSearchParams(location.search);
+      p.set('session', id);
+      history.replaceState(null, '', '?' + p.toString());
+      loadSession(id);
+    },
+  });
+  sessionsMeta = picker.sessions;
+  if (picker.multi) $('#session-title').hidden = true;
+  await loadSession(picker.current);
+}
+
+// (Re)build the whole view for a session: tear down the old stream + live state,
+// re-read that tape's saved drag positions, fetch its events, rebuild the model,
+// refit, and re-subscribe. No page reload — switching sessions runs this.
+async function loadSession(id) {
+  teardownStream();
+  sessionId = id;
+  // Reset the live-diff state so the new tape paints clean (no glow-everything).
+  sigMap = new Map();
+  firstPaint = true;
+  draggingNode = null;
+  pendingRebuild = false;
   loadDrag();
 
   const q = sessionId ? '?session=' + encodeURIComponent(sessionId) : '';
@@ -554,11 +577,14 @@ async function load() {
     .filter(ev => ev && typeof ev.t === 'number' && typeof ev.type === 'string');
 
   const state = fold(events);
+  const meta = sessionsMeta.find(s => s.id === sessionId) || null;
   const title = state.session.title || (meta && meta.title) || sessionLabel({ id: sessionId || '', cwd: state.session.cwd, title: null }) || 'session';
   document.title = `graph — ${title}`;
   $('#session-title').textContent = title;
   const agent = state.session.agent || (meta && meta.agent);
-  if (agent) { const b = $('#agent-badge'); b.textContent = agent; b.hidden = false; b.className = 'agent-badge agent-' + agent; }
+  const b = $('#agent-badge');
+  if (agent) { b.textContent = agent; b.hidden = false; b.className = 'agent-badge agent-' + agent; }
+  else { b.hidden = true; }
   $('#board-link').href = '/?session=' + encodeURIComponent(sessionId || '');
 
   sizeSvg();
@@ -571,8 +597,9 @@ async function load() {
 // server replays full history then emits `ready`; we swap the buffered replay in
 // wholesale (so a reconnect can't double-count) and thereafter fold new events in.
 let es = null;
+function teardownStream() { if (es) { es.onerror = null; es.close(); es = null; } }
 function openStream(id) {
-  if (es) { es.onerror = null; es.close(); }
+  teardownStream();
   let buf = [], connReady = false;
   es = new EventSource('/sse?session=' + encodeURIComponent(id));
   es.onmessage = ev => {
