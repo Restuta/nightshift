@@ -105,7 +105,7 @@ A SIGHTING that a PR is relevant to this session. `{number, url?, title?, item?}
   state has exactly one writer**, and a sighting is not a state.
 
 ### `pr`
-`{number, repo?, title?, url?, state: "open" | "merged" | "closed", occurredAt?, createdAt?}`
+`{number, repo?, title?, url?, state: "open" | "merged" | "closed", base?, occurredAt?, createdAt?}`
 - **Single writer (plan 1.4).** Only `poll-github` — and the offline whole-tape
   synthesizers `emit` / `import` / `demo` — may author a v2 `pr` STATE event. A v2
   `pr` from any other source (`hook`, `codex-tail`, …) is IGNORED by the reducer
@@ -123,6 +123,14 @@ A SIGHTING that a PR is relevant to this session. `{number, url?, title?, item?}
   merge/close from `mergedAt`/`closedAt`, and the open time from `createdAt`),
   distinct from `t` (when recorded). The reducer's `mergedAt`/`openedAt` use these,
   so replay shows a 2am merge at 2am even though the poller only recorded it at 9am.
+- `base` — the PR number this PR is **stacked on** (the number of the PR whose
+  head branch is this PR's `baseRefName`). `poll-github` resolves it from a single
+  `gh pr list --json number,headRefName` per run: a PR targeting `main` (or any
+  branch that isn't another PR's head) has no `base`. The reducer stores it on
+  `state.prs` (sticky — a later state-only event without `base` keeps it), and the
+  `/graph` view draws the stacked-PR chain edge from it. **Old tapes lack the field
+  → no edge, never inferred from titles.** Only the PR authorities (`poll-github`,
+  `emit`, `import`, `demo`) may author it.
 - Freshness is reconciled by the board server (which spawns `poll-github`), not a
   standalone daemon — see `server.js`. A merge that lands while no poller was alive
   still appears the next time the board is opened.

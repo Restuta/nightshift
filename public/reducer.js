@@ -372,8 +372,13 @@ export function reduce(state, ev) {
         // PRs are session-level entities (the PR panel), keyed by repo#number.
         const pr = state.prs.get(key) ||
           { number: ev.number, repo, state: 'open', url: null, title: null, ci: null,
-            openedAt: ev.createdAt != null ? ev.createdAt : when, mergedAt: null };
+            base: null, openedAt: ev.createdAt != null ? ev.createdAt : when, mergedAt: null };
         if (ev.state) pr.state = ev.state;
+        // base: the PR number this PR is stacked on (poll-github resolves it from
+        // baseRefName when the base branch is itself a known PR head). Sticky —
+        // a later state-only event without base keeps it. The /graph view draws
+        // the stacked-PR chain from it; old tapes lack it and draw no edge.
+        if (ev.base != null) pr.base = ev.base;
         if (ev.createdAt != null) pr.openedAt = ev.createdAt;      // gh's real open time
         if (ev.state === 'merged' && pr.mergedAt == null) pr.mergedAt = when;
         if (ev.state === 'open') pr.mergedAt = null; // reopened / corrected

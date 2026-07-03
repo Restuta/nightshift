@@ -1,0 +1,21 @@
+{"t":1700000000000,"id":"g0","source":"demo","v":2,"type":"session","phase":"start","title":"graph fixture","agent":"claude","cwd":"/repo"}
+{"t":1700000060000,"source":"demo","v":2,"type":"item","id":"wi-schema","title":"Event schema + reducer","status":"doing"}
+{"t":1700000090000,"id":"g1","source":"hook","v":2,"type":"item","id":"turn-1","title":"hold on....","status":"doing"}
+{"t":1700000120000,"id":"g2","source":"demo","v":2,"type":"todos","item":"wi-schema","todos":[{"text":"design envelope","status":"pending"},{"text":"write reducer","status":"pending"}]}
+{"t":1700000180000,"id":"g3","source":"demo","v":2,"type":"edit","path":"reducer.js","item":"wi-schema"}
+{"t":1700000240000,"id":"g4","source":"demo","v":2,"type":"todos","item":"wi-schema","todos":[{"text":"design envelope","status":"completed"},{"text":"write reducer","status":"in_progress"}]}
+{"t":1700000300000,"id":"g5","source":"demo","v":2,"type":"commit","sha":"a11a11a","message":"schema + reducer","add":120,"del":8,"files":3,"item":"wi-schema"}
+{"t":1700000360000,"id":"g6","source":"poll-github","v":2,"type":"pr","number":1,"repo":"o/r","title":"Foundation: schema + reducer","url":"https://github.com/o/r/pull/1","state":"open","item":"wi-schema","createdAt":1700000360000}
+{"t":1700000420000,"id":"g7","source":"poll-github","v":2,"type":"ci","pr":1,"repo":"o/r","status":"pass"}
+{"t":1700000480000,"id":"g8","source":"poll-github","v":2,"type":"pr","number":1,"repo":"o/r","state":"merged","occurredAt":1700000480000}
+{"t":1700000540000,"source":"demo","v":2,"type":"item","id":"wi-schema","status":"done"}
+{"t":1700000600000,"source":"demo","v":2,"type":"item","id":"wi-server","title":"Zero-dep SSE server","status":"doing"}
+{"t":1700000660000,"id":"g9","source":"demo","v":2,"type":"todos","item":"wi-server","todos":[{"text":"tail loop","status":"in_progress"},{"text":"SSE route","status":"pending"}]}
+{"t":1700000720000,"id":"g10","source":"demo","v":2,"type":"edit","path":"server.js","item":"wi-server"}
+{"t":1700000740000,"id":"g10b","source":"demo","v":2,"type":"todos","item":"wi-server","todos":[{"text":"tail loop","status":"completed"},{"text":"SSE route","status":"in_progress"}]}
+{"t":1700000780000,"id":"g11","source":"poll-github","v":2,"type":"pr","number":2,"repo":"o/r","title":"SSE server on top of schema","url":"https://github.com/o/r/pull/2","state":"open","base":1,"item":"wi-server","createdAt":1700000780000}
+{"t":1700000840000,"id":"g12","source":"poll-github","v":2,"type":"ci","pr":2,"repo":"o/r","status":"pending"}
+{"t":1700000900000,"source":"demo","v":2,"type":"item","id":"wi-ui","title":"Kanban board UI","status":"inbox"}
+{"t":1700000960000,"id":"g13","source":"poll-github","v":2,"type":"pr","number":3,"repo":"o/r","title":"Board UI","url":"https://github.com/o/r/pull/3","state":"open","createdAt":1700000960000}
+{"t":1700001020000,"id":"g14","source":"poll-github","v":2,"type":"ci","pr":3,"repo":"o/r","status":"fail"}
+{"t":1700001080000,"id":"g15","source":"demo","v":2,"type":"session","phase":"idle"}
