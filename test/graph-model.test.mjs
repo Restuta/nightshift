@@ -174,10 +174,97 @@ test('columns metadata is the fixed pipeline', () => {
   assert.deepEqual(m.columns.map(c => c.key), ['plan', 'active', 'review', 'landed']);
 });
 
+// --- session live-activity strip --------------------------------------------
+const activityOf = m => nodeById(m, 'session').activity;
+
+test('activity: the most-recently-touched doing item wins the prompt — turn cards INCLUDED', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start', title: 's' },
+    { t: 2, type: 'item', id: 'wi-early', title: 'schema work', status: 'doing' },
+    // a synthesized turn card, touched later than wi-early → it owns the prompt,
+    // even though it is never a NODE.
+    { t: 3, type: 'item', id: 'turn-7', title: 'wire up the live strip', status: 'doing' },
+  ]);
+  const a = activityOf(m);
+  assert.equal(a.prompt, 'wire up the live strip', 'the freshest doing item (a turn card) is the prompt');
+  // and it is still not a node
+  assert.ok(!nodeById(m, 'intent:turn-7'), 'the turn card is a prompt, never a node');
+});
+
+test('activity: a fresher declared work item overtakes an older turn card', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'turn-1', title: 'hold on…', status: 'doing' },
+    { t: 5, type: 'item', id: 'wi-server', title: 'Zero-dep SSE server', status: 'doing' },
+  ]);
+  assert.equal(activityOf(m).prompt, 'Zero-dep SSE server');
+});
+
+test('activity: now is the active card line; falls back to lastSay when the card has none', () => {
+  // A tool line on the active card is the "now".
+  const withNow = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'wi', title: 'do a thing', status: 'doing' },
+    { t: 3, type: 'tool', text: 'running the calibration sweep', item: 'wi' },
+  ]);
+  assert.deepEqual(
+    { text: activityOf(withNow).now.text, kind: activityOf(withNow).now.kind },
+    { text: 'running the calibration sweep', kind: 'tool' });
+
+  // A say that landed with NO doing item still sets session.lastSay; a later card
+  // with no line of its own falls back to it.
+  const fallback = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'say', text: 'waiting for the harvest to finish' },
+    { t: 3, type: 'item', id: 'wi', title: 'do a thing', status: 'doing' },
+  ]);
+  const a = activityOf(fallback);
+  assert.equal(a.prompt, 'do a thing');
+  assert.equal(a.now.text, 'waiting for the harvest to finish', 'now falls back to lastSay');
+  assert.equal(a.now.kind, 'say', 'the lastSay fallback is wrapped as a say');
+});
+
+test('activity: attention phase + text are exposed on the root', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'wi', title: 'do a thing', status: 'doing' },
+    { t: 3, type: 'session', phase: 'attention', text: 'approve the migration?' },
+  ]);
+  const a = activityOf(m);
+  assert.equal(a.phase, 'attention');
+  assert.equal(a.attentionText, 'approve the migration?');
+});
+
+test('activity: a tape with no doing items yields a null prompt', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'wi-done', title: 'shipped', status: 'done' },
+    { t: 3, type: 'item', id: 'wi-later', title: 'someday', status: 'inbox' },
+  ]);
+  assert.equal(activityOf(m).prompt, null, 'no doing item → no current prompt');
+});
+
+test('activity derivation is pure/deterministic (no Date.now, order-independent)', () => {
+  const evs = [
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'wi', title: 'a thing', status: 'doing' },
+    { t: 3, type: 'say', text: 'narrating progress', item: 'wi' },
+  ];
+  const a = activityOf(buildGraphModel(evs));
+  const b = activityOf(buildGraphModel(evs.slice().reverse()));
+  assert.deepEqual(a, b, 'same events (any order) → identical activity block');
+  assert.equal(a.now.t, 3, 'the now timestamp is the say event t, not wall-clock');
+});
+
 // --- empty / degenerate -----------------------------------------------------
 test('an empty tape still yields a session node and no crash', () => {
   const m = buildGraphModel([]);
   assert.equal(m.nodes.length, 1);
   assert.equal(m.nodes[0].kind, 'session');
   assert.deepEqual(m.edges, []);
+  // the activity block is present but empty — no prompt, no now, no attention.
+  const a = m.nodes[0].activity;
+  assert.equal(a.prompt, null);
+  assert.equal(a.now, null);
+  assert.equal(a.attentionText, null);
 });

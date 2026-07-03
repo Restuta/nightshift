@@ -1728,6 +1728,26 @@ body.fleet-page { overflow: auto; }
 .gn-agent.agent-claude { color: #d97757; }
 .gn-agent.agent-codex { color: #9fb3c8; }
 
+/* session root live-activity strip — mirrors the board's now-line language. */
+.gn-act-div { stroke: var(--line-soft); stroke-width: 1; }
+.gn-act-on { font-family: var(--mono); font-size: 10.5px; fill: var(--dim); }
+.gn-act-now { font-family: var(--sans); font-size: 11px; fill: var(--dim); }
+.gn-act-now.say { fill: var(--ink); font-style: italic; opacity: .9; }
+.gn-act-now.tool { font-family: var(--mono); font-size: 10.5px; fill: var(--faint); }
+.gn-act-now.past { fill: var(--faint); font-style: normal; opacity: .8; }
+.gn-act-now.attn { fill: var(--red); font-style: normal; opacity: 1; }
+.gn-act-dot { fill: var(--yellow); }
+.gn-act-dot.tool, .gn-act-dot.past { fill: var(--faint); }
+.gn-act-dot.attn { fill: var(--red); }
+/* Live pulse ripple — a steady slow ping = "still working" (motion = liveness,
+   the same signal the board's .nd-pulse carries). Only drawn while fresh+working. */
+.gn-act-ping { fill: none; stroke: var(--yellow); stroke-width: 1.4; animation: gactping 1.9s ease-out infinite; }
+@keyframes gactping {
+  0%   { r: 3; opacity: .55; }
+  70%  { r: 9; opacity: 0; }
+  100% { r: 9; opacity: 0; }
+}
+
 /* plan cluster */
 .gnode-plan .gnode-box { fill: #101725; stroke: #23304a; }
 .gn-step { font-family: var(--sans); font-size: 11px; fill: var(--dim); }
