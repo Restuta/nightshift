@@ -128,8 +128,37 @@ function planNode(state) {
   };
 }
 
+// The session's LIVE activity strip — the current prompt, the agent's latest
+// narration ("now" line), and the attention state, folded straight off the
+// reducer. This is the ONE place a turn-card's title is welcome in the graph: a
+// turn card IS the current turn, so its prompt is exactly "what's being worked on
+// now" — even though turns are never nodes. Pure over the fold: no Date.now(), no
+// DOM. The view clamps/re-tenses; the model just exposes the facts.
+function sessionActivity(state) {
+  // Most-recently-touched item still in `doing` — turn cards INCLUDED (unlike the
+  // node-sourcing pass, which drops them). Its title is the current prompt.
+  let active = null;
+  for (const it of state.items.values()) {
+    if (it.status !== 'doing') continue;
+    if (!active || (it.touchedAt || 0) > (active.touchedAt || 0)) active = it;
+  }
+  const s = state.session;
+  // `now` is the active card's live line (a say/tool with its own t), falling back
+  // to the session's last narration when the card carries none.
+  let now = active && active.now ? { text: active.now.text, kind: active.now.kind, t: active.now.t } : null;
+  if (!now && s.lastSay) now = { text: s.lastSay, kind: 'say', t: s.lastProducerAt || s.lastAt || 0 };
+  return {
+    prompt: active ? (active.title || active.id) : null,
+    now,
+    phase: s.phase || null,
+    attentionText: s.attentionText || null,
+    lastEventT: s.lastAt || 0,
+  };
+}
+
 // The session root — one node per session (agent badge, cost, span). Always
-// present so an empty tape still shows the shift.
+// present so an empty tape still shows the shift. Carries the live activity strip
+// so the root becomes the graph's "what's happening now" surface.
 function sessionNode(state) {
   const s = state.session;
   return {
@@ -144,6 +173,7 @@ function sessionNode(state) {
     startedAt: s.startedAt || null,
     lastTouched: s.lastAt || s.startedAt || 0,
     phase: s.phase || null,
+    activity: sessionActivity(state),
   };
 }
 

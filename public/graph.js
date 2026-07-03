@@ -41,6 +41,17 @@ const DIM = {
 };
 const PLAN_HEAD = 30, PLAN_ROW = 18, PLAN_MAX_ROWS = 7, PLAN_PAD = 12;
 
+// The session root's live activity strip. Past this age the "now" line is honestly
+// re-tensed to "last seen Xm ago: …" and loses its pulse — the same 10-min TTL the
+// board uses, so a dead recorder's 1am narration stops reading as current at 9am.
+const NOW_TTL = 10 * 60e3;
+const ACT_DIV_Y = 86;    // hairline under the base block, where activity begins
+const ACT_LINE1 = 15;    // baseline offset of the first activity line below the divider
+const ACT_PROMPT_DY = 17;// vertical step after the "on: <prompt>" label line
+const ACT_BODY_DY = 15;  // vertical step per wrapped now/attention line
+const ACT_BOT_PAD = 10;  // padding below the last line
+const ACT_DOT_X = 18, ACT_TXT_X = 30; // pulse dot + body text insets
+
 // PR status ring colors (per the /graph spec): open amber, merged violet, closed
 // grey. Distinct from the board's green so the ring reads as "still cooking".
 const RING = { open: '#d29922', merged: '#a371f7', closed: '#5d6781' };
@@ -59,6 +70,30 @@ function truncate(text, maxW, font) {
 const SANS = "13px 'Inter', system-ui, sans-serif";
 const SANS_SM = "11px 'Inter', system-ui, sans-serif";
 const MONO_SM = "10.5px 'IBM Plex Mono', ui-monospace, monospace";
+
+// Wrap `str` to at most `maxLines` lines within `maxW` at `font`, ellipsizing the
+// final line when text remains — the SVG equivalent of the board's CSS
+// -webkit-line-clamp on the now-line. Pure over the canvas measurer.
+function wrapLines(str, maxW, font, maxLines) {
+  meas.font = font;
+  str = String(str == null ? '' : str).replace(/\s+/g, ' ').trim();
+  if (!str) return [];
+  const words = str.split(' ');
+  const lines = [];
+  let cur = '', idx = 0;
+  while (idx < words.length && lines.length < maxLines) {
+    const trial = cur ? cur + ' ' + words[idx] : words[idx];
+    if (!cur || meas.measureText(trial).width <= maxW) { cur = trial; idx++; }
+    else { lines.push(cur); cur = ''; }
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  // Words still remaining → we hit the line cap; fold them into the last line so
+  // truncate() ellipsizes it, signalling "more".
+  if (idx < words.length && lines.length) {
+    lines[lines.length - 1] += ' ' + words.slice(idx).join(' ');
+  }
+  return lines.map(l => truncate(l, maxW, font));
+}
 
 // --------------------------------------------------------------- helpers
 const pad = n => String(n).padStart(2, '0');
@@ -106,11 +141,54 @@ let firstPaint = true;
 let draggingNode = null;
 let pendingRebuild = false;
 
+// --------------------------------------------------------------- activity strip
+// Resolve the session root's live-activity section into concrete draw items +
+// height, so measureHeight() and buildNode() agree on the (grown) node size. The
+// ONE turn-card title allowed on the graph rides in here as the current prompt.
+// Returns null when there's nothing live to show (empty tape / no prompt).
+function activityView(n) {
+  const a = n.activity;
+  if (!a) return null;
+  const attn = a.phase === 'attention' && !!a.attentionText;
+  const nowText = a.now && a.now.text;
+  if (!a.prompt && !attn && !nowText) return null;
+
+  const items = [];
+  let y = ACT_DIV_Y + ACT_LINE1;
+  if (a.prompt) {
+    items.push({ type: 'prompt', text: truncate('on: ' + a.prompt, n.w - 28, MONO_SM), y });
+    y += ACT_PROMPT_DY;
+  }
+  let pulse = false, dot = null;
+  if (attn) {
+    // The loud state: the agent is blocked on the human. Board's attention red,
+    // prefixed "needs you:", no pulse.
+    const lines = wrapLines('needs you: ' + a.attentionText, n.w - 28, SANS_SM, 2);
+    dot = { y: y - 4, cls: 'attn' };
+    items.push({ type: 'body', lines, cls: 'attn', y });
+    y += lines.length * ACT_BODY_DY;
+  } else if (nowText) {
+    const age = Math.max(0, Date.now() - (a.now.t || Date.now()));
+    const past = age > NOW_TTL;
+    pulse = a.phase === 'working' && !past;
+    const label = past ? `last seen ${ageText(age)} ago: ${a.now.text}` : a.now.text;
+    const lines = wrapLines(label, n.w - (ACT_TXT_X + 12), SANS_SM, 2);
+    dot = { y: y - 4, cls: (past ? 'past ' : '') + (a.now.kind || 'say') };
+    items.push({ type: 'body', lines, cls: (past ? 'past ' : '') + (a.now.kind || 'say'), y });
+    y += lines.length * ACT_BODY_DY;
+  }
+  return { items, pulse, dot, height: y + ACT_BOT_PAD };
+}
+
 // --------------------------------------------------------------- layout
 function measureHeight(n) {
   if (n.kind === 'plan') {
     const rows = Math.min(n.steps.length, PLAN_MAX_ROWS) + (n.steps.length > PLAN_MAX_ROWS ? 1 : 0);
     return PLAN_HEAD + rows * PLAN_ROW + PLAN_PAD;
+  }
+  if (n.kind === 'session') {
+    const av = n._av = activityView(n); // cache so buildNode paints the measured size
+    return av ? av.height : DIM.session.h;
   }
   return DIM[n.kind].h;
 }
@@ -143,7 +221,9 @@ function layout() {
   }
   if (!isFinite(minY)) { minY = TOP; maxY = TOP + 80; }
   if (session) {
-    session.w = DIM.session.w; session.h = DIM.session.h;
+    // Measured, not fixed: the activity strip grows the root, so read its real
+    // height before vertically centering it against the columns.
+    session.w = DIM.session.w; session.h = measureHeight(session);
     session.x = ROOT_X;
     session.y = Math.max(TOP, (minY + maxY) / 2 - session.h / 2);
     nodeById.set(session.id, session);
@@ -161,7 +241,14 @@ function sigOf(n) {
     case 'pr': return `${n.prState}|${n.ci}|${n.lastTouched}`;
     case 'intent': return `${n.status}|${n.commits}|${n.edits}|${n.add}|${n.del}|${n.lastTouched}`;
     case 'plan': return `${n.total}|${n.counts.completed}|${n.counts.in_progress}|${n.lastTouched}`;
-    case 'session': return `${n.cost.toFixed(3)}|${n.commits}|${n.lastTouched}|${n.phase}`;
+    case 'session': {
+      // Include the live-activity fields so a new say/tool (now.t), a phase flip,
+      // or a changed prompt/attention re-signs the root — otherwise a fresh
+      // narration wouldn't glow the node it just updated.
+      const a = n.activity || {};
+      const nowT = a.now ? a.now.t : 0;
+      return `${n.cost.toFixed(3)}|${n.commits}|${n.lastTouched}|${a.phase}|${nowT}|${a.attentionText || ''}|${a.prompt || ''}`;
+    }
     case 'collapsed': return `${n.count}`;
     default: return '';
   }
@@ -232,7 +319,8 @@ function buildNode(n) {
     }
     g.appendChild(text(16, 44, `${costText(n.cost)} · ${n.commits} commits`, 'gn-meta'));
     g.appendChild(text(16, 62, `+${n.add.toLocaleString()} / -${n.del.toLocaleString()} lines`, 'gn-meta'));
-    if (n.startedAt) g.appendChild(text(16, n.h - 8, `since ${hhmm(n.startedAt)}`, 'gn-sub'));
+    if (n.startedAt) g.appendChild(text(16, 76, `since ${hhmm(n.startedAt)}`, 'gn-sub'));
+    paintActivity(g, n);
   } else if (n.kind === 'plan') {
     g.appendChild(text(14, 20, 'Plan', 'gn-title'));
     g.appendChild(text(n.w - 14, 20, `${n.counts.completed}/${n.total}`, 'gn-frac'));
@@ -295,6 +383,30 @@ function ciMark(cx, cy, kind) {
     g.appendChild(el('path', { d: `M${cx - 4},${cy} L${cx - 1},${cy + 3} L${cx + 4},${cy - 4}`, 'stroke-width': 1.8, fill: 'none' }));
   }
   return g;
+}
+
+// The session root's live activity strip: a divider, an "on: <prompt>" label, and
+// the board's now-line — pulsing dot while the session is working and the data is
+// fresh, honestly re-tensed past the 10-min TTL, and the attention ask in red.
+function paintActivity(g, n) {
+  const av = n._av || activityView(n);
+  if (!av) return;
+  g.appendChild(el('line', { x1: 12, y1: ACT_DIV_Y, x2: n.w - 12, y2: ACT_DIV_Y, class: 'gn-act-div' }));
+  if (av.dot) {
+    if (av.pulse) g.appendChild(el('circle', { cx: ACT_DOT_X, cy: av.dot.y, r: 3, class: 'gn-act-ping ' + av.dot.cls }));
+    g.appendChild(el('circle', { cx: ACT_DOT_X, cy: av.dot.y, r: 3, class: 'gn-act-dot ' + av.dot.cls }));
+  }
+  for (const it of av.items) {
+    if (it.type === 'prompt') {
+      g.appendChild(text(16, it.y, it.text, 'gn-act-on'));
+    } else {
+      let y = it.y;
+      for (const line of it.lines) {
+        g.appendChild(text(ACT_TXT_X, y, line, 'gn-act-now ' + it.cls));
+        y += ACT_BODY_DY;
+      }
+    }
+  }
 }
 
 function paintNodes(glowIds) {
