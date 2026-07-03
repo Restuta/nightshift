@@ -4,7 +4,7 @@
 // incremental application of events, never on rebuilds (scrub/refresh).
 
 import { initialState, reduce, fold, activeItemId, hotFiles, prList, liveness, STATUSES } from './reducer.js';
-import { sessionLabel } from './session-label.js';
+import { initSessionPicker } from './session-picker.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -260,89 +260,24 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Session switcher. A fleet board can serve dozens of tapes, so it's a filterable
-// popover (type to narrow), not a native <select> wall. Freshest first, with a
-// live/idle dot, so you can't get stranded on a stale worktree tape.
-let sessionList = [];
-
-// live (<90s) / recent (<30m) / stale dot.
-function sessionMark(s, now) {
-  const age = now - (s.lastT || 0);
-  if (age < 90e3) return '🟢';
-  if (age < 30 * 60e3) return '🟡';
-  return '⚪';
-}
-
-// sessionLabel now lives in ./session-label.js (imported above), shared with the
-// Fleet home page and the server-side Fleet summary so a tape reads the same
-// everywhere.
-
-function currentSessionId() { return new URLSearchParams(location.search).get('session'); }
-
-function setPickerLabel(id) {
-  const s = sessionList.find(x => x.id === id);
-  $('#session-btn-label').textContent = s ? sessionLabel(s) : (id || 'no session');
-}
-
-function renderSessionMenu(filter) {
-  const now = Date.now();
-  const q = (filter || '').trim().toLowerCase();
-  const cur = currentSessionId();
-  const rows = sessionList.filter(s =>
-    !q || sessionLabel(s).toLowerCase().includes(q) || (s.agent || '').toLowerCase().includes(q));
-  $('#session-list').innerHTML = rows.map(s =>
-    `<li role="option" data-id="${esc(s.id)}" class="${s.id === cur ? 'sel' : ''}">` +
-    `<span class="sm-dot">${sessionMark(s, now)}</span>` +
-    `<span class="sm-label">${esc(sessionLabel(s))}</span>` +
-    `<span class="sm-meta">${s.agent ? esc(s.agent) + ' · ' : ''}${ageText(now - (s.lastT || now))} ago</span>` +
-    `</li>`).join('') || '<li class="sm-empty">no matches</li>';
-}
-
+// popover (type to narrow), not a native <select> wall — now the shared
+// initSessionPicker (public/session-picker.js), reused verbatim by /graph and
+// /lanes. onSelect does what the old click handler did: point the URL at the new
+// tape (no reload) and reconnect the data stream.
 async function initSessions() {
-  try { sessionList = await (await fetch('/sessions')).json(); } catch { sessionList = []; }
-  sessionList.sort((a, b) => (b.lastT || 0) - (a.lastT || 0)); // freshest first
-  const wanted = currentSessionId();
-  const start = (sessionList.find(s => s.id === wanted) || sessionList[0] || {}).id || 'default';
-
-  if (sessionList.length > 1) {
-    $('#session-picker').hidden = false;
-    $('#session-title').hidden = true;
-    setPickerLabel(start);
-  }
-  connect(start);
+  const picker = await initSessionPicker({
+    mount: $('#session-picker'),
+    currentId: new URLSearchParams(location.search).get('session'),
+    onSelect: id => {
+      const p = new URLSearchParams(location.search);
+      p.set('session', id); p.delete('at');
+      history.replaceState(null, '', `?${p}`);
+      connect(id);
+    },
+  });
+  if (picker.multi) $('#session-title').hidden = true;
+  connect(picker.current);
 }
-
-// Picker popover wiring (elements always present; harmless while hidden).
-(() => {
-  const picker = $('#session-picker'), menu = $('#session-menu');
-  const btn = $('#session-btn'), input = $('#session-filter');
-  if (!picker || !menu || !btn || !input) return;
-  const close = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
-  const open = () => {
-    renderSessionMenu('');
-    input.value = '';
-    menu.hidden = false;
-    btn.setAttribute('aria-expanded', 'true');
-    input.focus();
-  };
-  btn.addEventListener('click', e => { e.stopPropagation(); menu.hidden ? open() : close(); });
-  input.addEventListener('input', () => renderSessionMenu(input.value));
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { close(); btn.focus(); }
-    if (e.key === 'Enter') { const first = $('#session-list').querySelector('li[data-id]'); if (first) first.click(); }
-  });
-  $('#session-list').addEventListener('click', e => {
-    const li = e.target.closest('li[data-id]');
-    if (!li) return;
-    const id = li.dataset.id;
-    const p = new URLSearchParams(location.search);
-    p.set('session', id); p.delete('at');
-    history.replaceState(null, '', `?${p}`);
-    setPickerLabel(id);
-    close();
-    connect(id);
-  });
-  document.addEventListener('click', e => { if (!picker.contains(e.target)) close(); });
-})();
 
 function goLive() {
   live = true; playing = false;

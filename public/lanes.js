@@ -10,6 +10,7 @@
 
 import { fold } from './reducer.js';
 import { buildModel } from './lanes-model.js';
+import { initSessionPicker } from './session-picker.js';
 
 const $ = sel => document.querySelector(sel);
 const canvas = $('#lanes-canvas');
@@ -41,6 +42,7 @@ const MORE_H = 22;
 const LANE_GAP = 2;
 
 let sessionId = new URLSearchParams(location.search).get('session');
+let sessionsMeta = [];         // /sessions list (for title/agent fallback)
 let events = [];
 let model = null;
 let lanes = [];        // laid-out rows: {y, h, kind, item, label, marks}
@@ -89,17 +91,29 @@ const xOf = t => LABEL_W + ((t - view.t0) / (view.t1 - view.t0)) * plotW();
 const tAt = px => view.t0 + ((px - LABEL_W) / plotW()) * (view.t1 - view.t0);
 
 // --------------------------------------------------------------- data load
+// Mount the shared session switcher, resolve the tape to open, then load it. The
+// picker fetches /sessions once; we reuse that list for the title/agent fallback.
 async function load() {
-  // Resolve a real session id (for the header + the ?t= deep-link target) even
-  // when the URL omitted one — the server would just serve its default tape.
-  let metaList = [];
-  try { metaList = await (await fetch('/sessions')).json(); } catch { /* single-log server */ }
-  if (!sessionId && metaList.length) {
-    metaList.sort((a, b) => (b.lastT || 0) - (a.lastT || 0));
-    sessionId = metaList[0].id;
-  }
-  const meta = metaList.find(s => s.id === sessionId) || null;
+  const picker = await initSessionPicker({
+    mount: $('#session-picker'),
+    currentId: sessionId,
+    onSelect: id => {
+      const p = new URLSearchParams(location.search);
+      p.set('session', id);
+      history.replaceState(null, '', '?' + p.toString());
+      loadSession(id);
+    },
+  });
+  sessionsMeta = picker.sessions;
+  if (picker.multi) $('#session-title').hidden = true;
+  await loadSession(picker.current);
+}
 
+// (Re)build the whole timeline for a session: fetch its events, rebuild the lane
+// model, and repaint. No SSE here — lanes is a one-shot read-only view — so
+// switching sessions just re-runs this. No page reload.
+async function loadSession(id) {
+  sessionId = id;
   const q = sessionId ? '?session=' + encodeURIComponent(sessionId) : '';
   let text = '';
   try { text = await (await fetch('/events' + q)).text(); } catch { text = ''; }
@@ -109,13 +123,21 @@ async function load() {
     .sort((a, b) => a.t - b.t);
 
   const state = fold(events);
+  const meta = sessionsMeta.find(s => s.id === sessionId) || null;
   const title = (state.session.title) || (meta && meta.title) || sessionId || 'session';
   document.title = `lanes — ${title}`;
   $('#session-title').textContent = title;
   const agent = state.session.agent || (meta && meta.agent);
-  if (agent) { const b = $('#agent-badge'); b.textContent = agent; b.hidden = false; }
+  const b = $('#agent-badge');
+  if (agent) { b.textContent = agent; b.hidden = false; } else { b.hidden = true; }
 
-  if (!events.length) { $('#lanes-empty').hidden = false; return; }
+  if (!events.length) {
+    model = null; lanes = [];
+    $('#lanes-empty').hidden = false;
+    ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+    return;
+  }
+  $('#lanes-empty').hidden = true;
 
   model = buildModel(events);
   fullT0 = model.t0;
