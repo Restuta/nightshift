@@ -1837,6 +1837,31 @@ body.fleet-page { overflow: auto; }
 .gnode-step-more .gnode-box { fill: transparent; stroke: var(--line); stroke-dasharray: 4 4; }
 .gnode-step-more:hover .gnode-box { stroke: #33405f; }
 
+/* transient "now" node (Fix B2) — the ONE live turn-card allowed as a node: the
+   current prompt given spatial presence in ACTIVE, so "what's happening right now"
+   competes with the board's in-progress card. Amber "live" family with a single
+   subtle pulse (motion = liveness, never decoration); attention flips it to the
+   board's red "needs you". Flat, no gradients, per the house style. */
+.gnode-now .gnode-box { fill: #14100a; stroke: #3a2f14; }
+.gnode-now.attn .gnode-box { stroke: #4a2420; }
+.gn-now-head {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .08em; text-transform: uppercase; fill: var(--yellow);
+}
+.gn-now-head.attn { fill: var(--red); }
+.gn-now-dot { fill: var(--yellow); }
+.gn-now-dot.attn { fill: var(--red); }
+/* Live pulse ripple — a steady slow ping = "still working", the same signal the
+   session strip's .gn-act-ping carries. Only drawn while fresh+working. */
+.gn-now-ping { fill: none; stroke: var(--yellow); stroke-width: 1.4; animation: gactping 1.9s ease-out infinite; }
+.gn-now-ping.attn { stroke: var(--red); }
+.gn-now-prompt { font-family: var(--sans); font-size: 13px; font-weight: 500; fill: var(--ink); }
+.gn-now-line { font-family: var(--sans); font-size: 11px; fill: var(--dim); }
+.gn-now-line.say { fill: var(--ink); font-style: italic; opacity: .9; }
+.gn-now-line.tool { font-family: var(--mono); font-size: 10.5px; fill: var(--faint); }
+.gn-now-line.past { fill: var(--faint); font-style: normal; opacity: .8; }
+.gn-now-line.attn { fill: var(--red); font-style: normal; opacity: 1; }
+
 .graph-tooltip {
   position: absolute;
   z-index: 5;

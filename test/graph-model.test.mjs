@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildGraphModel, COLUMNS, MAX_PER_COL, STEP_CAP, TURN_RE } from '../public/graph-model.js';
+import { fold, sessionPausedAt } from '../public/reducer.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAPES = path.join(here, 'tapes');
@@ -370,4 +371,153 @@ test('an empty tape still yields a session node and no crash', () => {
   assert.equal(a.prompt, null);
   assert.equal(a.now, null);
   assert.equal(a.attentionText, null);
+});
+
+// --- transient "now" node (Fix B2) ------------------------------------------
+// The ONE deliberate exception to "turn-cards are never nodes": a single, transient
+// node for the CURRENT live turn, so "what's happening now" has presence in ACTIVE.
+// Singular, never historical, only while the session is actually live.
+test('nowNode: a doing turn card + working phase yields ONE now node in ACTIVE', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start', title: 's' },
+    { t: 2, type: 'item', id: 'turn-7', title: 'wire the live strip', status: 'doing' },
+  ]);
+  const now = nodeById(m, 'now');
+  assert.ok(now, 'the now node exists');
+  assert.equal(now.kind, 'now');
+  assert.equal(now.col, 1, 'the now node sits in ACTIVE');
+  assert.equal(now.prompt, 'wire the live strip', 'the prompt is the current turn title');
+  assert.equal(now.turnId, 'turn-7');
+  assert.equal(now.phase, 'working');
+  assert.ok(hasEdge(m, 'session', 'now', 'session'), 'a session→now containment edge (kind session)');
+  // singular — exactly one, ever
+  assert.equal(m.nodes.filter(n => n.kind === 'now').length, 1);
+  // and the turn card is STILL never an intent node (the invariant holds)
+  assert.ok(!nodeById(m, 'intent:turn-7'), 'the turn card is not an intent node');
+});
+
+test('nowNode: sorts to the TOP of ACTIVE, above a running step', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'todos', todos: [{ text: 'grind', status: 'in_progress' }] },
+    { t: 5, type: 'item', id: 'turn-3', title: 'current work', status: 'doing' },
+  ]);
+  const active = m.nodes.filter(n => n.col === 1).sort((a, b) => a.order - b.order);
+  assert.equal(active[0].kind, 'now', 'the freshest-touched now node is first in ACTIVE');
+  assert.ok(active.some(n => n.kind === 'step'), 'the running step is also in ACTIVE, below it');
+});
+
+test('nowNode: absent when the turn is done, when idle, and when ended', () => {
+  const done = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'turn-1', title: 'x', status: 'doing' },
+    { t: 3, type: 'item', id: 'turn-1', title: 'x', status: 'done' },
+  ]);
+  assert.ok(!nodeById(done, 'now'), 'a finished turn conjures no now node');
+
+  const idle = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'turn-1', title: 'x', status: 'doing' },
+    { t: 3, type: 'session', phase: 'idle' },
+  ]);
+  assert.ok(!nodeById(idle, 'now'), 'an idle session shows no phantom now node even with a stuck doing card');
+
+  const ended = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'turn-1', title: 'x', status: 'doing' },
+    { t: 3, type: 'session', phase: 'end' },
+  ]);
+  assert.ok(!nodeById(ended, 'now'), 'an ended session shows no now node');
+});
+
+test('nowNode: attention is a live state → the now node persists (the loud "needs you")', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'turn-1', title: 'approve the migration?', status: 'doing' },
+    { t: 3, type: 'session', phase: 'attention', text: 'approve?' },
+  ]);
+  const now = nodeById(m, 'now');
+  assert.ok(now, 'attention keeps the now node');
+  assert.equal(now.phase, 'attention');
+  assert.equal(now.prompt, 'approve the migration?');
+});
+
+test('nowNode: a non-turn doing intent does NOT get a now node (no double-count)', () => {
+  const m = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'wi-schema', title: 'schema work', status: 'doing' },
+  ]);
+  assert.ok(!nodeById(m, 'now'), 'a declared work item renders as an intent node, not a now node');
+  assert.ok(nodeById(m, 'intent:wi-schema'), 'and it IS an intent node');
+});
+
+test('nowNode: the now-line follows the turn card, else falls back to lastSay', () => {
+  const withNow = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'item', id: 'turn-1', title: 'ship it', status: 'doing' },
+    { t: 3, type: 'tool', text: 'running the calibration sweep', item: 'turn-1' },
+  ]);
+  const n1 = nodeById(withNow, 'now');
+  assert.deepEqual({ text: n1.now.text, kind: n1.now.kind }, { text: 'running the calibration sweep', kind: 'tool' });
+  assert.equal(n1.now.t, 3, 'the now timestamp is the tool event t, not wall-clock');
+
+  const fallback = buildGraphModel([
+    { t: 1, type: 'session', phase: 'start' },
+    { t: 2, type: 'say', text: 'waiting for the harvest to finish' },
+    { t: 3, type: 'item', id: 'turn-1', title: 'ship it', status: 'doing' },
+  ]);
+  const n2 = nodeById(fallback, 'now');
+  assert.equal(n2.now.text, 'waiting for the harvest to finish', 'now falls back to lastSay');
+  assert.equal(n2.now.kind, 'say');
+});
+
+// --- honest per-step un-pause (Fix B1) --------------------------------------
+// A step reads live ONLY while its in_progress claim is FRESH. An unrelated resume
+// (a quick Q&A turn) must not relight a step whose in_progress claim is hours stale.
+const STEP_STALE_MS = 10 * 60e3; // mirror of the model's constant
+
+test('a step whose in_progress claim is stale reads paused even while the session works', () => {
+  const t0 = 2_000, ref = t0 + STEP_STALE_MS + 60_000;
+  const m = buildGraphModel([
+    { t: 1_000, type: 'session', phase: 'start' },
+    { t: t0, type: 'todos', todos: [{ text: 'long grind', status: 'in_progress' }] },
+    // Much later (> STEP_STALE_MS) the session produces UNRELATED activity — a resume
+    // then a say — WITHOUT re-affirming the step. Its in_progress claim is now stale.
+    { t: ref - 1_000, type: 'session', phase: 'resume' },
+    { t: ref, type: 'say', text: 'answering a quick unrelated question' },
+  ]);
+  const step = m.nodes.find(n => n.kind === 'step');
+  assert.ok(step, 'the step is still sourced');
+  assert.equal(step.paused, true, 'a stale in_progress claim is honestly paused, not live-ticking');
+  assert.equal(step.pausedAt, t0, 'the duration freezes at the last affirmation (affirmedAt)');
+  assert.equal(step.startedAt, t0, 'startedAt is unchanged');
+});
+
+test('a step a fresh snapshot re-affirms stays live even after a long gap', () => {
+  const t0 = 2_000, later = t0 + STEP_STALE_MS + 60_000;
+  const m = buildGraphModel([
+    { t: 1_000, type: 'session', phase: 'start' },
+    { t: t0, type: 'todos', todos: [{ text: 'grind', status: 'in_progress' }] },
+    // A long time passes, but a FRESH snapshot RE-AFFIRMS the step in_progress, so
+    // ref − affirmedAt == 0 ≤ STEP_STALE_MS → still live.
+    { t: later, type: 'todos', todos: [{ text: 'grind', status: 'in_progress' }] },
+  ]);
+  const step = m.nodes.find(n => n.kind === 'step');
+  assert.ok(step, 'the step is sourced');
+  assert.equal(step.paused, false, 'a freshly re-affirmed step reads live');
+  assert.equal(step.pausedAt, null, 'no frozen moment — the view ticks it live');
+  assert.equal(step.startedAt, t0, 'startedAt stays the first in_progress');
+});
+
+test('existing idle-pause still holds: paused with pausedAt === sessionPausedAt', () => {
+  const evs = [
+    { t: 1000, type: 'session', phase: 'start' },
+    { t: 2000, type: 'todos', todos: [{ text: 'long step', status: 'in_progress' }] },
+    { t: 5000, type: 'session', phase: 'idle' },
+  ];
+  const m = buildGraphModel(evs);
+  const step = m.nodes.find(n => n.kind === 'step');
+  assert.equal(step.paused, true, 'recorded idle marks the step paused (unchanged path)');
+  assert.equal(step.pausedAt, sessionPausedAt(fold(evs)), 'the frozen moment ties exactly to sessionPausedAt');
+  assert.equal(step.pausedAt, 5000);
 });

@@ -15,7 +15,7 @@
 // honors retracts (a recording bug is not history), so the graph agrees with the
 // board at every replay time for free.
 
-import { fold, sessionPausedAt } from './reducer.js';
+import { fold, sessionPausedAt, freshestProducerAt } from './reducer.js';
 import { TURN_RE, turnLabel } from './turn-id.js';
 
 // A work item whose id is a turn-card id (legacy `turn-<n>` OR namespaced
@@ -140,6 +140,12 @@ function planNode(state) {
 // ACTIVE column.
 export const STEP_CAP = 3;
 
+// How old a step's last in_progress affirmation may be, relative to the freshest
+// recorded producer signal, before we stop trusting it as live. Matches the view's
+// now-line 10-min TTL (graph.js NOW_TTL) so a step and the session strip re-tense on
+// the same clock. Compared against RECORDED timestamps only — no Date.now().
+const STEP_STALE_MS = 10 * 60e3;
+
 // The CURRENT plan's in-progress steps, as compact ACTIVE-column nodes — the live
 // "moving part" the /graph was missing. Turn cards are (correctly) excluded, so
 // when the only in-flight work is a running plan step, ACTIVE/REVIEW sit empty and
@@ -152,26 +158,50 @@ export const STEP_CAP = 3;
 // does the (display-side) Date.now() ticking for the live case.
 function stepNodes(state) {
   const idleAt = sessionPausedAt(state);   // non-null only when phase === 'idle'
-  const paused = idleAt != null;
+  // Honest per-step liveness. A step reads live ONLY while its in_progress claim is
+  // FRESH: we only KNOW a step is progressing if a recent plan snapshot re-affirmed
+  // it (td.affirmedAt). Without that, an unrelated resume (a quick Q&A turn) must NOT
+  // relight a step whose in_progress claim is hours stale and untouched by the
+  // current work. We compare two RECORDED timestamps — the freshest producer signal
+  // (ref) vs the step's last affirmation — so this stays pure (no Date.now()); the
+  // honest display for a stale claim is paused-with-frozen-duration, the same ethos
+  // as the board's paused card and the superseded-step fossil sweep.
+  const ref = freshestProducerAt(state);
   const running = (state.todos || [])
     .filter(td => (td.status || (td.done ? 'completed' : 'pending')) === 'in_progress')
-    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+    .map(td => {
+      const startedAt = td.startedAt || td.firstSeenAt || 0;
+      const affirmedAt = td.affirmedAt || td.startedAt || td.firstSeenAt || 0;
+      // Stale = working (NOT recorded-idle) but this step's last affirmation is old
+      // relative to the freshest producer signal. The idle path is untouched.
+      const stale = idleAt == null && ref != null && affirmedAt > 0 && (ref - affirmedAt) > STEP_STALE_MS;
+      const paused = idleAt != null || stale;
+      // Frozen "now" for the paused duration: idleAt on recorded idle (unchanged);
+      // else the last affirmation, so the duration freezes at the last evidence the
+      // step actually progressed; null when live (the view ticks it).
+      const pausedAt = idleAt != null ? idleAt : (stale ? affirmedAt : null);
+      return { text: td.text, startedAt, paused, pausedAt };
+    });
   const shown = running.slice(0, STEP_CAP);
-  const out = shown.map(td => ({
-    id: 'step:' + td.text,
+  const out = shown.map(r => ({
+    id: 'step:' + r.text,
     kind: 'step',
-    text: td.text,
-    startedAt: td.startedAt || td.firstSeenAt || 0,
-    paused,
-    pausedAt: idleAt,   // frozen "now" for the duration while paused (null when live)
-    lastTouched: td.startedAt || td.firstSeenAt || 0,
+    text: r.text,
+    startedAt: r.startedAt,
+    paused: r.paused,
+    pausedAt: r.pausedAt,   // frozen "now" for the duration while paused (null when live)
+    lastTouched: r.startedAt,
   }));
   if (running.length > shown.length) {
+    // The fold node's paused reflects the whole running set: "…N more running" is
+    // honest only if some of them are actually live, so it reads paused iff EVERY
+    // running step is paused (recorded idle, or all individually stale).
     out.push({
       id: 'step:more',
       kind: 'step-more',
       count: running.length - shown.length,
-      paused,
+      paused: running.every(r => r.paused),
       lastTouched: shown.length ? shown[shown.length - 1].lastTouched : 0,
     });
   }
@@ -224,6 +254,50 @@ function sessionNode(state) {
     lastTouched: s.lastAt || s.startedAt || 0,
     phase: s.phase || null,
     activity: sessionActivity(state),
+  };
+}
+
+// The transient "now" node — the ONE deliberate, transient exception to the
+// header's "nodes are REAL entities, NEVER turn-cards" rule. A future reader must
+// NOT conclude the turns-as-nodes invariant eroded: this node is SINGULAR (at most
+// one), NEVER historical (it vanishes the instant the current turn ends), and
+// exists only to give "what's happening right now" spatial presence in the ACTIVE
+// column — the funnel the owner scans, where the live turn today has no node (it
+// rides only the session-root activity strip). No PAST turn is ever a node.
+//
+// Returns null unless the session is actually LIVE (phase working|attention) AND a
+// real turn card (TURN_RE) is currently `doing`. Gating on phase means a stale
+// stuck-`doing` card during idle/ended does NOT conjure a phantom now-node. Only a
+// turn-card id qualifies: non-turn `doing` intents already render as intent nodes,
+// so gating here avoids double-counting the same live work. Pure over the fold.
+function nowNode(state) {
+  const phase = state.session.phase;
+  if (phase !== 'working' && phase !== 'attention') return null;
+  // The freshest DOING turn card (by touchedAt) — a synthesized chat turn, never a
+  // declared work item.
+  let turn = null;
+  for (const it of state.items.values()) {
+    if (it.status !== 'doing' || !TURN_RE.test(it.id)) continue;
+    if (!turn || (it.touchedAt || 0) > (turn.touchedAt || 0)) turn = it;
+  }
+  if (!turn) return null;
+  const s = state.session;
+  // `now` line: the turn's own live line (a say/tool with its own t), falling back
+  // to the session's last narration — the SAME derivation as sessionActivity(), kept
+  // in lock-step so the node and the root strip never disagree about "now".
+  let now = turn.now ? { text: turn.now.text, kind: turn.now.kind, t: turn.now.t } : null;
+  if (!now && s.lastSay) now = { text: s.lastSay, kind: 'say', t: s.lastProducerAt || s.lastAt || 0 };
+  return {
+    id: 'now',
+    kind: 'now',
+    turnId: turn.id,
+    prompt: turn.title || turnLabel(turn.id),
+    now,
+    phase,
+    startedAt: turn.createdAt || turn.touchedAt || 0,
+    // Fresh touchedAt → sorts to the TOP of ACTIVE via byRecency, and the deep link
+    // targets the turn's live moment.
+    lastTouched: turn.touchedAt || 0,
   };
 }
 
@@ -383,21 +457,24 @@ export function buildGraphModel(events) {
   const intents = intentNodes(state);
   const prs = prNodes(state);
   const steps = stepNodes(state);
+  const now = nowNode(state);   // singular, transient — null unless the session is live
 
   // Column assignment. PRs first (so an intent item can follow its PR's column),
-  // then plan (always column 0) and intent items. Running plan steps always live in
-  // ACTIVE — that IS "in progress".
+  // then plan (always column 0) and intent items. Running plan steps and the live
+  // "now" node always live in ACTIVE — that IS "in progress".
   const prCol = new Map(); // PR number → column key
   for (const n of prs) { const key = prColumn(n); n.col = COL_INDEX[key]; prCol.set(n.number, key); }
   if (plan) plan.col = COL_INDEX.plan;
   for (const n of intents) n.col = COL_INDEX[intentColumn(n, prCol)];
   for (const n of steps) n.col = COL_INDEX.active;
+  if (now) now.col = COL_INDEX.active;
 
   const placed = [];
   if (plan) placed.push(plan);
   for (const n of intents) placed.push(n);
   for (const n of prs) placed.push(n);
   for (const n of steps) placed.push(n);
+  if (now) placed.push(now);
 
   // Edges first (over the full node set), so base chains resolve before collapse.
   assignChainDepth([...prs]);
@@ -417,11 +494,11 @@ export function buildGraphModel(events) {
     const col = columns[c];
     col.sort(byRecency);
     if (col.length <= MAX_PER_COL) continue;
-    // Keep failing-CI PRs, the plan cluster, and the live step nodes pinned; fill
-    // the rest by recency, fold the overflow into one "N more" node pinned to the
-    // column's bottom.
+    // Keep failing-CI PRs, the plan cluster, the live step nodes, and the transient
+    // "now" node pinned; fill the rest by recency, fold the overflow into one "N
+    // more" node pinned to the column's bottom.
     const pinned = [], rest = [];
-    for (const n of col) ((n.kind === 'pr' && n.ci === 'fail') || n.kind === 'plan' || n.kind === 'step' || n.kind === 'step-more' ? pinned : rest).push(n);
+    for (const n of col) ((n.kind === 'pr' && n.ci === 'fail') || n.kind === 'plan' || n.kind === 'step' || n.kind === 'step-more' || n.kind === 'now' ? pinned : rest).push(n);
     const keep = rest.slice(0, Math.max(0, MAX_PER_COL - pinned.length));
     const hidden = rest.slice(keep.length);
     if (hidden.length) {
@@ -438,6 +515,7 @@ export function buildGraphModel(events) {
   for (const col of columns) {
     for (const n of col) {
       if (n.kind === 'plan' || n.kind === 'intent') edges.push({ from: 'session', to: n.id, kind: 'session' });
+      else if (n.kind === 'now') edges.push({ from: 'session', to: n.id, kind: 'session' });
       else if (n.kind === 'collapsed') edges.push({ from: 'session', to: n.id, kind: 'session' });
       else if (n.kind === 'pr' && !owned.has(n.id)) edges.push({ from: 'session', to: n.id, kind: 'session' });
     }
