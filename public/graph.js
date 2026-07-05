@@ -41,11 +41,17 @@ const DIM = {
   plan: { w: 250 }, // height computed from step count
   step: { w: 214 },  // compact running-step node; height computed from wrapped text
   'step-more': { w: 182, h: 42 },
+  now: { w: 230 },   // transient live-turn node; height computed from prompt + now-line
 };
 const PLAN_HEAD = 30, PLAN_ROW = 18, PLAN_MAX_ROWS = 7, PLAN_PAD = 12;
 // Running-step node geometry: a glyph column on the left, up-to-2 wrapped text
 // lines, then a duration row.
 const STEP_TXT_X = 34, STEP_PAD_TOP = 14, STEP_LINE = 15, STEP_DUR_ROW = 15, STEP_PAD_BOT = 11;
+// "now" node geometry: a header row (dot + "now"/"needs you"), up-to-2 wrapped
+// prompt lines, then the now-line (up-to-2 wrapped) with the session strip's TTL
+// re-tensing. A left inset for the text, the header pulse dot sits above it.
+const NOW_TXT_X = 16, NOW_PROMPT_TOP = 40, NOW_PROMPT_LINE = 17, NOW_LINE_STEP = 15;
+const NOW_HEAD_TO_BODY = 4, NOW_PAD_BOT = 12;
 
 // A PR / intent node grows by one row when it carries diff-size data, so the
 // "+N −N" chip gets its own line without crowding the title/meta. These nodes are
@@ -204,6 +210,37 @@ function activityView(n) {
   return { items, pulse, dot, height: y + ACT_BOT_PAD };
 }
 
+// Resolve the transient "now" node's live section into draw items + measured
+// height, so measureHeight() and buildNode() agree on the size. Mirrors the session
+// strip's now-line treatment: honestly re-tensed past the 10-min TTL, a single
+// subtle pulse while working+fresh, the board's attention red on `attention`. Pure
+// over the canvas measurer; the only wall-clock read is the display-side age (same
+// as the session strip), never the model.
+function nowView(n) {
+  const w = DIM.now.w;
+  const attn = n.phase === 'attention';
+  const promptLines = wrapLines(n.prompt || turnLabel(n.turnId) || 'current turn', w - (NOW_TXT_X + 10), SANS, 2);
+  let y = NOW_PROMPT_TOP + Math.max(1, promptLines.length) * NOW_PROMPT_LINE;
+  let bodyLines = [], bodyCls = '', pulse = false;
+  const nowText = n.now && n.now.text;
+  if (nowText) {
+    const age = Math.max(0, Date.now() - (n.now.t || Date.now()));
+    const past = age > NOW_TTL;
+    // Pulse only while the session is working AND the line is fresh — never on
+    // attention (the loud state is red + "needs you", not a live pulse).
+    pulse = !attn && n.phase === 'working' && !past;
+    const label = past ? `last seen ${ageText(age)} ago: ${nowText}` : nowText;
+    bodyLines = wrapLines(label, w - (NOW_TXT_X + 10), SANS_SM, 2);
+    bodyCls = (attn ? 'attn ' : '') + (past ? 'past ' : '') + (n.now.kind || 'say');
+    y += NOW_HEAD_TO_BODY + bodyLines.length * NOW_LINE_STEP;
+  } else {
+    // No narration line yet: a bare pulse under the prompt while working (motion =
+    // liveness); attention stays static (loud red header, no pulse).
+    pulse = !attn && n.phase === 'working';
+  }
+  return { attn, promptLines, bodyLines, bodyCls, pulse, height: y + NOW_PAD_BOT };
+}
+
 // --------------------------------------------------------------- layout
 function measureHeight(n) {
   if (n.kind === 'plan') {
@@ -217,6 +254,10 @@ function measureHeight(n) {
   if (n.kind === 'step') {
     const nLines = Math.max(1, wrapLines(n.text, DIM.step.w - (STEP_TXT_X + 8), SANS_SM, 2).length);
     return STEP_PAD_TOP + nLines * STEP_LINE + STEP_DUR_ROW + STEP_PAD_BOT;
+  }
+  if (n.kind === 'now') {
+    const nv = n._nav = nowView(n); // cache so buildNode paints the measured size
+    return nv.height;
   }
   // PR / intent nodes grow one row for the diff chip, but only when sized — an
   // absent-size node keeps its compact original height (no "+0 −0" gap).
@@ -276,6 +317,9 @@ function sigOf(n) {
     // running / just-paused step glows. A step leaving in_progress drops the node.
     case 'step': return `${n.text}|${n.startedAt}|${n.paused}`;
     case 'step-more': return `${n.count}|${n.paused}`;
+    // A fresh say (now.t), a phase flip, or a changed prompt re-signs the now node so
+    // it glows; a brand-new now-node glows once via paint()'s new-entity path.
+    case 'now': return `${n.phase}|${n.now ? n.now.t : 0}|${n.prompt}|${n.turnId}`;
     case 'session': {
       // Include the live-activity fields so a new say/tool (now.t), a phase flip,
       // or a changed prompt/attention re-signs the root — otherwise a fresh
@@ -438,6 +482,23 @@ function buildNode(n) {
   } else if (n.kind === 'step-more') {
     g.setAttribute('class', 'gnode gnode-step-more' + (n.paused ? ' paused' : ''));
     g.appendChild(text(n.w / 2, n.h / 2 + 4, `…${n.count} more running`, 'gn-collapsed-txt'));
+  } else if (n.kind === 'now') {
+    // The transient live-turn node: amber "live" accent (red on attention), a single
+    // pulse dot, a header, the current prompt, and the now-line. Flat/quiet — one
+    // subtle pulse, never decoration.
+    const nv = n._nav || nowView(n);
+    if (nv.attn) g.classList.add('attn');
+    const hy = 15;
+    g.appendChild(el('rect', { x: 0, y: 0, width: 4, height: n.h, rx: 2, class: 'gnode-accent', fill: nv.attn ? '#eb6e64' : '#d29922' }));
+    if (nv.pulse) g.appendChild(el('circle', { cx: 18, cy: hy, r: 3.5, class: 'gn-now-ping' + (nv.attn ? ' attn' : '') }));
+    g.appendChild(el('circle', { cx: 18, cy: hy, r: 3.5, class: 'gn-now-dot' + (nv.attn ? ' attn' : '') }));
+    g.appendChild(text(30, hy + 4, nv.attn ? 'needs you' : 'now', 'gn-now-head' + (nv.attn ? ' attn' : '')));
+    // The one turn-card title allowed as a node's headline — the current prompt.
+    let ty = NOW_PROMPT_TOP;
+    for (const line of nv.promptLines) { g.appendChild(text(NOW_TXT_X, ty, line, 'gn-now-prompt')); ty += NOW_PROMPT_LINE; }
+    // The now-line, honestly re-tensed past the TTL (same treatment as the strip).
+    ty += NOW_HEAD_TO_BODY;
+    for (const line of nv.bodyLines) { g.appendChild(text(NOW_TXT_X, ty, line, 'gn-now-line ' + nv.bodyCls)); ty += NOW_LINE_STEP; }
   }
   return g;
 }
@@ -682,6 +743,10 @@ function tooltipHtml(n) {
       : (n.startedAt ? Math.max(0, Date.now() - n.startedAt) : null);
     const when = ms != null ? (n.paused ? `paused · ${ageText(ms)}` : `running ${ageText(ms)}`) : (n.paused ? 'paused' : 'running');
     return head(n.paused ? 'paused step' : 'running step') + body(`${n.text}\n${when}`);
+  }
+  if (n.kind === 'now') {
+    const nowLine = n.now && n.now.text ? '\n' + n.now.text : '';
+    return head('current turn') + body(`${n.prompt || turnLabel(n.turnId)}${nowLine}\n${turnLabel(n.turnId)}`);
   }
   if (n.kind === 'step-more') return head(`${n.count} more running`) + body('additional in-progress plan steps, folded to keep the graph legible');
   if (n.kind === 'session') return head(n.title) + body(`${n.agent || 'agent'}\n${costText(n.cost)} · ${n.commits} commits\nsince ${n.startedAt ? hhmm(n.startedAt) : '—'}`);

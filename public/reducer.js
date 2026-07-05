@@ -71,7 +71,7 @@ export function initialState() {
     sources: new Map(),
     items: new Map(),
     todos: [],            // full current plan (session-scoped) → the sidebar Plan panel
-    stepTimes: new Map(), // step text → {firstSeenAt, startedAt, doneAt}
+    stepTimes: new Map(), // step text → {firstSeenAt, startedAt, doneAt, affirmedAt}
     todoPrev: new Map(),  // step text → status at the previous snapshot (for per-turn deltas)
     files: new Map(), // path → {edits, lastAt} — churn signal
     prs: new Map(),   // repo#number (bare number for v1/no-repo) → {number, repo, state, url, title, ci, openedAt, mergedAt} — the PR panel
@@ -255,6 +255,13 @@ export function reduce(state, ev) {
         let tm = times.get(td.text);
         if (!tm) { tm = { firstSeenAt: ev.t }; times.set(td.text, tm); }
         if (status === 'in_progress' && tm.startedAt == null) tm.startedAt = ev.t;
+        // affirmedAt vs startedAt: startedAt is set ONCE at the first in_progress and
+        // never moves; affirmedAt is overwritten to the latest snapshot that STILL
+        // claims the step in_progress. It is the freshness signal for "is this step
+        // actually still being worked" — a plan snapshot can keep declaring a step
+        // in_progress hours after the work moved on, so the last re-affirmation, not
+        // the start, is what tells a consumer the claim is live (see /graph un-pause).
+        if (status === 'in_progress') tm.affirmedAt = ev.t;
         if (status === 'completed' && tm.doneAt == null) {
           tm.doneAt = ev.t;
           if (tm.startedAt == null) tm.startedAt = tm.firstSeenAt;
@@ -284,6 +291,7 @@ export function reduce(state, ev) {
         return {
           text: td.text, done: status === 'completed', status,
           startedAt: tm && tm.startedAt, doneAt: tm && tm.doneAt, firstSeenAt: tm && tm.firstSeenAt,
+          affirmedAt: tm && tm.affirmedAt,   // last snapshot still claiming in_progress (freshness)
           // Real duration carried by the producer (task tools) wins over the
           // snapshot-delta estimate — a backfill folds the whole plan at once, so
           // the delta would read 0.

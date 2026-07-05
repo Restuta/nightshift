@@ -351,3 +351,57 @@ test('sessionPausedAt returns the quiet moment on recorded idle, null otherwise'
   assert.equal(x.state.session.phase, 'working');
   assert.equal(sessionPausedAt(x.state), null, 'resumed work clears the paused state');
 });
+
+// affirmedAt (Fix A) — the per-step freshness signal. Every snapshot that STILL
+// claims a step in_progress re-stamps affirmedAt to that snapshot's t (always the
+// latest), while startedAt is set once at the first in_progress and never moves. It
+// answers "is this step actually still being worked", so /graph can honestly un-
+// pause only the steps a recent snapshot re-affirmed.
+const stepOf = (st, text) => st.todos.find(s => s.text === text);
+
+test('a todos snapshot stamps affirmedAt; a re-affirming snapshot bumps it while startedAt stays fixed', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  const t1 = x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'grind', status: 'in_progress' }] }) && x.at();
+  let step = stepOf(x.state, 'grind');
+  assert.equal(step.startedAt, t1, 'startedAt is the first in_progress moment');
+  assert.equal(step.affirmedAt, t1, 'affirmedAt is stamped on the first in_progress snapshot');
+
+  // A later snapshot STILL lists the step in_progress → affirmedAt advances to the
+  // newer t; startedAt is unchanged.
+  const t2 = x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'grind', status: 'in_progress' }] }) && x.at();
+  step = stepOf(x.state, 'grind');
+  assert.ok(t2 > t1);
+  assert.equal(step.startedAt, t1, 'startedAt never moves off the first in_progress');
+  assert.equal(step.affirmedAt, t2, 'affirmedAt tracks the most recent re-affirmation');
+});
+
+test('a completed step keeps its startedAt; affirmedAt holds the LAST in_progress, not the completion', () => {
+  const x = stream();
+  x.emit({ type: 'item', id: 'turn-1', status: 'doing' });
+  const t1 = x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'in_progress' }] }) && x.at();
+  const t2 = x.emit({ type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'completed' }] }) && x.at();
+  const step = stepOf(x.state, 'a');
+  assert.ok(t2 > t1);
+  assert.equal(step.startedAt, t1, 'startedAt is fixed at the first in_progress');
+  assert.equal(step.doneAt, t2, 'doneAt is the completion');
+  assert.equal(step.affirmedAt, t1, 'affirmedAt is the last in_progress affirmation — completion does not re-stamp it');
+});
+
+test('affirmedAt is purely additive: startedAt/doneAt semantics are unchanged (replay-pure)', () => {
+  const events = [
+    { t: 1000, type: 'item', id: 'turn-1', status: 'doing' },
+    { t: 2000, type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'in_progress' }] },
+    { t: 3000, type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'in_progress' }] },
+    { t: 4000, type: 'todos', item: 'turn-1', todos: [{ text: 'a', status: 'completed' }] },
+  ];
+  // Incremental live reduce equals a whole-tape fold, affirmedAt included.
+  const incr = initialState();
+  for (const ev of events) reduce(incr, ev);
+  const norm = st => stepOf(st, 'a');
+  assert.deepEqual(norm(fold(events)), norm(incr), 'end-of-tape fold == incremental live reduce');
+  // Mid-scrub before the second affirmation: affirmedAt is the first, not "now".
+  const mid = stepOf(fold(events, 2500), 'a');
+  assert.equal(mid.affirmedAt, 2000, 'scrubbed to t=2500, affirmedAt is the first in_progress snapshot');
+  assert.equal(mid.startedAt, 2000, 'startedAt matches');
+});
