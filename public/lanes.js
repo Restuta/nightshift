@@ -4,12 +4,23 @@
 // that does NOT touch the reducer), and paint it on a canvas. x = time over the
 // whole tape; lanes (rows) = the session on top, then one row per work item.
 //
-// Perf: the model + per-lane mark arrays are computed ONCE on load. Pan/zoom only
-// remaps time→x and redraws (rAF-throttled) — never a refold — so a 29k-event
-// tape stays interactive.
+// The x-axis goes through ONE mapping — the pure scale (public/lanes-scale.js).
+// By default it COMPRESSES idle: active spans keep real proportions, long silences
+// collapse to a fixed sliver, so the ~11 real hours of a 64h session fill the axis.
+// "compress idle" off rebuilds the same scale with zero gaps → the old linear axis,
+// pixel-for-pixel. Every consumer (paint, hit-test, tooltips, deep-links, pan/zoom)
+// works in the scale's unit space, so there's exactly one code path. Chapter bands
+// (from the digest's prompt episodes) tint the background so the timeline answers
+// "which ask produced this burst".
+//
+// Perf: the model + digest + per-lane mark arrays are computed ONCE on load. Pan/
+// zoom only remaps unit→x and redraws (rAF-throttled) — never a refold — so a
+// 29k-event tape stays interactive. Toggling the axis rebuilds only the scale.
 
 import { fold } from './reducer.js';
 import { buildModel } from './lanes-model.js';
+import { buildDigest } from './digest.js';
+import { buildScale } from './lanes-scale.js';
 import { initSessionPicker } from './session-picker.js';
 
 const $ = sel => document.querySelector(sel);
@@ -17,6 +28,7 @@ const canvas = $('#lanes-canvas');
 const ctx = canvas.getContext('2d');
 const tip = $('#lanes-tooltip');
 const main = $('#lanes-main');
+const compressBtn = $('#compress-toggle');
 
 // Palette — the same hexes as :root in style.css (canvas can't read CSS vars
 // cheaply per frame). Flat near-black, Linear-like; motion is data, not decor.
@@ -29,25 +41,44 @@ const C = {
   density: '#26314e', commit: '#d29922', prOpen: '#4cb782', merged: '#a371f7',
   closed: '#8b93a8', fail: '#eb6e64', day: 'rgba(120,132,168,.22)',
   gridText: '#5d6781',
+  // Chapter bands — a very faint indigo wash, alternating per episode so adjacent
+  // asks read apart without shouting. Hairline edge + quiet prompt label on top.
+  bandA: 'rgba(94,106,210,.055)', bandB: 'rgba(94,106,210,.11)',
+  bandEdge: 'rgba(94,106,210,.28)', bandLabel: '#7d88a6',
+  // Collapsed idle slot — dimmer than a lane, with a ⏸ label when it's wide enough.
+  gapFill: 'rgba(6,9,17,.55)', gapEdge: 'rgba(93,103,129,.16)', gapText: '#4b5570',
 };
 
 // Lane geometry.
 const LABEL_W = 138;   // left label gutter
 const RIGHT_PAD = 16;
 const TOP_PAD = 8;
+const CHAPTER_H = 15;  // top strip reserved for chapter-band prompt labels
 const AXIS_H = 18;     // bottom time axis
 const SESSION_H = 56;
 const ITEM_H = 24;
 const MORE_H = 22;
 const LANE_GAP = 2;
 
-let sessionId = new URLSearchParams(location.search).get('session');
+const params = new URLSearchParams(location.search);
+let sessionId = params.get('session');
+// Axis mode lives in the URL so a shared link preserves it (no localStorage).
+// Compression is ON by default; &linear=1 opts into the old linear axis.
+let compress = params.get('linear') !== '1';
+
 let sessionsMeta = [];         // /sessions list (for title/agent fallback)
 let events = [];
 let model = null;
+let digest = null;
+let scale = null;              // pure time↔unit mapping (see lanes-scale.js)
+let chapters = [];             // episode chapters that get a background band
 let lanes = [];        // laid-out rows: {y, h, kind, item, label, marks}
-let fullT0 = 0, fullT1 = 0;
-let view = { t0: 0, t1: 0 };
+let fullT0 = 0, fullT1 = 0;    // axis TIME bounds (same in both modes)
+let fullU1 = 0;                // scale.compressedSpan — the axis extent in units
+let bandTop = TOP_PAD;         // y where lane rows + bands start (below the label strip)
+// The pan/zoom window lives in the scale's UNIT space, so both modes share one
+// path: u0/u1 are positions from scale.x(), not raw timestamps.
+let view = { u0: 0, u1: 0 };
 let contentH = 0;
 
 // ------------------------------------------------------------------ helpers
@@ -87,8 +118,17 @@ function lowerBound(arr, v) {
 }
 
 const plotW = () => Math.max(1, canvas.clientWidth - LABEL_W - RIGHT_PAD);
-const xOf = t => LABEL_W + ((t - view.t0) / (view.t1 - view.t0)) * plotW();
-const tAt = px => view.t0 + ((px - LABEL_W) / plotW()) * (view.t1 - view.t0);
+const uSpan = () => Math.max(1, view.u1 - view.u0);
+// time → px and px → time, BOTH through the scale. In linear mode the scale is an
+// identity shift, so these collapse to the original linear mapping pixel-for-pixel.
+const xAtU = u => LABEL_W + ((u - view.u0) / uSpan()) * plotW();
+const uAtX = px => view.u0 + ((px - LABEL_W) / plotW()) * uSpan();
+const xOf = t => xAtU(scale.x(t));
+const tAt = px => scale.t(uAtX(px));
+// Visible TIME window — used for time-labeled grid ticks and to bound the density
+// scan. Derived from the unit window so it tracks compressed gaps correctly.
+const visT0 = () => scale.t(view.u0);
+const visT1 = () => scale.t(view.u1);
 
 // --------------------------------------------------------------- data load
 // Mount the shared session switcher, resolve the tape to open, then load it. The
@@ -140,18 +180,42 @@ async function loadSession(id) {
   $('#lanes-empty').hidden = true;
 
   model = buildModel(events);
+  digest = buildDigest(events);
   fullT0 = model.t0;
   fullT1 = Math.max(model.t1, model.t0 + 60000);
-  view = { t0: fullT0, t1: fullT1 };
+  // Episode chapters get a background band; beats (conversation, no work) don't.
+  chapters = (digest.chapters || []).filter(c => c.kind === 'episode' && c.endT > c.startT);
+  buildScaleForMode();          // sets scale + fullU1
+  view = { u0: 0, u1: fullU1 }; // full-fit
   layout();
   sizeCanvas();
+}
+
+// Build the time↔unit scale for the current mode. Compressed mode feeds the digest
+// gaps (plus any tape-edge idle the digest doesn't span — leading pre-work and the
+// trailing heartbeat tail) so those collapse. Linear mode feeds ZERO gaps, so the
+// scale is an identity shift and the axis is exactly today's linear one.
+function buildScaleForMode() {
+  let gaps = [];
+  if (compress && digest) {
+    gaps = digest.gaps.slice();
+    // The digest spans only producer events; the axis spans the whole tape. Fold
+    // the leading/trailing idle into gaps too, or they'd waste linear pixels.
+    if (digest.startT != null && digest.startT > fullT0) gaps.push({ fromT: fullT0, toT: digest.startT });
+    if (digest.endT != null && digest.endT < fullT1) gaps.push({ fromT: digest.endT, toT: fullT1 });
+  }
+  scale = buildScale(gaps, fullT0, fullT1);
+  fullU1 = Math.max(1, scale.compressedSpan);
 }
 
 // Lay the rows out top-to-bottom and precompute each row's mark list ONCE. Marks
 // carry their t (mapped to x only at draw time) and a tooltip descriptor.
 function layout() {
   lanes = [];
-  let y = TOP_PAD;
+  // Reserve a thin strip at the top for chapter-band prompt labels (only when
+  // there are bands to label), so labels never collide with the session lane.
+  bandTop = TOP_PAD + (chapters.length ? CHAPTER_H : 0);
+  let y = bandTop;
   lanes.push({ y, h: SESSION_H, kind: 'session', label: 'session', marks: sessionMarks() });
   y += SESSION_H + LANE_GAP;
   for (const it of model.lanes) {
@@ -219,13 +283,19 @@ function draw() {
     ctx.fillRect(0, ln.y, W, ln.h);
   }
 
-  drawGrid(x0, x1, H);
+  // BEHIND lane content: chapter bands (which ask), then collapsed-gap slots.
+  drawChapterBands(x0, x1);
+  drawGapSlots(x0, x1);
+  drawGrid(x0, x1);
   for (const ln of lanes) {
     if (ln.kind === 'session') drawSessionLane(ln, x0, x1);
     else if (ln.kind === 'item') drawItemLane(ln, x0, x1);
     else drawMoreLane(ln, x0, x1);
     drawLabel(ln);
   }
+  // ON TOP: the quiet prompt labels + ⏸ gap labels, so nothing overwrites them.
+  drawChapterLabels(x0, x1);
+  drawGapLabels(x0, x1);
   drawAxis(x0, x1);
 
   // label gutter divider
@@ -233,26 +303,112 @@ function draw() {
   ctx.fillRect(LABEL_W - 0.5, 0, 1, contentH - AXIS_H);
 }
 
-function drawGrid(x0, x1, H) {
-  const span = view.t1 - view.t0;
-  const iv = niceTickMs(span);
+// Chapter bands — a faint alternating wash spanning each work episode's real time,
+// mapped through the scale so they compress with the axis. Beats get no band.
+function drawChapterBands(x0, x1) {
+  const top = bandTop, bottom = contentH - AXIS_H;
+  for (let i = 0; i < chapters.length; i++) {
+    const ch = chapters[i];
+    const a = Math.max(xOf(ch.startT), x0), b = Math.min(xOf(ch.endT), x1);
+    if (b <= a) continue;
+    ctx.fillStyle = i % 2 ? C.bandB : C.bandA;
+    ctx.fillRect(a, top, b - a, bottom - top);
+    ctx.fillStyle = C.bandEdge; // hairline at the band start (and end) up into the label strip
+    ctx.fillRect(Math.round(a), TOP_PAD, 1, bottom - TOP_PAD);
+    ctx.fillRect(Math.round(b), TOP_PAD, 1, bottom - TOP_PAD);
+  }
+}
+
+// The user's prompt, quietly, at the top of each band — "which ask produced this".
+function drawChapterLabels(x0, x1) {
+  if (!chapters.length) return;
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '10px ' + sansFont();
+  for (const ch of chapters) {
+    const a = Math.max(xOf(ch.startT), x0), b = Math.min(xOf(ch.endT), x1);
+    const w = b - a;
+    if (w < 34) continue; // too narrow to label legibly
+    const prompt = (ch.title || ch.label || '').replace(/\s+/g, ' ').trim();
+    if (!prompt) continue;
+    ctx.fillStyle = C.bandLabel;
+    ctx.fillText(truncate(prompt, w - 8), a + 4, TOP_PAD + 11);
+  }
+}
+
+// Collapsed idle: a dim slot where a long silence used to sprawl. Only present in
+// compressed mode (linear mode has no gaps in the scale, so this loop is empty).
+function drawGapSlots(x0, x1) {
+  const top = bandTop, bottom = contentH - AXIS_H;
+  for (const g of scale.gaps) {
+    const a = Math.max(xAtU(g.u0), x0), b = Math.min(xAtU(g.u1), x1);
+    if (b <= a) continue;
+    ctx.fillStyle = C.gapFill;
+    ctx.fillRect(a, top, b - a, bottom - top);
+    ctx.fillStyle = C.gapEdge;
+    ctx.fillRect(Math.round(a), top, 1, bottom - top);
+    ctx.fillRect(Math.round(b), top, 1, bottom - top);
+  }
+}
+
+// A quiet "pause" marker in each collapsed gap: two hairline bars (drawn, not an
+// emoji — a color ⏸ would clash with the flat Linear language and not render in
+// every font) plus "9.1h" when the slot is wide enough; bars-only when tight;
+// nothing when it's a sliver. Sits in the session lane so it reads as a pause.
+function drawGapLabels(x0, x1) {
+  const cy = bandTop + Math.min(SESSION_H, 40) / 2 + 4;
+  ctx.textBaseline = 'middle';
+  ctx.font = '9px ' + monoFont();
+  for (const g of scale.gaps) {
+    const a = Math.max(xAtU(g.u0), x0), b = Math.min(xAtU(g.u1), x1);
+    const w = b - a;
+    if (w < 11) continue;
+    const dur = w >= 34 ? gapDur(g.ms) : '';
+    const durW = dur ? ctx.measureText(dur).width : 0;
+    const glyphW = 5;                          // two 1.4px bars, ~2px apart
+    const totalW = glyphW + (dur ? 3 + durW : 0);
+    let cx = (a + b) / 2 - totalW / 2;
+    ctx.fillStyle = C.gapText;
+    ctx.fillRect(Math.round(cx), cy - 4, 1.4, 8);
+    ctx.fillRect(Math.round(cx) + 3.6, cy - 4, 1.4, 8);
+    if (dur) {
+      ctx.textAlign = 'left';
+      ctx.fillText(dur, cx + glyphW + 3, cy);
+    }
+  }
+  ctx.textAlign = 'left';
+}
+
+// Compact idle duration for the ⏸ label: "9.1h", "44m".
+function gapDur(ms) {
+  const m = ms / 60000;
+  if (m < 90) return Math.round(m) + 'm';
+  return (m / 60).toFixed(1) + 'h';
+}
+
+function drawGrid(x0, x1) {
+  // Interval is chosen from the visible UNIT span (active-dominated), so ticks stay
+  // dense enough over the compressed axis; they're still stepped at round wall-clock
+  // times and skipped inside collapsed gaps so they never pile up in a sliver.
+  const iv = niceTickMs(uSpan());
   ctx.font = '9px ' + monoFont();
   ctx.textBaseline = 'alphabetic';
   const gridBottom = contentH - AXIS_H;
-  for (let tk = Math.ceil(view.t0 / iv) * iv; tk <= view.t1; tk += iv) {
+  const t0 = visT0(), t1 = visT1();
+  for (let tk = Math.ceil(t0 / iv) * iv; tk <= t1; tk += iv) {
+    if (scale.gapAt(tk)) continue;
     const xx = xOf(tk);
     if (xx < x0 || xx > x1) continue;
     ctx.fillStyle = C.lineSoft;
     ctx.fillRect(Math.round(xx), TOP_PAD, 1, gridBottom - TOP_PAD);
   }
-  // day boundaries — brighter, labeled (only present when the span > 24h)
+  // day boundaries — brighter vertical lines (only present when the span > 24h).
+  // Labeled down on the axis (drawAxis) so they never collide with the chapter
+  // prompt labels that now live in the top strip.
   for (const d of model.dayLines) {
     const xx = xOf(d);
     if (xx < x0 || xx > x1) continue;
     ctx.fillStyle = C.day;
     ctx.fillRect(Math.round(xx), TOP_PAD, 1, gridBottom - TOP_PAD);
-    ctx.fillStyle = C.dim;
-    ctx.fillText(dayStamp(d), Math.round(xx) + 3, TOP_PAD + 9);
   }
 }
 
@@ -275,7 +431,7 @@ function drawSessionLane(ln, x0, x1) {
   const counts = new Array(cols).fill(0);
   const dens = model.density;
   let peak = 1;
-  for (let k = lowerBound(dens, view.t0); k < dens.length && dens[k] <= view.t1; k++) {
+  for (let k = lowerBound(dens, visT0()); k < dens.length && dens[k] <= visT1(); k++) {
     const c = Math.min(cols - 1, Math.max(0, Math.floor((xOf(dens[k]) - x0) / BW)));
     counts[c]++; if (counts[c] > peak) peak = counts[c];
   }
@@ -355,22 +511,31 @@ function drawAxis(x0, x1) {
   const y = contentH - AXIS_H;
   ctx.fillStyle = C.line;
   ctx.fillRect(0, y, x1, 1);
-  const span = view.t1 - view.t0;
-  const iv = niceTickMs(span);
+  const iv = niceTickMs(uSpan());
   ctx.font = '9px ' + monoFont();
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = C.gridText;
-  for (let tk = Math.ceil(view.t0 / iv) * iv; tk <= view.t1; tk += iv) {
+  const t0 = visT0(), t1 = visT1();
+  for (let tk = Math.ceil(t0 / iv) * iv; tk <= t1; tk += iv) {
+    if (scale.gapAt(tk)) continue; // no elapsed-time label inside a collapsed gap
     const xx = xOf(tk);
     if (xx < x0 || xx > x1) continue;
     ctx.fillText(tickLabel(tk - fullT0), Math.round(xx) + 3, y + 12);
   }
+  // day boundaries get their wall-clock date here (moved off the top strip).
+  ctx.fillStyle = C.dim;
+  for (const d of model.dayLines) {
+    const xx = xOf(d);
+    if (xx < x0 || xx > x1) continue;
+    ctx.fillText(dayStamp(d), Math.round(xx) + 3, y + 12);
+  }
   // absolute wall-clock of the left edge, for orientation (T+ ticks are relative)
   ctx.fillStyle = C.faint;
-  ctx.fillText(clockTime(view.t0), x0 + 2, y - 4);
+  ctx.fillText(clockTime(visT0()), x0 + 2, y - 4);
 }
 
 function monoFont() { return "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace"; }
+function sansFont() { return "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"; }
 
 function diamond(x, y, r, fill) {
   ctx.fillStyle = fill;
@@ -415,8 +580,12 @@ function showTip(e, ln, mark) {
   const { px } = localPos(e);
   const t = mark ? mark.t : tAt(px);
   const head = clockTime(t);
+  // Over a collapsed idle slot, name the pause (and its real length) so the reader
+  // sees WHY the axis jumps here. The head time stays exact (tAt inverts the scale).
+  const gap = mark ? null : scale.gapAt(t);
   let body;
   if (mark) body = mark.label;
+  else if (gap) body = 'idle ' + gapDur(gap.ms);
   else if (ln && ln.kind === 'item') body = ln.item.title || ln.item.id;
   else if (ln && ln.kind === 'session') body = 'session';
   else if (ln && ln.kind === 'more') body = model.more.count + ' collapsed items';
@@ -435,40 +604,39 @@ function showTip(e, ln, mark) {
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// wheel = horizontal zoom centered on the cursor; shift/deltaX = pan.
+// wheel = horizontal zoom centered on the cursor; shift/deltaX = pan. All in the
+// scale's UNIT space, so a gap never eats the pan/zoom the way it eats linear time.
 canvas.addEventListener('wheel', e => {
   if (!model) return;
   e.preventDefault();
   const { px } = localPos(e);
   if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-    const span = view.t1 - view.t0;
-    const dt = ((e.deltaX || e.deltaY) / plotW()) * span;
-    panBy(dt);
+    const du = ((e.deltaX || e.deltaY) / plotW()) * uSpan();
+    panBy(du);
   } else {
-    const anchor = tAt(Math.min(Math.max(px, LABEL_W), canvas.clientWidth - RIGHT_PAD));
+    const anchor = uAtX(Math.min(Math.max(px, LABEL_W), canvas.clientWidth - RIGHT_PAD));
     zoomAround(anchor, e.deltaY < 0 ? 1 / 1.15 : 1.15);
   }
   scheduleDraw();
 }, { passive: false });
 
-function zoomAround(anchor, factor) {
-  const span = view.t1 - view.t0;
-  const full = fullT1 - fullT0;
+function zoomAround(anchorU, factor) {
+  const span = uSpan();
   let newSpan = span * factor;
-  newSpan = Math.max(5000, Math.min(newSpan, full));
-  const frac = (anchor - view.t0) / span;
-  view.t0 = anchor - frac * newSpan;
-  view.t1 = view.t0 + newSpan;
+  newSpan = Math.max(5000, Math.min(newSpan, fullU1));
+  const frac = (anchorU - view.u0) / span;
+  view.u0 = anchorU - frac * newSpan;
+  view.u1 = view.u0 + newSpan;
   clampView();
 }
-function panBy(dt) {
-  view.t0 += dt; view.t1 += dt; clampView();
+function panBy(du) {
+  view.u0 += du; view.u1 += du; clampView();
 }
 function clampView() {
-  const span = Math.min(view.t1 - view.t0, fullT1 - fullT0);
-  if (view.t0 < fullT0) { view.t0 = fullT0; view.t1 = fullT0 + span; }
-  if (view.t1 > fullT1) { view.t1 = fullT1; view.t0 = fullT1 - span; }
-  if (view.t0 < fullT0) view.t0 = fullT0;
+  const span = Math.min(view.u1 - view.u0, fullU1);
+  if (view.u0 < 0) { view.u0 = 0; view.u1 = span; }
+  if (view.u1 > fullU1) { view.u1 = fullU1; view.u0 = fullU1 - span; }
+  if (view.u0 < 0) view.u0 = 0;
 }
 
 // drag = pan; a click that didn't drag navigates into replay at that time.
@@ -482,8 +650,7 @@ canvas.addEventListener('pointermove', e => {
     const dx = e.clientX - dragX;
     dragX = e.clientX;
     dragMoved += Math.abs(dx);
-    const span = view.t1 - view.t0;
-    panBy(-(dx / plotW()) * span);
+    panBy(-(dx / plotW()) * uSpan());
     scheduleDraw();
     tip.hidden = true;
     return;
@@ -518,5 +685,39 @@ function replayAt(t) {
 }
 
 window.addEventListener('resize', () => { if (model) sizeCanvas(); });
+
+// ------------------------------------------------------------ axis toggle
+// Flip between the compressed and linear axis. Rebuild only the scale (cheap) and
+// re-fit the window so the same wall-clock center + zoom level carries across, then
+// mirror the mode into the URL so a shared link preserves it.
+function setCompress(on) {
+  compress = on;
+  const p = new URLSearchParams(location.search);
+  if (compress) p.delete('linear'); else p.set('linear', '1');
+  history.replaceState(null, '', '?' + p.toString());
+  syncToggle();
+  if (!model) return;
+  // Preserve center time + zoom fraction across the remap.
+  const centerT = scale.t((view.u0 + view.u1) / 2);
+  const frac = uSpan() / fullU1;
+  buildScaleForMode();
+  const newSpan = Math.max(5000, Math.min(frac * fullU1, fullU1));
+  const centerU = scale.x(centerT);
+  view = { u0: centerU - newSpan / 2, u1: centerU + newSpan / 2 };
+  clampView();
+  scheduleDraw();
+}
+function syncToggle() {
+  if (!compressBtn) return;
+  compressBtn.classList.toggle('on', compress);
+  compressBtn.setAttribute('aria-pressed', String(compress));
+  compressBtn.title = compress
+    ? 'idle gaps compressed — click for the linear axis'
+    : 'linear axis — click to compress idle gaps';
+}
+if (compressBtn) {
+  syncToggle();
+  compressBtn.addEventListener('click', () => setCompress(!compress));
+}
 
 load();

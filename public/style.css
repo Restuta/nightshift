@@ -1676,6 +1676,33 @@ body.fleet-page { overflow: auto; }
   opacity: .8;
 }
 
+/* "compress idle" axis toggle — a quiet pill in the masthead. ON (default) shows
+   the non-linear axis where idle collapses; OFF is the old linear axis. The glyph
+   (two chevrons squeezing inward) reads as "collapse the gaps". */
+.compress-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 8px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.compress-toggle:hover { color: var(--dim); border-color: var(--line-soft); }
+.compress-toggle .ct-glyph { flex: none; opacity: .8; }
+/* ON: active accent, and the chevrons draw together to signal compression is live. */
+.compress-toggle.on {
+  color: var(--blue);
+  border-color: #4ea7fc40;
+  background: #4ea7fc12;
+}
+.compress-toggle.on .ct-glyph { opacity: 1; }
+
 /* ------------------------------------------------------------ graph view */
 /* The /graph page — a work-structure node canvas. Same near-black Linear
    language as the board; hand-rolled SVG, no frameworks. Motion = data. */
