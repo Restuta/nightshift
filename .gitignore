@@ -4,3 +4,4 @@ node_modules/
 demo/events.jsonl
 docs/screenshots/scratch-*
 .gstack/
+graph-app/node_modules/
