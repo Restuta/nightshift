@@ -199,6 +199,29 @@ including the ones building it.
   `(file, mtime, since)`.
 - `demo/generate.js` — synthesizes a realistic session log for demos and UI work.
 
+## The one build-step exception: /graph (graph-app/)
+
+Invariant #3 ("zero dependencies, no build step") has exactly ONE sanctioned
+exception: the /graph view is a React Flow app living in `graph-app/` — its own
+`package.json`, its own gitignored `node_modules`, a Vite build. Nothing
+outside `graph-app/` gains a dependency. The contract that keeps the invariant
+alive in spirit:
+
+- **The dist is committed.** `npm run build:graph` (root) builds `graph-app/`
+  into `public/graph-flow/`, and that output IS checked in — so
+  `git clone && npm run demo` still works offline with zero installs. Never
+  hand-edit anything under `public/graph-flow/`; rebuild it.
+- **The pure models are NOT bundled.** The app dynamic-imports `/reducer.js`,
+  `/graph-model.js`, `/digest.js`, `/turn-id.js`, `/session-label.js`,
+  `/story-model.js`, `/session-picker.js` (and `/style.css`) from the running
+  server at RUNTIME. A merged model fix goes live on the open board with zero
+  rebuilds — if a pure-model change ever seems to require a graph rebuild, the
+  change is wrong. The bundle contains only the React shell (layout, node
+  chrome, timeline, SSE wiring); judgment stays in the tested pure models.
+- `/graph-svg` serves the old hand-rolled SVG view (`public/graph.html` +
+  `public/graph.js`) as a temporary escape hatch while the React view earns
+  trust.
+
 ## Session switcher
 
 A fleet board can serve dozens of tapes, so the masthead switcher is a filterable
