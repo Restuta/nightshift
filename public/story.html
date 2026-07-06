@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nightshift — story</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z' fill='%23F0E2C0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="story-page">
+
+<header class="masthead">
+  <div class="brand">
+    <a class="home-link" id="home-link" href="/" title="board home">
+      <svg class="logo" width="16" height="16" viewBox="0 0 16 16"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0"/></svg>
+      <span class="wordmark">nightshift</span>
+    </a>
+    <span class="crumb-sep">/</span>
+    <span class="story-crumb">story</span>
+    <span class="crumb-sep">/</span>
+    <span class="session-title mono" id="session-title">no session</span>
+    <span class="session-picker" id="session-picker" hidden></span>
+    <span class="agent-badge" id="agent-badge" hidden></span>
+  </div>
+  <div class="instruments">
+    <a class="asof-pill" id="asof-pill" hidden title="the story so far, cut at this replay moment — click to see the whole tape"></a>
+    <nav class="story-nav" id="story-nav">
+      <a id="nav-board" href="/" title="live board + replay">board</a>
+      <a id="nav-lanes" href="/lanes" title="lane timeline — the shape of the night">lanes</a>
+      <a id="nav-graph" href="/graph" title="work-structure node canvas">graph</a>
+      <a id="nav-report" href="/report" title="shift report — what needs you now">shift report</a>
+    </nav>
+  </div>
+</header>
+
+<main class="story" id="story">
+  <section class="ledger" id="ledger" hidden></section>
+  <section class="chapters" id="chapters" hidden>
+    <h3 class="chapters-head" id="chapters-head"></h3>
+    <div class="blocks" id="blocks"></div>
+  </section>
+  <div class="story-empty" id="story-empty" hidden>no events on this tape</div>
+</main>
+
+<script type="module" src="story.js"></script>
+</body>
+</html>

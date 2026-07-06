@@ -513,6 +513,9 @@ const server = http.createServer((req, res) => {
   // /lanes: a clean URL, query read client-side, static HTML served as-is.
   if (url.pathname === '/graph') { req.url = '/graph.html'; return serveStatic(req, res); }
 
+  // /story?session= is the chaptered session recap — same additive pattern.
+  if (url.pathname === '/story') { req.url = '/story.html'; return serveStatic(req, res); }
+
   serveStatic(req, res);
 });
 

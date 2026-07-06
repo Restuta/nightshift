@@ -1894,3 +1894,373 @@ body.fleet-page { overflow: auto; }
   font-family: var(--mono); font-size: 10px; color: var(--faint);
   pointer-events: none; opacity: .8;
 }
+
+/* ------------------------------------------------------------ story (/story)
+   The chaptered session recap — "open in the morning, understand the night in
+   a minute". A scrolling document like /report, in the same Linear language:
+   flat near-black, hairlines, Inter for prose, Plex Mono for every number.
+   Hierarchy IS the design: the ledger reads in five seconds, episode cards pop,
+   beat runs recede into dialogue, idle gaps are quiet dashed pauses. */
+
+body.story-page {
+  display: block;
+  overflow: auto;
+  height: auto;
+  min-height: 100%;
+}
+.story-page .masthead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(7, 10, 19, .86);
+  backdrop-filter: blur(8px);
+}
+.story-crumb { color: var(--dim); font-size: 13px; }
+
+.story-nav { display: flex; align-items: center; gap: 2px; }
+.story-nav a {
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 12px;
+  padding: 4px 9px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.story-nav a:hover { color: var(--ink); background: var(--card); }
+
+/* scrubbed mode ("the story so far") — the board's replay blue, so ?t= reads as
+   the same time-travel everywhere; clicking it returns to the full tape */
+.asof-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 11px;
+  border: 1px solid #4ea7fc40;
+  border-radius: 99px;
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.asof-pill:hover { background: var(--card); }
+.asof-pill[hidden] { display: none; }
+
+.story { max-width: 780px; margin: 0 auto; padding: 28px 20px 90px; }
+.story .add { color: var(--green); font-style: normal; }
+.story .del { color: var(--red); font-style: normal; }
+
+.story-empty {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: center;
+  padding: 90px 0;
+}
+.story-empty[hidden] { display: none; }
+
+/* deep-link timestamp — same through-line as /report's .rpt-t: every claim is
+   one click from the evidence in replay */
+.t-link {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--blue);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.t-link:hover { text-decoration: underline; }
+
+/* ledger ----------------------------------------------------------------- */
+.ledger[hidden] { display: none; }
+.ledger-hero {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lh-time { display: flex; align-items: baseline; }
+.lh-num {
+  font-family: var(--mono);
+  font-size: 34px;
+  font-weight: 500;
+  letter-spacing: -.02em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.lh-num.lh-active { color: var(--yellow); }
+.lh-lab {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--faint);
+  margin-left: 8px;
+}
+.lh-dot { color: var(--faint); font-size: 22px; margin: 0 14px; }
+.lh-range {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the wall-clock strip: amber bursts (the /lanes working color) on a quiet
+   track — idle needs no paint, the emptiness IS the message */
+.strip { margin-top: 14px; }
+.strip-track {
+  position: relative;
+  height: 12px;
+  background: var(--lane);
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.strip-seg {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: rgba(210, 153, 34, .68);
+  border-radius: 1px;
+}
+.strip-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(120, 132, 168, .4);
+}
+.strip-days { position: relative; height: 15px; }
+.strip-daylab {
+  position: absolute;
+  top: 3px;
+  transform: translateX(3px);
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.ledger-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 30px;
+  margin-top: 16px;
+}
+.lstat { display: flex; flex-direction: column; gap: 2px; }
+.lstat b {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.lstat i {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+/* chapters --------------------------------------------------------------- */
+.chapters { margin-top: 30px; }
+.chapters[hidden] { display: none; }
+.chapters-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--faint);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.chn {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  background: var(--card);
+  border-radius: 99px;
+  padding: 1px 7px;
+  letter-spacing: 0;
+}
+.chapters-mix {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  letter-spacing: .02em;
+  text-transform: none;
+}
+
+.blocks { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+
+/* episode card — real work; the lanes' episode blue as a quiet left accent */
+.ep {
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-left: 2px solid rgba(78, 167, 252, .45);
+  border-radius: 9px;
+  padding: 12px 16px 13px;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+.ep:hover { background: var(--card-hover); }
+.ep-head { display: flex; align-items: baseline; gap: 10px; }
+.ep-turn {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.ep-durs {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ep-durs b { color: var(--yellow); font-weight: 500; }
+.ep-title {
+  margin-top: 7px;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: -.005em;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ep-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.prchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 21px;
+  padding: 0 9px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+  text-decoration: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.prchip b { font-weight: 500; }
+.prchip span { overflow: hidden; text-overflow: ellipsis; }
+.prchip i { font-style: normal; color: var(--faint); }
+.prchip.pr-open b { color: var(--green); }
+.prchip.pr-open { border-color: #4cb78233; }
+.prchip.pr-merged b { color: var(--merged); }
+.prchip.pr-merged { border-color: #a371f733; }
+.prchip.pr-closed b { color: var(--faint); }
+a.prchip:hover { border-color: var(--dim); color: var(--ink); }
+.ep-meta {
+  margin-top: 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.ep-closer {
+  margin-top: 10px;
+  padding: 1px 0 1px 12px;
+  border-left: 2px solid var(--line);
+  font-size: 12.5px;
+  font-style: italic;
+  line-height: 1.55;
+  color: var(--dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* beat run — dialogue between episodes; a hairline spine, no card chrome */
+.beats {
+  margin-left: 2px;
+  padding: 3px 0 3px 14px;
+  border-left: 2px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.beat {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2.5px 8px 2.5px 6px;
+  margin-left: -6px;
+  border-radius: 5px;
+  cursor: pointer;
+  min-width: 0;
+}
+.beat:hover { background: var(--card); }
+.beat .t-link { flex: none; color: var(--faint); }
+.beat:hover .t-link { color: var(--blue); }
+.beat-line {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.beat-prompt { color: var(--dim); }
+.beat:hover .beat-prompt { color: var(--ink); }
+.beat-reply { color: var(--faint); font-style: italic; }
+
+/* idle separator — a dashed pause line; breathing room is the point */
+.story-gap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.story-gap i {
+  flex: 1;
+  height: 1px;
+  background: repeating-linear-gradient(90deg, var(--line) 0 4px, transparent 4px 9px);
+}
+.story-gap span { white-space: nowrap; letter-spacing: .02em; }
+
+/* day rule — a new local day starts here */
+.story-day {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 4px 0 2px;
+}
+.story-day span {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .09em;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.story-day i { flex: 1; height: 1px; background: var(--line); }
+
+@media (max-width: 960px) {
+  .story { padding: 20px 14px 70px; }
+  .lh-num { font-size: 26px; }
+  .lh-dot { margin: 0 10px; }
+  .ledger-stats { gap: 22px; }
+  .story-nav a { padding: 4px 6px; }
+  .story-page .masthead { gap: 12px; }
+}
