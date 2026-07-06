@@ -1,0 +1,407 @@
+/* /graph React Flow app — scoped styles. Design tokens (--bg, --card, --line,
+   --ink, …) come from the board's shared /style.css, loaded at runtime; this
+   file only styles what is new here: the React Flow canvas, the HTML node
+   cards (ported 1:1 from the SVG designs in style.css's graph section), the
+   chapter groups, and the timeline panel. Same Linear language: flat
+   near-black, quiet hairlines, Inter UI text, Plex Mono numbers, motion only
+   when data changes. */
+
+#root { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.gf-root { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+
+.gf-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background:
+    radial-gradient(900px 340px at 78% -16%, rgba(20, 29, 56, .3) 0%, transparent 70%),
+    var(--bg);
+}
+.mono { font-family: var(--mono); }
+
+/* ------------------------------------------------------------ react flow */
+.react-flow { background: transparent; }
+.react-flow__pane { cursor: grab; }
+.react-flow__pane.dragging { cursor: grabbing; }
+
+/* Motion = data changing: nodes glide to their new layout slot. Disabled while
+   the user is the one moving them. */
+.react-flow__node { cursor: pointer; transition: transform 480ms cubic-bezier(.25, 1, .32, 1); }
+.react-flow__node.dragging,
+.react-flow__node.selected.dragging { transition: none; }
+.react-flow__node-colband { pointer-events: none !important; cursor: default; }
+
+.gf-port {
+  opacity: 0;
+  width: 2px; height: 2px;
+  min-width: 0; min-height: 0;
+  border: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  width: 24px; height: 24px;
+  background: rgba(11, 15, 25, .92);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--dim);
+}
+.react-flow__controls-button:hover { background: var(--card-hover); color: var(--ink); }
+.react-flow__controls-button svg { fill: currentColor; max-width: 11px; max-height: 11px; }
+
+.react-flow__minimap {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.react-flow__attribution { background: transparent; }
+.react-flow__attribution a { color: #333c56; font-size: 9px; }
+
+/* --------------------------------------------------------------- node base */
+.gfn {
+  position: relative;
+  width: 100%; height: 100%;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-family: var(--sans);
+  overflow: hidden;
+}
+.react-flow__node:hover .gfn { background: var(--card-hover); border-color: #33405f; }
+.react-flow__node.selected .gfn { border-color: #3a4a70; }
+
+/* a node whose entity just changed glows once; a merging PR pulses its edges */
+.gfn.glow { animation: gfglow 1.4s ease-out; }
+@keyframes gfglow {
+  0% { border-color: var(--blue); box-shadow: 0 0 7px rgba(78, 167, 252, .55); }
+  100% { border-color: var(--line); box-shadow: none; }
+}
+.react-flow__edge.pulse .react-flow__edge-path { animation: gfedgepulse 1.3s ease-out; }
+@keyframes gfedgepulse {
+  0% { stroke: var(--merged); stroke-width: 3.2; opacity: 1; }
+  100% { opacity: .7; }
+}
+
+.gf-accent { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; border-radius: 2px; }
+.gf-title { font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gf-meta { font-size: 10.5px; color: var(--dim); white-space: nowrap; }
+.gf-sub { font-size: 10px; color: var(--faint); }
+.gf-age { font-size: 10px; color: var(--faint); }
+.gf-diff { font-size: 10.5px; font-weight: 500; margin-top: 5px; }
+.gf-diff em { font-style: normal; }
+.gf-diff .a { color: var(--green); }
+.gf-diff .d { color: var(--red); margin-left: 7px; }
+
+/* ------------------------------------------------------------ column bands */
+.gf-band {
+  width: 100%; height: 100%;
+  background: rgba(255, 255, 255, .008);
+  border-radius: 10px;
+  position: relative;
+}
+.gf-band.alt { background: rgba(255, 255, 255, .016); }
+.gf-band-label {
+  position: absolute; top: 14px; left: 26px;
+  font-size: 11px; font-weight: 500;
+  letter-spacing: .12em; text-transform: uppercase;
+  color: var(--faint);
+}
+.gf-band-count {
+  position: absolute; top: 14px; left: 250px;
+  font-size: 11px; color: var(--faint); opacity: .8;
+}
+
+/* ------------------------------------------------------------ session root */
+.gfn-session { background: #141a2b; border-color: #2b3550; }
+.react-flow__node:hover .gfn-session { background: #171e31; }
+.gfs-base { padding: 10px 12px 0 16px; height: 84px; }
+.gfs-head { display: flex; align-items: center; gap: 8px; }
+.gfs-head .gf-title { flex: 1 1 auto; min-width: 0; }
+.gf-agent {
+  flex: none;
+  font-family: var(--mono); font-size: 9px; font-weight: 600;
+  letter-spacing: .08em;
+  padding: 1px 7px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  opacity: .8;
+}
+.gf-agent.agent-claude { color: #d97757; }
+.gf-agent.agent-codex { color: #9fb3c8; }
+.gfs-base .gf-meta { margin-top: 5px; }
+.gfs-base .gf-sub { margin-top: 4px; }
+
+.gfs-act { margin: 0 12px 0 16px; border-top: 1px solid var(--line-soft); padding: 8px 0 10px; }
+.gfa-on {
+  font-size: 10.5px; color: var(--dim);
+  white-space: nowrap; overflow: hidden;
+  margin-bottom: 5px;
+}
+.gfa-body { display: flex; gap: 8px; }
+.gfa-dot {
+  flex: none;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--yellow);
+  margin-top: 4px;
+  position: relative;
+}
+.gfa-dot.tool, .gfa-dot.past, .gfa-dot.tool.past { background: var(--faint); }
+.gfa-dot.attn { background: var(--red); }
+.gfa-ping {
+  position: absolute; inset: -4px;
+  border: 1.4px solid var(--yellow);
+  border-radius: 50%;
+  animation: gfping 1.9s ease-out infinite;
+}
+@keyframes gfping {
+  0% { transform: scale(.45); opacity: .55; }
+  70%, 100% { transform: scale(1.5); opacity: 0; }
+}
+.gfa-lines { font-size: 11px; line-height: 15px; color: var(--dim); min-width: 0; }
+.gfa-lines div { white-space: nowrap; overflow: hidden; }
+.gfa-body.say .gfa-lines { color: var(--ink); font-style: italic; opacity: .9; }
+.gfa-body.tool .gfa-lines { font-family: var(--mono); font-size: 10.5px; color: var(--faint); font-style: normal; }
+.gfa-body.past .gfa-lines { color: var(--faint); font-style: normal; opacity: .8; }
+.gfa-body.attn .gfa-lines { color: var(--red); font-style: normal; opacity: 1; }
+
+/* ------------------------------------------------------------ plan cluster */
+.gfn-plan { background: #101725; border-color: #23304a; padding: 10px 14px; }
+.react-flow__node:hover .gfn-plan { background: #121a29; }
+.gfp-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.gf-frac { font-size: 11px; color: var(--dim); }
+.gfp-row {
+  display: flex; align-items: center; gap: 6px;
+  height: 18px;
+  font-size: 11px; color: var(--dim);
+  white-space: nowrap;
+}
+.gfp-row span { overflow: hidden; text-overflow: ellipsis; }
+.gfp-row.completed span { color: var(--faint); text-decoration: line-through; }
+.gfp-row.muted span { color: var(--faint); font-style: italic; }
+.gfp-dot { flex: none; width: 6.4px; height: 6.4px; border-radius: 50%; background: var(--faint); }
+.gfp-dot.in_progress { background: var(--yellow); }
+.gfp-dot.completed { background: var(--green); }
+.gfp-dot.spacer { background: transparent; }
+
+/* -------------------------------------------------------------- work item */
+.gfn-intent { padding: 11px 12px 8px 16px; }
+.gfn-intent .gf-meta { margin-top: 6px; }
+.gf-chip {
+  position: absolute; right: 12px; bottom: 7px;
+  font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--faint);
+}
+.gf-chip.abandoned { color: var(--red); }
+
+/* --------------------------------------------------------------------- pr */
+.gfn-pr { padding: 11px 12px 8px; }
+.gfr-head { display: flex; align-items: center; gap: 8px; }
+.gfr-head .gf-title { flex: 1 1 auto; min-width: 0; }
+.gf-ring {
+  flex: none;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  border: 2.4px solid;
+  position: relative;
+  display: inline-block;
+}
+.gf-ring i { position: absolute; inset: 2px; border-radius: 50%; }
+.gfr-meta { display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; padding-left: 21px; }
+.gfn-pr .gf-diff { padding-left: 21px; }
+.gf-ci { flex: none; }
+.gf-ci.fail path { stroke: var(--red); }
+.gf-ci.pass path { stroke: var(--green); }
+.gf-ci.pending {
+  width: 8px; height: 8px;
+  border: 1.4px solid var(--yellow);
+  border-radius: 50%;
+  display: inline-block;
+}
+.gf-ext {
+  position: absolute; right: 7px; bottom: 7px;
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+}
+.gf-ext path { stroke: var(--faint); }
+.gf-ext:hover { background: rgba(78, 167, 252, .08); }
+.gf-ext:hover path { stroke: var(--blue); }
+
+/* ------------------------------------------------------------ running step */
+.gfn-step { background: #14100a; border-color: #3a2f14; display: flex; padding: 12px 8px 8px 0; }
+.react-flow__node:hover .gfn-step { background: #171208; border-color: #46391a; }
+.gfn-step.paused { background: var(--card); border-color: var(--line); }
+.gft-glyph { flex: none; width: 34px; display: flex; justify-content: center; padding-top: 1px; }
+.gft-ring {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  border: 1.7px dashed var(--yellow);
+  animation: gfspin 6s linear infinite;
+}
+@keyframes gfspin { to { transform: rotate(360deg); } }
+.gft-pause { display: flex; gap: 2.8px; padding-top: 1px; }
+.gft-pause i { width: 2.6px; height: 10px; background: var(--faint); border-radius: 1px; }
+.gft-body { flex: 1 1 auto; min-width: 0; }
+.gft-text { font-size: 11.5px; line-height: 15px; color: var(--ink); white-space: nowrap; overflow: hidden; }
+.gfn-step.paused .gft-text { color: var(--dim); }
+.gft-dur { font-size: 10px; color: var(--yellow); margin-top: 4px; }
+.gfn-step.paused .gft-dur { color: var(--faint); }
+
+/* --------------------------------------------- folded stacks ("N more") */
+.gfn-fold {
+  background: transparent;
+  border: 1px dashed var(--line);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-end;
+  padding-bottom: 9px;
+}
+.react-flow__node:hover .gfn-fold { background: rgba(255, 255, 255, .01); border-color: #33405f; }
+.gf-stack { position: absolute; top: 7px; left: 0; right: 0; }
+.gf-stack i { display: block; height: 1px; background: var(--faint); opacity: .55; margin: 0 auto 5px; }
+.gf-stack i:nth-child(1) { width: 82%; }
+.gf-stack i:nth-child(2) { width: 90%; }
+.gf-stack i:nth-child(3) { width: 97%; }
+.gf-fold-txt { font-size: 11px; color: var(--dim); }
+
+/* --------------------------------------------------------------- now node */
+.gfn-now { background: #14100a; border-color: #3a2f14; padding: 11px 16px 10px; }
+.react-flow__node:hover .gfn-now { background: #171208; border-color: #46391a; }
+.gfn-now.attn { border-color: #4a2420; }
+.gfw-head { display: flex; align-items: center; gap: 8px; }
+.gfw-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); position: relative; }
+.gfn-now.attn .gfw-dot { background: var(--red); }
+.gfw-label { font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--yellow); }
+.gfn-now.attn .gfw-label { color: var(--red); }
+.gfw-prompt { margin-top: 7px; font-size: 13px; font-weight: 500; line-height: 17px; color: var(--ink); }
+.gfw-prompt div { white-space: nowrap; overflow: hidden; }
+.gfw-line { margin-top: 4px; font-size: 11px; line-height: 15px; color: var(--dim); }
+.gfw-line div { white-space: nowrap; overflow: hidden; }
+.gfw-line.say { color: var(--ink); font-style: italic; opacity: .9; }
+.gfw-line.tool { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+.gfw-line.past { color: var(--faint); font-style: normal; opacity: .8; }
+.gfw-line.attn { color: var(--red); font-style: normal; opacity: 1; }
+
+/* ----------------------------------------------------------- chapter group */
+/* One collapsible group per digest chapter — the LANDED redesign. Collapsed:
+   a quiet card (prompt + count + chips). Expanded: a subflow surface whose
+   children are the real PR nodes. Landed work should recede, so the fill sits
+   between the backdrop and a card. */
+.gfn-chapter { background: #101523; border-color: #202942; }
+.react-flow__node:hover .gfn-chapter { background: #121829; border-color: #28324e; }
+.gfn-chapter.open { background: rgba(14, 18, 30, .55); }
+.gfc-meta {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 11px 12px 0 14px;
+  font-size: 10px; color: var(--faint);
+  white-space: nowrap;
+}
+.gfc-caret { flex: none; margin-left: 8px; transition: transform 200ms ease; }
+.gfc-caret path { stroke: var(--faint); }
+.gfn-chapter.open .gfc-caret { transform: rotate(180deg); }
+.gfc-title { padding: 4px 14px 0; font-size: 12.5px; font-weight: 500; line-height: 17px; color: #c9d0e0; }
+.gfc-title div { white-space: nowrap; overflow: hidden; }
+.gfc-chips { padding: 8px 14px 0; display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; }
+.gfc-chip {
+  font-size: 10px;
+  height: 17px;
+  display: inline-flex; align-items: center;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-soft);
+  color: var(--dim);
+}
+.gfc-chip.st-merged { color: #b598e8; border-color: rgba(163, 113, 247, .28); }
+.gfc-chip.st-closed { color: var(--faint); }
+.gfc-chip.st-open { color: var(--yellow); border-color: rgba(210, 153, 34, .3); }
+.gfc-chip.st-more { color: var(--faint); border-style: dashed; }
+
+/* ------------------------------------------------------------ timeline */
+.gf-tl-panel { margin-bottom: 12px; }
+.gf-timeline {
+  width: min(680px, 56vw);
+  background: rgba(10, 13, 22, .92);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 8px 14px 14px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+}
+.gf-tl-row {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 6px;
+  font-size: 10px; color: var(--faint);
+}
+.gf-tl-label { white-space: nowrap; }
+.gf-tl-spans { color: var(--dim); }
+.gf-tl-live {
+  background: none;
+  border: 1px solid #4ea7fc40;
+  border-radius: 99px;
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gf-tl-live:hover { background: var(--card); }
+.gf-tl-track { position: relative; height: 20px; cursor: ew-resize; touch-action: none; }
+.gf-tl-base {
+  position: absolute; left: 0; right: 0; top: 50%;
+  height: 2px; margin-top: -1px;
+  background: var(--line-soft);
+  border-radius: 1px;
+}
+.gf-tl-seg {
+  position: absolute; top: 50%;
+  height: 6px; margin-top: -3px;
+  background: var(--yellow);
+  opacity: .8;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.gf-tl-dim {
+  position: absolute; top: 0; bottom: 0; right: 0;
+  background: rgba(7, 10, 19, .6);
+  pointer-events: none;
+}
+.gf-tl-cursor {
+  position: absolute; top: 0; bottom: 0;
+  width: 2px; margin-left: -1px;
+  background: var(--blue);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.gf-tl-knob {
+  position: absolute; top: -3px; left: 50%;
+  width: 9px; height: 9px; margin-left: -4.5px;
+  border-radius: 50%;
+  background: var(--blue);
+  border: 2px solid #0b0f1a;
+  box-sizing: border-box;
+}
+.gf-tl-cursor-time {
+  position: absolute; top: 100%;
+  transform: translateX(-50%);
+  margin-top: 2px;
+  font-size: 10px; color: var(--blue);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* crash surface — a flight recorder must never fail silently */
+.gf-crash { padding: 60px 40px; color: var(--dim); font-size: 12px; }
+.gf-crash b { color: var(--red); display: block; margin-bottom: 12px; }
+.gf-crash pre { white-space: pre-wrap; max-width: 900px; color: var(--faint); margin-bottom: 16px; }
+.gf-crash a { color: var(--blue); }
+
+/* tooltip + empty reuse .graph-tooltip / .graph-empty / .graph-hint from the
+   shared style.css; only the stacking context differs here */
+.gf-main .graph-tooltip { z-index: 20; }
+.gf-main .graph-hint { z-index: 6; }
