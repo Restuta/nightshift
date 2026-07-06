@@ -79,6 +79,7 @@ function prSummary(evs) {
   const byNumber = new Map();
   for (const ev of evs) {
     if (ev.type !== 'pr' || ev.number == null) continue;
+    const eventT = ev.occurredAt != null ? ev.occurredAt : ev.t;
     let pr = byNumber.get(ev.number);
     if (!pr) {
       pr = {
@@ -93,9 +94,9 @@ function prSummary(evs) {
       byNumber.set(ev.number, pr);
     }
     if (typeof ev.title === 'string' && ev.title.trim()) pr.title = ev.title;
-    if (ev.state === 'open' && pr.openedT == null) pr.openedT = ev.t;
-    if (ev.state === 'merged' && pr.mergedT == null) pr.mergedT = ev.t;
-    if (ev.state === 'closed' && pr.closedT == null) pr.closedT = ev.t;
+    if (ev.state === 'open' && pr.openedT == null) pr.openedT = eventT;
+    if (ev.state === 'merged' && pr.mergedT == null) pr.mergedT = eventT;
+    if (ev.state === 'closed' && pr.closedT == null) pr.closedT = eventT;
     pr.state = ev.state || pr.state;
   }
   return byNumber;
@@ -146,7 +147,7 @@ function buildChapter(seed, windowStartT, windowEndT, windowEvents) {
     id: seed.id,
     label: seed.id == null ? '' : turnLabel(seed.id),
     title: seed.title,
-    kind: commits.length || windowEvents.some(ev => ev.type === 'pr') || counts.edits >= EPISODE_MIN_EDITS
+    kind: commits.length || counts.edits >= EPISODE_MIN_EDITS
       ? 'episode'
       : 'beat',
     startT,
@@ -221,7 +222,10 @@ export function buildDigest(events, untilT = Infinity) {
   for (const pr of prByNumber.values()) {
     const first = firstPrByNumber.get(pr.number);
     const chapter = first ? chapterForTime(chapters, first.t) : null;
-    if (chapter) chapter.prs.push(publicPr(pr));
+    if (chapter) {
+      chapter.prs.push(publicPr(pr));
+      chapter.kind = 'episode';
+    }
   }
 
   for (const chapter of chapters) {

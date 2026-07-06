@@ -138,6 +138,93 @@ test('a PR opened in chapter A and merged in chapter B is listed once under A', 
   assert.equal(d.chapters[1].prs.length, 0);
 });
 
+test('PR lifecycle timestamps prefer occurredAt and fall back to envelope t', () => {
+  const d = buildDigest([
+    { t: 0, type: 'item', id: 'turn-1', title: 'pr times', status: 'doing' },
+    { t: 10 * M, type: 'pr', number: 21, state: 'open', title: 'Timed PR', occurredAt: 2 * M },
+    { t: 50 * M, type: 'pr', number: 21, state: 'merged', occurredAt: 12 * M },
+    { t: 60 * M, type: 'pr', number: 22, state: 'open', title: 'Fallback PR' },
+    { t: 70 * M, type: 'pr', number: 22, state: 'closed' },
+  ]);
+
+  assert.deepEqual(d.chapters[0].prs, [
+    {
+      number: 21,
+      title: 'Timed PR',
+      openedT: 2 * M,
+      mergedT: 12 * M,
+      closedT: null,
+      state: 'merged',
+    },
+    {
+      number: 22,
+      title: 'Fallback PR',
+      openedT: 60 * M,
+      mergedT: null,
+      closedT: 70 * M,
+      state: 'closed',
+    },
+  ]);
+});
+
+test('untilT visibility for PR lifecycle events is based on envelope t, not occurredAt', () => {
+  const evs = [
+    { t: 0, type: 'item', id: 'turn-1', title: 'scrub times', status: 'doing' },
+    { t: 1000, type: 'pr', number: 23, state: 'open', title: 'Late echo', occurredAt: 500 },
+    { t: 5000, type: 'pr', number: 23, state: 'merged', occurredAt: 1500 },
+    { t: 6000, type: 'say', text: 'merged' },
+  ];
+
+  const midT = 3000;
+  const atMid = buildDigest(evs, midT);
+  assert.deepEqual(atMid, buildDigest(evs.filter(e => e.t <= midT)));
+  assert.deepEqual(atMid.chapters[0].prs[0], {
+    number: 23,
+    title: 'Late echo',
+    openedT: 500,
+    mergedT: null,
+    closedT: null,
+    state: 'open',
+  });
+});
+
+test('a chapter with only a non-first PR event stays a beat', () => {
+  const d = buildDigest([
+    { t: 0, type: 'item', id: 'turn-1', title: 'first sighting', status: 'doing' },
+    { t: 1000, type: 'pr', number: 31, state: 'open', title: 'Carry work' },
+    { t: 2000, type: 'item', id: 'turn-2', title: 'status check', status: 'doing' },
+    { t: 3000, type: 'pr', number: 31, state: 'merged' },
+    { t: 4000, type: 'say', text: 'status only' },
+  ]);
+
+  assert.equal(d.chapters.length, 2);
+  assert.equal(d.chapters[0].kind, 'episode');
+  assert.equal(d.chapters[0].prs.length, 1);
+  assert.equal(d.chapters[1].kind, 'beat');
+  assert.equal(d.chapters[1].prs.length, 0);
+  assert.equal(d.totals.episodes, 1);
+  assert.equal(d.totals.beats, 1);
+});
+
+test('a first PR sighting that is a merged-only echo makes its chapter an episode', () => {
+  const d = buildDigest([
+    { t: 0, type: 'item', id: 'turn-1', title: 'reconcile', status: 'doing' },
+    { t: 1000, type: 'pr', number: 41, state: 'merged', title: 'Already merged' },
+    { t: 2000, type: 'say', text: 'reconciled' },
+  ]);
+
+  assert.equal(d.chapters.length, 1);
+  assert.equal(d.chapters[0].kind, 'episode');
+  assert.deepEqual(d.chapters[0].prs, [{
+    number: 41,
+    title: 'Already merged',
+    openedT: null,
+    mergedT: 1000,
+    closedT: null,
+    state: 'merged',
+  }]);
+});
+
 test('untilT matches truncating the tape and prevents PR lifecycle lookahead', () => {
   const evs = [
     { t: 0, type: 'item', id: 'turn-1', title: 'scrub', status: 'doing' },
