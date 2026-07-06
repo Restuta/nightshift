@@ -8,6 +8,7 @@
     "start": "node server.js",
     "test": "node --test test/*.test.mjs",
     "demo": "node demo/generate.js && node server.js --log demo/events.jsonl",
+    "build:graph": "npm --prefix graph-app run build",
     "import": "node tools/import-transcript.js",
     "attach": "node tools/attach.js",
     "setup": "git config core.hooksPath .githooks && echo 'git hooks enabled (core.hooksPath=.githooks)'"
