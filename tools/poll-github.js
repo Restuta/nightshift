@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 // Record PR/CI facts as events — never fetched at render time, per the core rule
 // in docs/EVENTS.md: replaying yesterday's session must show yesterday's CI.
-//   node tools/poll-github.js [--once] [--interval <sec>=30] [--limit <prs>=100]
+//   node tools/poll-github.js --once [--limit <prs>=100]
 //     [--repo owner/name] [--log <file>] [--known]
-//   node tools/poll-github.js --known --repo o/r --log L   # self-detach a realtime worker
-//   node tools/poll-github.js --stop   [--log L]           # stop the worker
-//   node tools/poll-github.js --status [--log L]           # live | off
 //
 // This is the SINGLE writer of pr/ci events (plan 1.4). The hook and codex-tail no
 // longer write pr state — they emit `pr_ref` sightings, which this poller harvests
@@ -19,69 +16,41 @@
 // known pr/ci state is folded out of the log itself, and each tick appends only
 // what changed — safe to restart, safe to run alongside hooks, idempotent.
 //
-// In --known mode (session-scoped) a bare invocation self-detaches ONE background
-// worker that polls on --interval, so the board updates in near-realtime; it
-// exits on its own once every surfaced PR is merged/closed, or on --stop.
+// This executable is deliberately one-shot. The durable board supervisor owns
+// cadence, retention, concurrency, and leasing; accepting a resident mode here
+// would recreate a competing writer.
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { execFileSync, spawnSync, spawn } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const { randomUUID } = require('node:crypto');
 
 const argv = process.argv.slice(2);
 const flags = {};
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === '--once') flags.once = true;
-  else if (argv[i] === '--interval') flags.interval = Number(argv[++i]);
   else if (argv[i] === '--limit') flags.limit = Number(argv[++i]);
   else if (argv[i] === '--repo') flags.repo = argv[++i];
   else if (argv[i] === '--log') flags.log = argv[++i];
   else if (argv[i] === '--known') flags.known = true;
-  else if (argv[i] === '--stop') flags.stop = true;
-  else if (argv[i] === '--status') flags.status = true;
-  else if (argv[i] === '--worker') flags.worker = true;
 }
 const posInt = (n, dflt) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt);
-// Absolute, so the worker registry key is cwd-independent — two repos invoking
-// with a relative --log must not collide (dedupe/--stop hitting the wrong worker).
 const LOG = path.resolve(flags.log || path.join('.nightshift', 'events.jsonl'));
-const INTERVAL = posInt(flags.interval, 30) * 1000;
 const LIMIT = posInt(flags.limit, 100);
 
-// Worker registry (one realtime poller per log), mirroring codex-tail's model.
-const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
-const stateFile = path.join(NS_HOME, 'pr-pollers.json');
-const alivePid = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const readState = () => { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } };
-const writeState = s => { fs.mkdirSync(NS_HOME, { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(s) + '\n'); };
-
-const sleepMs = ms => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB */ } };
-if (flags.status) { const e = readState()[LOG]; process.stdout.write(e && e.pid && alivePid(e.pid) ? 'live\n' : 'off\n'); process.exit(0); }
-if (flags.stop) {
-  // Kill, then WAIT for the worker to actually exit before returning — reset/off
-  // rotates $LOG right after, and a worker still inside a synchronous gh/toast poll
-  // would otherwise wake up and append stale PR/CI events into the fresh tape.
-  for (const [key, e] of Object.entries(readState())) {
-    if (flags.log && key !== LOG) continue;
-    if (!(e && e.pid && alivePid(e.pid))) continue;
-    try { process.kill(e.pid, 'SIGTERM'); } catch { /* gone */ }
-    for (let i = 0; i < 20 && alivePid(e.pid); i++) sleepMs(100);        // up to ~2s graceful
-    if (alivePid(e.pid)) { try { process.kill(e.pid, 'SIGKILL'); } catch { /* gone */ } for (let i = 0; i < 20 && alivePid(e.pid); i++) sleepMs(50); }
-  }
-  const s = readState(); // re-read: workers' own SIGTERM cleanup ran during the wait
-  for (const k of Object.keys(s)) { if (!flags.log || k === LOG) delete s[k]; }
-  writeState(s);
-  process.exit(0);
+if (!flags.once) {
+  process.stderr.write('poll-github: resident polling is owned by the server supervisor; use --once\n');
+  process.exit(2);
 }
 
-// --known scopes refs to a repo. Resolve the cwd's repo when --repo wasn't given,
-// so `gh pr view <n>` and the repo filter agree. If it can't be resolved, repo-
-// qualified refs (URLs, -R commands) are skipped rather than assumed current —
-// recording another repo's PR #n as ours would corrupt the tape.
-if (flags.known && !flags.repo) {
-  try { flags.repo = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner'], { encoding: 'utf8' })).nameWithOwner; }
-  catch { /* leave unset → repo-qualified refs are skipped below */ }
+// Do no work until the supervisor has bound this pid into both durable lease
+// generations. EOF means the supervisor died before ownership became durable.
+if (process.env.NIGHTSHIFT_PR_START_FD) {
+  const gate = Buffer.alloc(1);
+  try {
+    const read = fs.readSync(Number(process.env.NIGHTSHIFT_PR_START_FD), gate, 0, 1, null);
+    if (read !== 1 || gate[0] !== 103) process.exit(75);
+  } catch { process.exit(75); }
 }
 
 // Repo identity stamped on every emitted pr/ci event (plan 1.4): the reducer keys
@@ -89,7 +58,16 @@ if (flags.known && !flags.repo) {
 // collide into one panel row. Resolved once per run and cached — cheap. In --known
 // mode flags.repo is already resolved above; otherwise fall back to the cwd's repo.
 let REPO = flags.repo || null;
-if (!REPO) {
+let repoResolutionError = null;
+if (flags.known && !REPO) {
+  try {
+    REPO = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner'], { encoding: 'utf8' })).nameWithOwner;
+    flags.repo = REPO;
+  } catch (error) {
+    const detail = String(error && (error.stderr || error.stdout || error.message) || error).trim();
+    repoResolutionError = new Error(detail || 'could not resolve the current GitHub repository');
+  }
+} else if (!REPO) {
   try { REPO = JSON.parse(execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner'], { encoding: 'utf8' })).nameWithOwner; }
   catch { /* unknown → events omit repo (v1-style bare-number keys) */ }
 }
@@ -141,8 +119,12 @@ function ghPrs() {
 function ghPr(n) {
   const args = ['pr', 'view', String(n), '--json', PR_FIELDS];
   if (flags.repo) args.push('--repo', flags.repo);
-  try { return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
-  catch { return null; }
+  const result = spawnSync('gh', args, { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status === 0) return JSON.parse(result.stdout || '');
+  const detail = String(result.stderr || result.stdout || '').trim();
+  if (/could not resolve to a pullrequest|no pull requests found|pull request .* not found|http 404/i.test(detail)) return null;
+  throw new Error(detail || `gh pr view ${n} exited ${result.status}`);
 }
 
 // owner/repo for a github PR URL, or null.
@@ -297,14 +279,14 @@ function rollupCi(checks) {
 // on the next tick instead of being lost.
 const known = new Map(); // number → {state, ci}
 let offset = 0;
-let sawOpenPr = false; // true once a PR was seen OPEN during THIS run (reset on log replace)
+let eventSeq = 0;
 
 function refreshKnown() {
   let fd;
   try { fd = fs.openSync(LOG, 'r'); } catch { return; } // no log yet
   try {
     const size = fs.fstatSync(fd).size;
-    if (size < offset) { known.clear(); offset = 0; sawOpenPr = false; } // log truncated/replaced (e.g. /nightshift reset) → fresh tape
+    if (size < offset) { known.clear(); offset = 0; eventSeq = 0; } // log truncated/replaced → fresh tape
     if (size === offset) return;
     const buf = Buffer.alloc(size - offset);
     fs.readSync(fd, buf, 0, buf.length, offset);
@@ -318,11 +300,14 @@ function refreshKnown() {
     const mine = ev => !ev.repo || !REPO || ev.repo === REPO;
     for (const line of chunk.slice(0, complete).split('\n').filter(Boolean)) {
       let ev; try { ev = JSON.parse(line); } catch { continue; }
+      eventSeq++;
       if (ev.type === 'pr' && ev.number != null && mine(ev)) {
         const prev = known.get(ev.number) || {};
-        known.set(ev.number, { ...prev, state: ev.state, base: ev.base != null ? ev.base : prev.base });
+        known.set(ev.number, { ...prev, state: ev.state, base: ev.base != null ? ev.base : prev.base, prSeq: eventSeq });
       } else if (ev.type === 'ci' && ev.pr != null && mine(ev)) {
         known.set(ev.pr, { ...(known.get(ev.pr) || {}), ci: ev.status });
+      } else if (ev.type === 'pr_ref' && ev.number != null && mine(ev)) {
+        known.set(ev.number, { ...(known.get(ev.number) || {}), refSeq: eventSeq });
       }
     }
   } finally {
@@ -345,22 +330,11 @@ function occurredMs(pr, state) {
   return tsMs(pr.createdAt); // open
 }
 
-// Recorder heartbeat: prove the poll lane is alive every tick. `alive` lands only
-// in the reducer's per-source freshness (no feed, no timers, and — being a
-// reconcile lane — it never keeps the AGENT badge LIVE); it's the honest signal
-// that the poller itself is running. Best-effort, silent (no console spam).
-function heartbeat() {
-  try {
-    fs.mkdirSync(path.dirname(LOG), { recursive: true });
-    fs.appendFileSync(LOG, JSON.stringify({ t: Date.now(), id: randomUUID(), source: 'poll-github', v: 2, type: 'alive' }) + '\n');
-  } catch { /* best-effort */ }
-}
-
 // Emit pr/ci deltas for one PR's current state (folded `known` suppresses no-ops).
 // pr/ci events carry `repo` (owner/name) so the reducer keys the panel by
 // repo#number, and pr events carry gh's real `occurredAt`/`createdAt` so replay
 // shows true history — this poller is the SINGLE writer of pr/ci (plan 1.4).
-function emitPr(pr) {
+function emitPr(pr, { force = false } = {}) {
   let state = pr.state.toLowerCase(); // open | merged | closed (from gh)
   // CI/review status from toast when available (session-scoped polling only),
   // else gh's check rollup. If toast returns a status we don't map (closed,
@@ -372,7 +346,7 @@ function emitPr(pr) {
   if (tbase === 'merged' && state === 'open') state = 'merged';
   const base = resolveBase(pr); // stacked-PR chain target, or null
   const k = known.get(pr.number) || {};
-  if (k.state !== state) {
+  if (force || k.state !== state) {
     const ev = { type: 'pr', number: pr.number, title: pr.title, url: pr.url, state };
     if (REPO) ev.repo = REPO;
     if (base != null) ev.base = base;
@@ -385,7 +359,7 @@ function emitPr(pr) {
     const occ = occurredMs(pr, state);
     if (occ != null) ev.occurredAt = occ;
     append(ev);
-    known.set(pr.number, { ...known.get(pr.number), state, base: base != null ? base : k.base });
+    known.set(pr.number, { ...known.get(pr.number), state, base: base != null ? base : k.base, prSeq: ++eventSeq });
   } else if (base != null && k.base == null) {
     // State unchanged but the base chain just resolved (the base PR was opened
     // after this one) — record the link so the graph can draw the chain. A bare
@@ -403,8 +377,7 @@ function emitPr(pr) {
   }
 }
 
-// One poll. Returns the number of session PRs still OPEN (so a realtime worker can
-// retire itself once every surfaced PR is merged/closed). Repo-wide mode returns 0.
+// One poll. Returns the number of session PRs still OPEN. Repo-wide mode returns 0.
 function tick() {
   refreshKnown();
   if (flags.known) {
@@ -414,9 +387,10 @@ function tick() {
     // is pure waste — and over a long session the surfaced set grows to dozens,
     // which made a full reconcile take minutes (one gh + toast call each). Poll
     // just the open / not-yet-seen ones; terminal PRs stay as the log recorded.
-    const live = n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || ''); };
+    const forced = n => { const k = known.get(n); return !!(k && /^(merged|closed)$/.test(k.state || '') && (k.refSeq || 0) > (k.prSeq || 0)); };
+    const live = n => { const k = known.get(n); return !k || !/^(merged|closed)$/.test(k.state || '') || forced(n); };
     const nums = [...sessionPrNumbers()].filter(live);
-    for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr); }
+    for (const n of nums) { const pr = ghPr(n); if (pr) emitPr(pr, { force: forced(n) }); }
     return nums.filter(live).length;
   }
   let prs;
@@ -429,63 +403,11 @@ function tick() {
   return 0;
 }
 
-// One-shot (tests / immediate seed): poll once and exit.
-if (flags.once) { tick(); process.exit(0); }
-
-// Session-scoped realtime: self-detach ONE background worker per log (idempotent),
-// so the board updates without blocking /nightshift. The worker does an immediate
-// first tick (seeds now) then polls on --interval.
-if (flags.known && !flags.worker) {
-  const s = readState();
-  const cur = s[LOG];
-  if (cur && cur.pid && alivePid(cur.pid)) process.exit(0); // already polling this log
-  fs.mkdirSync(NS_HOME, { recursive: true });
-  const out = fs.openSync(path.join(NS_HOME, 'pr-poller.log'), 'a');
-  const child = spawn(process.execPath, [__filename, '--worker', '--known', '--log', LOG,
-    ...(flags.repo ? ['--repo', flags.repo] : []), '--interval', String(Math.round(INTERVAL / 1000))],
-    { detached: true, stdio: ['ignore', out, out] });
-  child.unref();
-  s[LOG] = { pid: child.pid, repo: flags.repo || null };
-  writeState(s);
-  process.exit(0);
+try {
+  if (repoResolutionError) throw repoResolutionError;
+  tick();
 }
-
-// Worker / foreground interval loop.
-if (flags.worker) {
-  const cleanup = () => { const s = readState(); if (s[LOG] && s[LOG].pid === process.pid) { delete s[LOG]; writeState(s); } };
-  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
-  process.on('exit', cleanup);
+catch (error) {
+  process.stderr.write(`poll-github: ${String(error && error.message || error).split('\n')[0]}\n`);
+  process.exitCode = 1;
 }
-if (tick() > 0) sawOpenPr = true;
-console.error(`polling every ${INTERVAL / 1000}s${flags.known ? ' (session PRs only)' : ` (limit ${LIMIT} PRs)`} → ${LOG}`);
-let doneTicks = 0, lifeTicks = 0, lastGrowthTick = 0;
-let lastSize = (() => { try { return fs.statSync(LOG).size; } catch { return -1; } })();
-const MAX_LIFE = Math.max(60, Math.round((4 * 3600 * 1000) / INTERVAL)); // ~4h orphan cap
-// "Quiet" = the session log hasn't grown for this long. Only then is "all PRs
-// merged" a reason to retire. A live session opens PRs in waves hours apart, so
-// all-currently-merged is NOT a stop signal — retiring between waves is what
-// froze #382/#383/#386 at "open" with no title for the rest of the session.
-const QUIET_TICKS = Math.max(20, Math.round((10 * 60 * 1000) / INTERVAL)); // ~10 min idle
-const timer = setInterval(() => {
-  lifeTicks++;
-  // Detect EXTERNAL growth (the agent's recorder appending) since our last tick,
-  // BEFORE we write anything ourselves this tick — our own heartbeat + pr/ci
-  // deltas must not count as "the session is active", or the poller would never
-  // see quiet and could never retire between PR waves (it'd run the full
-  // MAX_LIFE). lastSize is re-baselined AFTER our writes, below.
-  let size = -1; try { size = fs.statSync(LOG).size; } catch { /* gone */ }
-  if (size > lastSize) lastGrowthTick = lifeTicks;
-  heartbeat(); // resident poll lane → ~one alive per interval
-  const openCount = tick();
-  if (openCount > 0) sawOpenPr = true;
-  try { lastSize = fs.statSync(LOG).size; } catch { /* gone */ } // baseline incl. our own writes
-  if (flags.worker && flags.known) {
-    // Retire only when the work is done AND the session has gone quiet — never
-    // just because the PRs known so far are all merged (the session may be mid-
-    // turn, about to open the next one). /nightshift off stops us sooner;
-    // MAX_LIFE backstops a session abandoned without `off`.
-    const quiet = (lifeTicks - lastGrowthTick) >= QUIET_TICKS;
-    doneTicks = (sawOpenPr && openCount === 0 && quiet) ? doneTicks + 1 : 0;
-    if (doneTicks >= 4 || lifeTicks >= MAX_LIFE) { clearInterval(timer); process.exit(0); }
-  }
-}, INTERVAL);

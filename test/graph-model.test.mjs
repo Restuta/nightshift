@@ -11,6 +11,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildGraphModel, COLUMNS, MAX_PER_COL, STEP_CAP, TURN_RE } from '../public/graph-model.js';
 import { fold, sessionPausedAt } from '../public/reducer.js';
+import { buildSessionInsights } from '../public/session-insights-model.js';
+import { buildSummaryViewModel } from '../public/session-summary.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAPES = path.join(here, 'tapes');
@@ -20,6 +22,121 @@ const readTape = f => fs.readFileSync(path.join(TAPES, f), 'utf8')
 const nodeById = (m, id) => m.nodes.find(n => n.id === id);
 const hasEdge = (m, from, to, kind) =>
   m.edges.some(e => e.from === from && e.to === to && (!kind || e.kind === kind));
+
+const referenceEvents = () => readTape('semantic-reference.jsonl');
+
+// --- canonical semantic projection -----------------------------------------
+test('reference graph uses the canonical current PR registry and topology', () => {
+  const events = referenceEvents();
+  const insights = buildSessionInsights(events, { untilT: Infinity, displayNow: events.at(-1).t });
+  const m = buildGraphModel(events, insights);
+  const prs = m.nodes.filter(node => node.kind === 'pr');
+
+  assert.deepEqual(prs.map(pr => pr.key).sort(), insights.prStack.prs.map(pr => pr.key).sort());
+  assert.deepEqual(prs.map(pr => pr.number).sort((a, b) => a - b), [101, 102, 103, 104, 105, 106, 107]);
+  assert.equal(m.topology.axis, 'current');
+  assert.deepEqual(m.topology.edges, insights.prStack.currentEdges);
+  assert.deepEqual(
+    m.edges.filter(edge => edge.kind === 'pr-base').map(({ fromKey, toKey }) => ({ from: fromKey, to: toKey })),
+    insights.prStack.currentEdges,
+  );
+  assert.ok(prs.every(pr => pr.currentTruth.startsWith('Current:')));
+  assert.ok(prs.every(pr => pr.recordedTruth == null || pr.recordedTruth.startsWith('Recorded:')));
+  assert.ok(prs.every(pr => pr.provenance && pr.confidence));
+  assert.ok(prs.every(pr => pr.milestone === 'Unassigned'));
+  assert.ok(prs.every(pr => /no explicit milestone attribution/i.test(pr.milestoneConfidence)));
+  assert.equal(m.semantic.state, 'attention');
+  assert.equal(m.semantic.nextActor, 'human');
+  assert.equal(m.semantic.currentBlocker, 'No execution blocker');
+  assert.equal(m.semantic.uncertainty, null);
+  assert.equal(m.semantic.uncertaintyText, 'No unresolved tool outcomes');
+});
+
+test('replay graph uses only recorded topology and recovery adds the seventh PR without invented edges', () => {
+  const events = referenceEvents();
+  const recoveryT = events.find(event => event.id === 'recovered-pr-104').t;
+  const before = buildSessionInsights(events, { untilT: recoveryT - 1, displayNow: recoveryT - 1 });
+  const beforeGraph = buildGraphModel(before.visiblePrefix, before);
+  assert.equal(beforeGraph.nodes.some(node => node.kind === 'pr' && node.number === 104), false);
+  assert.equal(beforeGraph.topology.axis, 'recorded', 'late tape facts without a fetch stamp are not current reconciliation');
+  assert.ok(beforeGraph.nodes.filter(node => node.kind === 'pr').every(node => node.currentTruth == null));
+
+  const finalAttentionT = events.find(event => event.id === 'final-attention').t;
+  const recoveredAt = events.find(event => event.id === 'recovered-pr-104').recordedAt;
+  const recovered = buildSessionInsights(events, {
+    untilT: finalAttentionT,
+    asOfT: recoveredAt,
+    displayNow: finalAttentionT,
+  });
+  const recoveredGraph = buildGraphModel(recovered.visiblePrefix, recovered);
+  const pr104 = recoveredGraph.nodes.find(node => node.kind === 'pr' && node.number === 104);
+  assert.equal(recoveredGraph.nodes.filter(node => node.kind === 'pr').length, 7);
+  assert.equal(recoveredGraph.topology.axis, 'recorded');
+  assert.equal(pr104.recordedTruth, null);
+  assert.equal(pr104.currentTruth, null);
+  assert.match(pr104.provenance, /recovery/i);
+  assert.equal(pr104.confidence, 'strong');
+  assert.deepEqual(recoveredGraph.topology.edges, recovered.prStack.recordedEdges);
+  assert.ok(recoveredGraph.edges
+    .filter(edge => edge.kind === 'pr-base')
+    .every(edge => edge.from !== pr104.id && edge.to !== pr104.id));
+});
+
+test('graph semantic projection carries the shared summary vocabulary, phase spine, and labeled tool evidence', () => {
+  const events = referenceEvents();
+  const insights = buildSessionInsights(events, { untilT: Infinity, displayNow: events.at(-1).t });
+  const m = buildGraphModel(events, insights);
+  const summary = buildSummaryViewModel(insights);
+
+  assert.equal(summary.prs, '7 PRs open · 0 merged');
+  assert.equal(summary.checklist, 'Session checklist: 8/10');
+  assert.equal(summary.roadmap, 'Product roadmap: roughly one-third');
+  assert.deepEqual(m.semantic.phases, insights.phases);
+  assert.ok(m.semantic.phases.some(phase => phase.phase === 'preflight'));
+  assert.ok(m.semantic.toolEvidence.every(tool => tool.label && tool.provenance && tool.confidence));
+});
+
+test('unknown tool outcomes remain uncertainty and never fabricate a Graph blocker', () => {
+  const events = [
+    { t: 0, id: 'session', type: 'session', phase: 'start', sessionId: 's' },
+    { t: 10, id: 'tool-start', type: 'tool_call', state: 'start', sessionId: 's', agentId: 'a', toolUseId: 'u', tool: 'Bash' },
+    { t: 20, id: 'next-prompt', type: 'notification', reason: 'next_prompt' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 20, displayNow: 20 });
+  const model = buildGraphModel(events, insights);
+
+  assert.equal(insights.toolCalls.missingOutcomeCount, 1);
+  assert.equal(model.semantic.state, 'attention');
+  assert.equal(model.semantic.currentBlocker, 'No execution blocker');
+  assert.equal(model.semantic.uncertainty.label, '1 tool outcome not observed');
+  assert.equal(model.semantic.uncertaintyText, '1 tool outcome not observed');
+});
+
+test('only explicit current permission evidence marks the Graph blocked', () => {
+  const events = [
+    { t: 0, id: 'session', type: 'session', phase: 'start' },
+    { t: 10, id: 'permission', type: 'notification', reason: 'permission' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 10, displayNow: 10 });
+  const model = buildGraphModel(events, insights);
+
+  assert.equal(model.semantic.state, 'blocked');
+  assert.equal(model.semantic.currentBlocker, 'Permission decision required');
+  assert.equal(model.semantic.uncertainty, null);
+  assert.equal(model.semantic.uncertaintyText, 'No unresolved tool outcomes');
+});
+
+test('recovered PR discovery and effective live snapshot expose separate provenance', () => {
+  const events = referenceEvents();
+  const insights = buildSessionInsights(events, { untilT: Infinity, displayNow: events.at(-1).t });
+  const model = buildGraphModel(events, insights);
+  const recovered = model.nodes.find(node => node.kind === 'pr' && node.number === 104);
+
+  assert.equal(recovered.discoveryProvenance, 'Transcript recovery · recovery');
+  assert.equal(recovered.snapshotProvenance, 'Current snapshot · poll-github');
+  assert.equal(recovered.provenance, 'Transcript recovery · recovery; Current snapshot · poll-github');
+  assert.equal(recovered.confidence, 'explicit');
+});
 
 // --- node sourcing: real entities, never turn-cards -------------------------
 test('nodes come from PRs / plan / intent items / session — NOT turn-cards', () => {
@@ -101,8 +218,8 @@ test('edge derivation: item→PR, base-chain, plan-step→item', () => {
   assert.ok(hasEdge(m, 'intent:wi-schema', 'pr:o/r#1', 'item-pr'));
   assert.ok(hasEdge(m, 'intent:wi-server', 'pr:o/r#2', 'item-pr'));
 
-  // PR → base PR (the stacked chain): #2 is based on #1
-  assert.ok(hasEdge(m, 'pr:o/r#2', 'pr:o/r#1', 'pr-base'), 'base-chain edge present');
+  // Base PR → child PR: the topology reads in execution order.
+  assert.ok(hasEdge(m, 'pr:o/r#1', 'pr:o/r#2', 'pr-base'), 'base-chain edge present');
   assert.equal(nodeById(m, 'pr:o/r#2').chainDepth, 1, 'stacked PR sits one deeper in the chain');
   assert.equal(nodeById(m, 'pr:o/r#1').chainDepth, 0);
 
@@ -110,10 +227,11 @@ test('edge derivation: item→PR, base-chain, plan-step→item', () => {
   assert.ok(hasEdge(m, 'plan', 'intent:wi-schema', 'plan-item'));
   assert.ok(hasEdge(m, 'plan', 'intent:wi-server', 'plan-item'));
 
-  // session containment reaches the top-level orphan PR (#3, no owning item) but
-  // NOT #1/#2 (owned by their intent items → not top-level).
+  // Session containment reaches the orphan root; #1 remains reached through its
+  // explicit intent and #2 through both intent and base topology.
   assert.ok(hasEdge(m, 'session', 'pr:o/r#3', 'session'), 'orphan PR hangs off the session');
-  assert.ok(!hasEdge(m, 'session', 'pr:o/r#1', 'session'), 'owned PR is not a session child');
+  assert.ok(!hasEdge(m, 'session', 'pr:o/r#1', 'session'), 'intent-owned root is not duplicated');
+  assert.ok(!hasEdge(m, 'session', 'pr:o/r#2', 'session'), 'stack child is reached through its base edge');
 });
 
 test('base-chain edge is only drawn when base data is present (old tapes: none)', () => {

@@ -1,407 +1,239 @@
-/* /graph React Flow app — scoped styles. Design tokens (--bg, --card, --line,
-   --ink, …) come from the board's shared /style.css, loaded at runtime; this
-   file only styles what is new here: the React Flow canvas, the HTML node
-   cards (ported 1:1 from the SVG designs in style.css's graph section), the
-   chapter groups, and the timeline panel. Same Linear language: flat
-   near-black, quiet hairlines, Inter UI text, Plex Mono numbers, motion only
-   when data changes. */
+/* Graph is a forensic instrument: flat dark planes, quiet hairlines, one state
+   color at a time, and text/line texture carrying every non-color distinction. */
 
-#root { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.gf-root { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-
-.gf-main {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  background:
-    radial-gradient(900px 340px at 78% -16%, rgba(20, 29, 56, .3) 0%, transparent 70%),
-    var(--bg);
-}
+#root,
+.gf-root { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 .mono { font-family: var(--mono); }
 
+.gf-nav { display: flex; align-items: center; gap: 5px; }
+.gf-nav a {
+  color: var(--faint); font: 10px var(--mono); letter-spacing: .04em;
+  padding: 5px 7px; border: 1px solid transparent; border-radius: 4px;
+}
+.gf-nav a:hover { color: var(--ink); border-color: var(--line); }
+.gf-nav a[aria-current="page"] { color: var(--ink); background: var(--card); border-color: var(--line); }
+.gf-nav a:focus-visible,
+.gf-tl-live:focus-visible,
+.gf-tl-track:focus-visible,
+.react-flow__node:focus-visible .gfn,
+.gf-ext:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.gf-live-state,
+.gf-state-word {
+  color: var(--dim); font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+  border: 1px solid currentColor; border-radius: 3px; padding: 2px 6px;
+}
+[data-state="active"] { --state: #d29922; }
+[data-state="attention"] { --state: #6aa3d8; }
+[data-state="blocked"] { --state: #eb6e64; }
+[data-state="complete"] { --state: #4cb782; }
+.gf-live-state[data-state],
+.gf-state-word[data-state] { color: var(--state); }
+
+/* ---------------------------------------------------------- shared truth */
+.gf-summary {
+  flex: none; padding: 13px 20px 12px; background: #0d121e;
+  border-bottom: 1px solid var(--line-soft); border-left: 3px solid var(--state, var(--line));
+}
+.gf-summary-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
+.gf-kicker { display: block; color: var(--faint); font-size: 9px; letter-spacing: .13em; text-transform: uppercase; }
+.gf-summary h1 { color: var(--ink); font-size: 15px; font-weight: 500; line-height: 1.25; margin: 3px 0 0; }
+.gf-summary dl { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); margin: 11px 0 0; }
+.gf-summary-item { min-width: 0; padding: 0 11px; border-left: 1px solid var(--line-soft); }
+.gf-summary-item:first-child { padding-left: 0; border-left: 0; }
+.gf-summary dt { color: var(--faint); font: 9px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+.gf-summary dd { color: var(--dim); font-size: 10.5px; line-height: 1.35; margin: 3px 0 0; overflow-wrap: anywhere; }
+.gf-summary-item:nth-child(n+7) { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.gf-state-legend {
+  display: flex; flex: none; align-items: center; gap: 13px; min-height: 28px; padding: 0 20px;
+  color: var(--faint); background: #0a0f19; border-bottom: 1px solid var(--line-soft); font: 9.5px var(--mono);
+}
+.gf-state-legend span[data-state]::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px; background: var(--state); }
+.gf-state-legend span:nth-last-child(2) { margin-left: auto; }
+
 /* ------------------------------------------------------------ react flow */
+.gf-main { position: relative; flex: 1 1 auto; min-height: 420px; background: var(--bg); }
 .react-flow { background: transparent; }
 .react-flow__pane { cursor: grab; }
 .react-flow__pane.dragging { cursor: grabbing; }
-
-/* Motion = data changing: nodes glide to their new layout slot. Disabled while
-   the user is the one moving them. */
-.react-flow__node { cursor: pointer; transition: transform 480ms cubic-bezier(.25, 1, .32, 1); }
-.react-flow__node.dragging,
-.react-flow__node.selected.dragging { transition: none; }
+.react-flow__node { cursor: pointer; transition: transform 180ms ease-out; }
+.react-flow__node.dragging { transition: none; }
 .react-flow__node-colband { pointer-events: none !important; cursor: default; }
-
-.gf-port {
-  opacity: 0;
-  width: 2px; height: 2px;
-  min-width: 0; min-height: 0;
-  border: none;
-  background: transparent;
-  pointer-events: none;
-}
-
-.react-flow__controls {
-  box-shadow: none;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.react-flow__controls-button {
-  width: 24px; height: 24px;
-  background: rgba(11, 15, 25, .92);
-  border-bottom: 1px solid var(--line-soft);
-  color: var(--dim);
-}
-.react-flow__controls-button:hover { background: var(--card-hover); color: var(--ink); }
+.react-flow__controls,
+.react-flow__minimap { overflow: hidden; background: #0b101b; border: 1px solid var(--line-soft); border-radius: 5px; }
+.react-flow__controls-button { width: 24px; height: 24px; color: var(--dim); background: #0b101b; border-bottom: 1px solid var(--line-soft); }
+.react-flow__controls-button:hover { color: var(--ink); background: var(--card-hover); }
 .react-flow__controls-button svg { fill: currentColor; max-width: 11px; max-height: 11px; }
-
-.react-flow__minimap {
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  overflow: hidden;
-}
 .react-flow__attribution { background: transparent; }
-.react-flow__attribution a { color: #333c56; font-size: 9px; }
+.react-flow__attribution a { color: #3f4962; font-size: 9px; }
+.gf-port { opacity: 0; width: 2px; height: 2px; min-width: 0; min-height: 0; border: 0; background: transparent; pointer-events: none; }
 
-/* --------------------------------------------------------------- node base */
+/* --------------------------------------------------------------- nodes */
 .gfn {
-  position: relative;
-  width: 100%; height: 100%;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  font-family: var(--sans);
-  overflow: hidden;
+  position: relative; width: 100%; height: 100%; overflow: hidden;
+  color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+  font-family: var(--sans); box-sizing: border-box;
 }
-.react-flow__node:hover .gfn { background: var(--card-hover); border-color: #33405f; }
-.react-flow__node.selected .gfn { border-color: #3a4a70; }
+.react-flow__node:hover .gfn { background: var(--card-hover); border-color: #3b4762; }
+.react-flow__node.selected .gfn { border-color: #546582; }
+.gfn.glow { animation: gf-recorded-change 900ms ease-out; }
+@keyframes gf-recorded-change { 0% { border-color: var(--blue); } 100% { border-color: var(--line); } }
+.react-flow__edge.pulse .react-flow__edge-path { animation: gf-edge-change 900ms ease-out; }
+@keyframes gf-edge-change { 0% { stroke-width: 3; } 100% { stroke-width: 1.6; } }
 
-/* a node whose entity just changed glows once; a merging PR pulses its edges */
-.gfn.glow { animation: gfglow 1.4s ease-out; }
-@keyframes gfglow {
-  0% { border-color: var(--blue); box-shadow: 0 0 7px rgba(78, 167, 252, .55); }
-  100% { border-color: var(--line); box-shadow: none; }
-}
-.react-flow__edge.pulse .react-flow__edge-path { animation: gfedgepulse 1.3s ease-out; }
-@keyframes gfedgepulse {
-  0% { stroke: var(--merged); stroke-width: 3.2; opacity: 1; }
-  100% { opacity: .7; }
-}
-
-.gf-accent { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; border-radius: 2px; }
-.gf-title { font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.gf-meta { font-size: 10.5px; color: var(--dim); white-space: nowrap; }
-.gf-sub { font-size: 10px; color: var(--faint); }
-.gf-age { font-size: 10px; color: var(--faint); }
-.gf-diff { font-size: 10.5px; font-weight: 500; margin-top: 5px; }
+.gf-accent { position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--state, var(--faint)); }
+.gf-title { color: var(--ink); font-size: 12.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gf-meta { color: var(--dim); font-size: 10px; white-space: nowrap; }
+.gf-sub,
+.gf-age { color: var(--faint); font-size: 9.5px; }
+.gf-diff { color: var(--faint); font-size: 9.5px; margin-top: 4px; }
 .gf-diff em { font-style: normal; }
 .gf-diff .a { color: var(--green); }
 .gf-diff .d { color: var(--red); margin-left: 7px; }
 
-/* ------------------------------------------------------------ column bands */
-.gf-band {
-  width: 100%; height: 100%;
-  background: rgba(255, 255, 255, .008);
-  border-radius: 10px;
-  position: relative;
-}
-.gf-band.alt { background: rgba(255, 255, 255, .016); }
-.gf-band-label {
-  position: absolute; top: 14px; left: 26px;
-  font-size: 11px; font-weight: 500;
-  letter-spacing: .12em; text-transform: uppercase;
-  color: var(--faint);
-}
-.gf-band-count {
-  position: absolute; top: 14px; left: 250px;
-  font-size: 11px; color: var(--faint); opacity: .8;
-}
+.gf-band { position: relative; width: 100%; height: 100%; background: rgba(255,255,255,.006); border-left: 1px solid rgba(255,255,255,.025); }
+.gf-band.alt { background: rgba(255,255,255,.012); }
+.gf-band-label { position: absolute; top: 14px; left: 26px; color: var(--faint); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+.gf-band-count { position: absolute; top: 14px; right: 26px; color: var(--faint); font-size: 10px; }
 
-/* ------------------------------------------------------------ session root */
-.gfn-session { background: #141a2b; border-color: #2b3550; }
-.react-flow__node:hover .gfn-session { background: #171e31; }
-.gfs-base { padding: 10px 12px 0 16px; height: 84px; }
-.gfs-head { display: flex; align-items: center; gap: 8px; }
-.gfs-head .gf-title { flex: 1 1 auto; min-width: 0; }
-.gf-agent {
-  flex: none;
-  font-family: var(--mono); font-size: 9px; font-weight: 600;
-  letter-spacing: .08em;
-  padding: 1px 7px;
-  border: 1px solid currentColor;
-  border-radius: 8px;
-  opacity: .8;
-}
-.gf-agent.agent-claude { color: #d97757; }
-.gf-agent.agent-codex { color: #9fb3c8; }
+.gfn-session { background: #121927; border-color: #2b3550; }
+.gfs-base { height: 84px; padding: 10px 12px 0 15px; box-sizing: border-box; }
+.gfs-head { display: flex; align-items: center; gap: 7px; }
+.gfs-head .gf-title { flex: 1; min-width: 0; }
+.gf-agent { color: var(--dim); font: 8.5px var(--mono); letter-spacing: .07em; border: 1px solid currentColor; border-radius: 3px; padding: 1px 5px; }
 .gfs-base .gf-meta { margin-top: 5px; }
 .gfs-base .gf-sub { margin-top: 4px; }
-
-.gfs-act { margin: 0 12px 0 16px; border-top: 1px solid var(--line-soft); padding: 8px 0 10px; }
-.gfa-on {
-  font-size: 10.5px; color: var(--dim);
-  white-space: nowrap; overflow: hidden;
-  margin-bottom: 5px;
-}
-.gfa-body { display: flex; gap: 8px; }
-.gfa-dot {
-  flex: none;
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--yellow);
-  margin-top: 4px;
-  position: relative;
-}
-.gfa-dot.tool, .gfa-dot.past, .gfa-dot.tool.past { background: var(--faint); }
+.gfs-act { margin: 0 11px 0 15px; padding: 7px 0 9px; border-top: 1px solid var(--line-soft); }
+.gfa-on { color: var(--dim); font-size: 9.5px; white-space: nowrap; overflow: hidden; }
+.gfa-body { display: flex; gap: 7px; margin-top: 4px; }
+.gfa-dot { flex: none; width: 6px; height: 6px; margin-top: 4px; background: var(--yellow); }
 .gfa-dot.attn { background: var(--red); }
-.gfa-ping {
-  position: absolute; inset: -4px;
-  border: 1.4px solid var(--yellow);
-  border-radius: 50%;
-  animation: gfping 1.9s ease-out infinite;
-}
-@keyframes gfping {
-  0% { transform: scale(.45); opacity: .55; }
-  70%, 100% { transform: scale(1.5); opacity: 0; }
-}
-.gfa-lines { font-size: 11px; line-height: 15px; color: var(--dim); min-width: 0; }
-.gfa-lines div { white-space: nowrap; overflow: hidden; }
-.gfa-body.say .gfa-lines { color: var(--ink); font-style: italic; opacity: .9; }
-.gfa-body.tool .gfa-lines { font-family: var(--mono); font-size: 10.5px; color: var(--faint); font-style: normal; }
-.gfa-body.past .gfa-lines { color: var(--faint); font-style: normal; opacity: .8; }
-.gfa-body.attn .gfa-lines { color: var(--red); font-style: normal; opacity: 1; }
+.gfa-ping { display: none; }
+.gfa-lines { color: var(--dim); font-size: 10.5px; line-height: 14px; }
 
-/* ------------------------------------------------------------ plan cluster */
-.gfn-plan { background: #101725; border-color: #23304a; padding: 10px 14px; }
-.react-flow__node:hover .gfn-plan { background: #121a29; }
-.gfp-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
-.gf-frac { font-size: 11px; color: var(--dim); }
-.gfp-row {
-  display: flex; align-items: center; gap: 6px;
-  height: 18px;
-  font-size: 11px; color: var(--dim);
-  white-space: nowrap;
-}
+.gfn-plan { padding: 10px 13px; background: #101725; border-color: #27334a; }
+.gfp-head { display: flex; justify-content: space-between; margin-bottom: 7px; }
+.gf-frac { color: var(--dim); font-size: 10px; }
+.gfp-row { display: flex; align-items: center; gap: 6px; height: 18px; color: var(--dim); font-size: 10.5px; white-space: nowrap; }
 .gfp-row span { overflow: hidden; text-overflow: ellipsis; }
 .gfp-row.completed span { color: var(--faint); text-decoration: line-through; }
-.gfp-row.muted span { color: var(--faint); font-style: italic; }
-.gfp-dot { flex: none; width: 6.4px; height: 6.4px; border-radius: 50%; background: var(--faint); }
+.gfp-dot { flex: none; width: 6px; height: 6px; background: var(--faint); }
 .gfp-dot.in_progress { background: var(--yellow); }
 .gfp-dot.completed { background: var(--green); }
 .gfp-dot.spacer { background: transparent; }
 
-/* -------------------------------------------------------------- work item */
-.gfn-intent { padding: 11px 12px 8px 16px; }
+.gfn-intent { padding: 10px 11px 8px 15px; }
 .gfn-intent .gf-meta { margin-top: 6px; }
-.gf-chip {
-  position: absolute; right: 12px; bottom: 7px;
-  font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
-  color: var(--faint);
-}
+.gf-chip { position: absolute; right: 10px; bottom: 7px; color: var(--faint); font-size: 9px; text-transform: uppercase; }
 .gf-chip.abandoned { color: var(--red); }
 
-/* --------------------------------------------------------------------- pr */
-.gfn-pr { padding: 11px 12px 8px; }
-.gfr-head { display: flex; align-items: center; gap: 8px; }
-.gfr-head .gf-title { flex: 1 1 auto; min-width: 0; }
-.gf-ring {
-  flex: none;
-  width: 13px; height: 13px;
-  border-radius: 50%;
-  border: 2.4px solid;
-  position: relative;
-  display: inline-block;
-}
-.gf-ring i { position: absolute; inset: 2px; border-radius: 50%; }
-.gfr-meta { display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; padding-left: 21px; }
-.gfn-pr .gf-diff { padding-left: 21px; }
-.gf-ci { flex: none; }
+.gfn-pr { padding: 10px 10px 8px 13px; }
+.gfn-pr .gf-accent { background: var(--state); }
+.gfr-head { display: flex; align-items: center; gap: 7px; }
+.gfr-head .gf-title { flex: 1; min-width: 0; }
+.gf-ring { flex: none; display: inline-block; width: 11px; height: 11px; border: 2px solid; border-radius: 50%; }
+.gf-ring i { display: block; width: 5px; height: 5px; margin: 1px; border-radius: 50%; }
 .gf-ci.fail path { stroke: var(--red); }
 .gf-ci.pass path { stroke: var(--green); }
-.gf-ci.pending {
-  width: 8px; height: 8px;
-  border: 1.4px solid var(--yellow);
-  border-radius: 50%;
-  display: inline-block;
-}
-.gf-ext {
-  position: absolute; right: 7px; bottom: 7px;
-  width: 18px; height: 18px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 4px;
-}
+.gf-ci.pending { display: inline-block; width: 7px; height: 7px; border: 1px solid var(--yellow); border-radius: 50%; }
+.gfr-meta { display: flex; justify-content: space-between; margin: 6px 0 0 18px; }
+.gfr-milestone { color: var(--state); font-size: 9px; margin: 5px 0 0 18px; text-transform: uppercase; letter-spacing: .04em; }
+.gfr-truth { margin: 6px 0 0 18px; padding-top: 5px; border-top: 1px solid var(--line-soft); }
+.gfr-truth div { display: grid; grid-template-columns: 64px 1fr; gap: 5px; margin-top: 3px; color: var(--dim); font-size: 9px; line-height: 1.25; }
+.gfr-truth b { color: var(--faint); font: 8px var(--mono); text-transform: uppercase; }
+.gfr-truth span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gfr-evidence { display: flex; flex-direction: column; gap: 2px; margin: 5px 20px 0 18px; color: var(--faint); font-size: 8px; white-space: nowrap; overflow: hidden; }
+.gfr-evidence span { overflow: hidden; text-overflow: ellipsis; }
+.gfn-pr .gf-diff { margin-left: 18px; }
+.gf-ext { position: absolute; right: 6px; bottom: 6px; display: grid; place-items: center; width: 17px; height: 17px; border: 1px solid transparent; border-radius: 3px; }
 .gf-ext path { stroke: var(--faint); }
-.gf-ext:hover { background: rgba(78, 167, 252, .08); }
+.gf-ext:hover { border-color: var(--line); }
 .gf-ext:hover path { stroke: var(--blue); }
 
-/* ------------------------------------------------------------ running step */
-.gfn-step { background: #14100a; border-color: #3a2f14; display: flex; padding: 12px 8px 8px 0; }
-.react-flow__node:hover .gfn-step { background: #171208; border-color: #46391a; }
+.gfn-step { display: flex; padding: 11px 8px 8px 0; background: #15120c; border-color: #3d3219; }
 .gfn-step.paused { background: var(--card); border-color: var(--line); }
-.gft-glyph { flex: none; width: 34px; display: flex; justify-content: center; padding-top: 1px; }
-.gft-ring {
-  width: 11px; height: 11px;
-  border-radius: 50%;
-  border: 1.7px dashed var(--yellow);
-  animation: gfspin 6s linear infinite;
-}
-@keyframes gfspin { to { transform: rotate(360deg); } }
-.gft-pause { display: flex; gap: 2.8px; padding-top: 1px; }
-.gft-pause i { width: 2.6px; height: 10px; background: var(--faint); border-radius: 1px; }
-.gft-body { flex: 1 1 auto; min-width: 0; }
-.gft-text { font-size: 11.5px; line-height: 15px; color: var(--ink); white-space: nowrap; overflow: hidden; }
-.gfn-step.paused .gft-text { color: var(--dim); }
-.gft-dur { font-size: 10px; color: var(--yellow); margin-top: 4px; }
+.gft-glyph { display: flex; flex: none; justify-content: center; width: 34px; }
+.gft-ring { width: 10px; height: 10px; border: 1px dashed var(--yellow); border-radius: 50%; }
+.gft-pause { display: flex; gap: 3px; }
+.gft-pause i { width: 2px; height: 9px; background: var(--faint); }
+.gft-body { min-width: 0; }
+.gft-text { color: var(--ink); font-size: 11px; line-height: 15px; white-space: nowrap; overflow: hidden; }
+.gft-dur { color: var(--yellow); font-size: 9.5px; margin-top: 4px; }
 .gfn-step.paused .gft-dur { color: var(--faint); }
 
-/* --------------------------------------------- folded stacks ("N more") */
-.gfn-fold {
-  background: transparent;
-  border: 1px dashed var(--line);
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: flex-end;
-  padding-bottom: 9px;
-}
-.react-flow__node:hover .gfn-fold { background: rgba(255, 255, 255, .01); border-color: #33405f; }
-.gf-stack { position: absolute; top: 7px; left: 0; right: 0; }
-.gf-stack i { display: block; height: 1px; background: var(--faint); opacity: .55; margin: 0 auto 5px; }
-.gf-stack i:nth-child(1) { width: 82%; }
-.gf-stack i:nth-child(2) { width: 90%; }
-.gf-stack i:nth-child(3) { width: 97%; }
-.gf-fold-txt { font-size: 11px; color: var(--dim); }
-
-/* --------------------------------------------------------------- now node */
-.gfn-now { background: #14100a; border-color: #3a2f14; padding: 11px 16px 10px; }
-.react-flow__node:hover .gfn-now { background: #171208; border-color: #46391a; }
-.gfn-now.attn { border-color: #4a2420; }
-.gfw-head { display: flex; align-items: center; gap: 8px; }
-.gfw-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); position: relative; }
+.gfn-now { padding: 10px 14px; background: #15120c; border-color: #3d3219; }
+.gfn-now.attn { border-color: #563029; }
+.gfw-head { display: flex; align-items: center; gap: 7px; }
+.gfw-dot { width: 6px; height: 6px; background: var(--yellow); }
 .gfn-now.attn .gfw-dot { background: var(--red); }
-.gfw-label { font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--yellow); }
+.gfw-label { color: var(--yellow); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .gfn-now.attn .gfw-label { color: var(--red); }
-.gfw-prompt { margin-top: 7px; font-size: 13px; font-weight: 500; line-height: 17px; color: var(--ink); }
-.gfw-prompt div { white-space: nowrap; overflow: hidden; }
-.gfw-line { margin-top: 4px; font-size: 11px; line-height: 15px; color: var(--dim); }
-.gfw-line div { white-space: nowrap; overflow: hidden; }
-.gfw-line.say { color: var(--ink); font-style: italic; opacity: .9; }
-.gfw-line.tool { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
-.gfw-line.past { color: var(--faint); font-style: normal; opacity: .8; }
-.gfw-line.attn { color: var(--red); font-style: normal; opacity: 1; }
+.gfw-prompt { color: var(--ink); font-size: 12.5px; line-height: 16px; margin-top: 6px; }
+.gfw-line { color: var(--dim); font-size: 10.5px; line-height: 14px; margin-top: 4px; }
+.gfw-line.tool { color: var(--faint); font-family: var(--mono); }
 
-/* ----------------------------------------------------------- chapter group */
-/* One collapsible group per digest chapter — the LANDED redesign. Collapsed:
-   a quiet card (prompt + count + chips). Expanded: a subflow surface whose
-   children are the real PR nodes. Landed work should recede, so the fill sits
-   between the backdrop and a card. */
-.gfn-chapter { background: #101523; border-color: #202942; }
-.react-flow__node:hover .gfn-chapter { background: #121829; border-color: #28324e; }
-.gfn-chapter.open { background: rgba(14, 18, 30, .55); }
-.gfc-meta {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 11px 12px 0 14px;
-  font-size: 10px; color: var(--faint);
-  white-space: nowrap;
-}
-.gfc-caret { flex: none; margin-left: 8px; transition: transform 200ms ease; }
-.gfc-caret path { stroke: var(--faint); }
-.gfn-chapter.open .gfc-caret { transform: rotate(180deg); }
-.gfc-title { padding: 4px 14px 0; font-size: 12.5px; font-weight: 500; line-height: 17px; color: #c9d0e0; }
-.gfc-title div { white-space: nowrap; overflow: hidden; }
-.gfc-chips { padding: 8px 14px 0; display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; }
-.gfc-chip {
-  font-size: 10px;
-  height: 17px;
-  display: inline-flex; align-items: center;
-  padding: 0 6px;
-  border-radius: 4px;
-  border: 1px solid var(--line-soft);
-  color: var(--dim);
-}
-.gfc-chip.st-merged { color: #b598e8; border-color: rgba(163, 113, 247, .28); }
-.gfc-chip.st-closed { color: var(--faint); }
-.gfc-chip.st-open { color: var(--yellow); border-color: rgba(210, 153, 34, .3); }
-.gfc-chip.st-more { color: var(--faint); border-style: dashed; }
+.gfn-fold { display: flex; align-items: center; justify-content: center; background: transparent; border-style: dashed; }
+.gf-fold-txt { color: var(--dim); font-size: 10px; }
+.gf-stack { display: none; }
 
-/* ------------------------------------------------------------ timeline */
-.gf-tl-panel { margin-bottom: 12px; }
-.gf-timeline {
-  width: min(680px, 56vw);
-  background: rgba(10, 13, 22, .92);
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  padding: 8px 14px 14px;
-  backdrop-filter: blur(8px);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
-}
-.gf-tl-row {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 6px;
-  font-size: 10px; color: var(--faint);
-}
-.gf-tl-label { white-space: nowrap; }
-.gf-tl-spans { color: var(--dim); }
-.gf-tl-live {
-  background: none;
-  border: 1px solid #4ea7fc40;
-  border-radius: 99px;
-  color: var(--blue);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  padding: 2px 10px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.gf-tl-live:hover { background: var(--card); }
-.gf-tl-track { position: relative; height: 20px; cursor: ew-resize; touch-action: none; }
-.gf-tl-base {
-  position: absolute; left: 0; right: 0; top: 50%;
-  height: 2px; margin-top: -1px;
-  background: var(--line-soft);
-  border-radius: 1px;
-}
-.gf-tl-seg {
-  position: absolute; top: 50%;
-  height: 6px; margin-top: -3px;
-  background: var(--yellow);
-  opacity: .8;
-  border-radius: 2px;
-  pointer-events: none;
-}
-.gf-tl-dim {
-  position: absolute; top: 0; bottom: 0; right: 0;
-  background: rgba(7, 10, 19, .6);
-  pointer-events: none;
-}
-.gf-tl-cursor {
-  position: absolute; top: 0; bottom: 0;
-  width: 2px; margin-left: -1px;
-  background: var(--blue);
-  border-radius: 1px;
-  pointer-events: none;
-}
-.gf-tl-knob {
-  position: absolute; top: -3px; left: 50%;
-  width: 9px; height: 9px; margin-left: -4.5px;
-  border-radius: 50%;
-  background: var(--blue);
-  border: 2px solid #0b0f1a;
-  box-sizing: border-box;
-}
-.gf-tl-cursor-time {
-  position: absolute; top: 100%;
-  transform: translateX(-50%);
-  margin-top: 2px;
-  font-size: 10px; color: var(--blue);
-  pointer-events: none;
-  white-space: nowrap;
-}
+/* ------------------------------------------------------ semantic timeline */
+.gf-tl-panel { margin-bottom: 10px; }
+.gf-timeline { width: min(760px, 62vw); padding: 9px 13px 12px; color: var(--dim); background: #0a0f19; border: 1px solid var(--line); border-radius: 6px; }
+.gf-tl-row,
+.gf-tl-times { display: flex; justify-content: space-between; align-items: center; }
+.gf-tl-title { color: var(--ink); font-size: 11px; font-weight: 500; }
+.gf-tl-mid { color: var(--dim); font-size: 9.5px; }
+.gf-tl-times { color: var(--faint); font-size: 8.5px; margin-top: 4px; }
+.gf-tl-live { color: var(--blue); background: transparent; border: 1px solid #355474; border-radius: 3px; font: 9px var(--mono); padding: 3px 6px; cursor: pointer; }
+.gf-tl-track { position: relative; height: 30px; margin-top: 5px; cursor: ew-resize; touch-action: none; }
+.gf-phase-spine { position: absolute; inset: 8px 0 7px; background: var(--line-soft); }
+.gf-phase { position: absolute; top: 0; bottom: 0; min-width: 1px; border-right: 1px solid #0a0f19; box-sizing: border-box; }
+.gf-phase[data-category="coding"] { background: #5e6ad2; }
+.gf-phase[data-category="testing"] { background: #4c8f7b; }
+.gf-phase[data-category="preflight"] { background: #9a7432; }
+.gf-phase[data-category="other"] { background: #59647b; }
+.gf-phase[data-category="waiting"] { background: #41698e; }
+.gf-phase[data-category="idle"] { background: #30394a; }
+.gf-phase[data-category="unknown"] { background: #252b38; }
+.gf-phase[data-confidence="strong"] { top: 2px; bottom: 2px; border-top: 1px dashed #d4c394; border-bottom: 1px dashed #d4c394; }
+.gf-phase[data-confidence="heuristic"] { top: 3px; bottom: 3px; border-top: 1px dotted #c2cad7; border-bottom: 1px dotted #c2cad7; opacity: .72; }
+.gf-tool-overlay { position: absolute; inset: 0; pointer-events: none; }
+.gf-tool-span { position: absolute; top: 2px; height: 2px; min-width: 2px; background: #d7dce5; }
+.gf-tool-point { position: absolute; top: 0; width: 1px; height: 6px; background: #d7dce5; }
+.gf-tl-dim { position: absolute; inset: 0 0 0 auto; background: rgba(5, 8, 14, .72); pointer-events: none; }
+.gf-tl-cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--blue); pointer-events: none; }
+.gf-tl-knob { position: absolute; top: -1px; left: -3px; width: 7px; height: 7px; background: var(--blue); border: 1px solid #0a0f19; border-radius: 50%; }
+.gf-tl-cursor-time { position: absolute; top: 28px; color: var(--blue); font-size: 8px; transform: translateX(-50%); white-space: nowrap; }
+.gf-tl-legend { display: flex; flex-wrap: wrap; gap: 4px 9px; margin-top: 7px; color: var(--faint); font: 8px var(--mono); }
 
-/* crash surface — a flight recorder must never fail silently */
-.gf-crash { padding: 60px 40px; color: var(--dim); font-size: 12px; }
-.gf-crash b { color: var(--red); display: block; margin-bottom: 12px; }
-.gf-crash pre { white-space: pre-wrap; max-width: 900px; color: var(--faint); margin-bottom: 16px; }
-.gf-crash a { color: var(--blue); }
-
-/* tooltip + empty reuse .graph-tooltip / .graph-empty / .graph-hint from the
-   shared style.css; only the stacking context differs here */
-.gf-main .graph-tooltip { z-index: 20; }
+.graph-state { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); font: 11px var(--mono); }
+.graph-state.is-error { color: var(--red); }
+.gf-main .graph-tooltip { z-index: 20; max-width: 340px; white-space: pre-line; }
 .gf-main .graph-hint { z-index: 6; }
+.gf-crash { padding: 60px 40px; color: var(--dim); font-size: 12px; }
+.gf-crash b { display: block; color: var(--red); margin-bottom: 12px; }
+.gf-crash pre { max-width: 900px; color: var(--faint); white-space: pre-wrap; }
+
+@media (max-width: 960px) {
+  .gf-summary dl { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+  .gf-summary-item:nth-child(n+4) { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line-soft); }
+  .gf-state-legend span:nth-last-child(-n+2) { display: none; }
+  .gf-timeline { width: 76vw; }
+}
+
+@media (max-width: 640px) {
+  .gf-nav a:not([aria-current="page"]) { display: none; }
+  .gf-summary { padding-inline: 12px; }
+  .gf-summary dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gf-summary-item { padding-inline: 7px; }
+  .gf-summary-item:nth-child(n+3) { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line-soft); }
+  .gf-state-legend { padding-inline: 12px; overflow: hidden; }
+  .gf-state-legend span { white-space: nowrap; }
+  .gf-timeline { width: 84vw; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__node { transition: none; }
+  .gfn.glow,
+  .react-flow__edge.pulse .react-flow__edge-path { animation: none; }
+}

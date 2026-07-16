@@ -13,6 +13,18 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
+const {
+  listRegistrations,
+  acquireLease,
+  bindLease,
+  renewLease,
+  isLeaseCurrent,
+  releaseLease,
+  acquireSlot,
+  readCancellation,
+  readStatus,
+  writeStatus,
+} = require('./tools/poller-registration.js');
 
 const args = process.argv.slice(2);
 function flag(name, fallback) {
@@ -171,21 +183,29 @@ function drain(s) {
 setInterval(() => { for (const s of sessions.values()) drain(s); }, 300).unref();
 
 // --------------------------------------------------- PR state reconciliation
-// PR/CI freshness used to depend on a separate detached poller staying alive —
-// and it didn't: a laptop restart, a crash, or its own retirement froze PR
-// state, so a merged PR showed "open" forever (nothing emitted the merge). The
-// board server is the ONE process that must be alive for anyone to see the
-// board, so it owns reconciliation now. For any session a viewer is actually
-// looking at that still has an open PR, it runs poll-github (--once, session-
-// scoped), which queries gh (authoritative) and appends only merge/close/ci
-// deltas. Those flow back through the normal tail → SSE. The reducer stays pure
-// (the server records events, it never renders fetched state); there's no daemon
-// to die — reconciliation's lifecycle is the board's own. See docs/EVENTS.md.
-const POLLER = path.join(__dirname, 'tools', 'poll-github.js');
-const RECONCILE_MS = 30000; // re-poll a watched session at most this often
+// Recording registers a tape durably; every board server loads those records at
+// boot. A per-session wx lease turns multiple launchd/manual board processes into
+// one one-shot writer. Scheduling state is itself appended as poller_status, so a
+// replacement server resumes the same deadline without needing an SSE viewer or
+// trusting process-local memory.
+const POLLER = process.env.NIGHTSHIFT_PR_POLLER || path.join(__dirname, 'tools', 'poll-github.js');
+const FRESH_MS = 15_000;
+const IDLE_MS = 60_000;
+const STALE_MS = 300_000;
+const retentionEnv = Number(process.env.NIGHTSHIFT_PR_RETENTION_MS);
+const RECONCILE_RETENTION_MS = Number.isFinite(retentionEnv) && retentionEnv >= 0
+  ? retentionEnv
+  : 86_400_000;
+const supervisorTickEnv = Number(process.env.NIGHTSHIFT_PR_SUPERVISOR_TICK_MS);
+const SUPERVISOR_TICK_MS = Number.isFinite(supervisorTickEnv) && supervisorTickEnv > 0
+  ? supervisorTickEnv
+  : 1_000;
+const MAX_POLLS = 2;
+const RECONCILE_SOURCES = new Set(['poll-github', 'server', 'recovery']);
+const expiredRegistrationScans = new Map();
 // A board relaunched on login can inherit a minimal PATH, leaving the reconciler
 // unable to find gh/toast. Augment with the usual tool dirs (+ node's own).
-const TOOL_PATH = [
+const TOOL_PATH = process.env.NIGHTSHIFT_PR_TOOL_PATH || [
   path.dirname(process.execPath),
   process.env.HOME && path.join(process.env.HOME, '.volta/bin'),
   process.env.HOME && path.join(process.env.HOME, '.local/bin'),
@@ -193,60 +213,432 @@ const TOOL_PATH = [
   process.env.PATH,
 ].filter(Boolean).join(':');
 
-// Fold just PR state + the cwd out of a log — cheap enough at viewer cadence.
-// We only need: does this session have an OPEN PR, and which repo dir is it.
-function prScan(s) {
+function supervisorNow() {
+  const file = process.env.NIGHTSHIFT_PR_NOW_FILE;
+  if (file) {
+    try {
+      const value = Number(fs.readFileSync(file, 'utf8'));
+      if (Number.isFinite(value)) return value;
+    } catch { /* test clock removed → wall time */ }
+  }
+  return Date.now();
+}
+
+function repoFromEvent(ev, fallback) {
+  if (ev && ev.repo) return String(ev.repo).toLowerCase();
+  const match = String((ev && ev.url) || '').match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/i);
+  return match ? match[1].toLowerCase() : fallback;
+}
+
+function registrationGroups() {
+  const groups = new Map();
+  for (const registration of listRegistrations()) {
+    let group = groups.get(registration.logKey);
+    if (!group) {
+      group = {
+        logKey: registration.logKey,
+        log: registration.log,
+        cwd: registration.cwd,
+        registrations: [],
+      };
+      groups.set(registration.logKey, group);
+    }
+    group.registrations.push(registration);
+    if (!fs.existsSync(group.cwd) && fs.existsSync(registration.cwd)) group.cwd = registration.cwd;
+  }
+  return groups;
+}
+
+function statusEvent(group, status, now, extra = {}, dedupeKey = null) {
+  const event = {
+    t: now,
+    id: randomUUID(),
+    source: 'server',
+    v: 2,
+    type: 'poller_status',
+    status,
+    logKey: group.logKey,
+    sessionIds: group.registrations.map(registration => registration.sessionId).sort(),
+    ...extra,
+  };
+  const previous = readStatus(group.logKey);
+  if (dedupeKey && previous && previous.dedupeKey === dedupeKey) return previous;
+  writeStatus(group.logKey, event, { dedupeKey });
+  // Missing/empty registered tapes are historical placeholders. Diagnostics
+  // live in the durable sidecar without recreating or populating those tapes.
+  try {
+    if (fs.statSync(group.log).size > 0) fs.appendFileSync(group.log, JSON.stringify(event) + '\n');
+  } catch { /* sidecar is authoritative when the tape is absent */ }
+  return event;
+}
+
+// Fold only scheduler facts. PR identities always carry a repo component; old
+// repo-less tapes use the registered real cwd as a conservative namespace, so
+// org/alpha#1 and org/beta#1 can never overwrite one another.
+function prScan(group) {
   let raw = '';
-  try { raw = fs.readFileSync(s.file, 'utf8'); } catch { return { cwd: null, open: 0 }; }
-  let cwd = null;
-  const st = new Map();
-  // Sort by t first: pr state is last-write-wins, so on an out-of-order tape the
-  // latest state by time must win, not the last line in the file.
+  try { raw = fs.readFileSync(group.log, 'utf8'); }
+  catch {
+    return {
+      missing: true, empty: false, cwd: group.cwd, prs: new Map(), refFingerprint: '0',
+      producerAt: null, activityAt: null, latestRefAt: null, phase: null,
+      lastStatus: readStatus(group.logKey),
+    };
+  }
+  let cwd = group.cwd;
+  let phase = null;
+  let producerAt = null;
+  let activityAt = null;
+  let lastStatus = null;
+  const prs = new Map();
   const evs = [];
+  let position = 0;
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let ev; try { ev = JSON.parse(line); } catch { continue; }
-    evs.push(ev);
+    evs.push({ ev, position: position++ });
   }
-  evs.sort((a, b) => (a.t || 0) - (b.t || 0));
-  for (const ev of evs) {
-    if (ev.type === 'session' && ev.cwd) cwd = ev.cwd;
-    else if (ev.type === 'pr' && ev.number != null && ev.state) st.set(ev.number, ev.state);
-    // A pr_ref sighting with no confirmed pr state yet still needs a poll — the
-    // hook/tailer emit these instead of pr now (plan 1.4), so bootstrap the poller
-    // from them, else a freshly created PR would never get its first pr event.
-    else if (ev.type === 'pr_ref' && ev.number != null && !st.has(ev.number)) st.set(ev.number, 'open');
+  // PR state folds by historical event time, but reconciliation freshness is an
+  // observation-order fact. A recovered ref can be appended today with the old
+  // transcript timestamp in `t`; recordedAt and append position must still make
+  // it a new authoritative-check request after a terminal PR observation.
+  let latestRefAt = null;
+  let refCount = 0;
+  let lastRefIdentity = '';
+  for (const { ev, position: appendPosition } of evs) {
+    if (ev.type !== 'pr_ref' || ev.number == null) continue;
+    const observedAt = ev.source === 'recovery' && Number.isFinite(ev.recordedAt)
+      ? ev.recordedAt
+      : (Number.isFinite(ev.t) ? ev.t : 0);
+    const repo = repoFromEvent(ev, group.cwd.toLowerCase());
+    const key = `${repo}#${Number(ev.number)}`;
+    refCount++;
+    latestRefAt = latestRefAt == null ? observedAt : Math.max(latestRefAt, observedAt);
+    lastRefIdentity = `${key}:${observedAt}:${ev.id || appendPosition}`;
   }
-  let open = 0;
-  for (const v of st.values()) if (v === 'open') open++;
-  return { cwd, open };
+  evs.sort((a, b) => ((a.ev.t || 0) - (b.ev.t || 0)) || (a.position - b.position));
+  for (const { ev } of evs) {
+    const at = Number.isFinite(ev.t) ? ev.t : 0;
+    if (!RECONCILE_SOURCES.has(ev.source)) {
+      if (producerAt == null || at > producerAt) producerAt = at;
+      if (activityAt == null || at > activityAt) activityAt = at;
+    }
+    if (ev.type === 'session') {
+      if (ev.cwd) cwd = ev.cwd;
+      if (ev.phase === 'start' || ev.phase === 'resume') phase = 'working';
+      else if (ev.phase === 'idle') phase = 'idle';
+      else if (ev.phase === 'attention') phase = 'attention';
+      else if (ev.phase === 'end') phase = 'ended';
+    } else if (ev.type === 'pr_ref' && ev.number != null) {
+      const repo = repoFromEvent(ev, group.cwd.toLowerCase());
+      const key = `${repo}#${Number(ev.number)}`;
+      prs.set(key, { state: 'open', at, repo, number: Number(ev.number), ref: true });
+      activityAt = activityAt == null ? at : Math.max(activityAt, at);
+    } else if (ev.type === 'pr' && ev.number != null && ev.state) {
+      const repo = repoFromEvent(ev, group.cwd.toLowerCase());
+      const key = `${repo}#${Number(ev.number)}`;
+      prs.set(key, { state: String(ev.state).toLowerCase(), at, repo, number: Number(ev.number), ref: false });
+      activityAt = activityAt == null ? at : Math.max(activityAt, at);
+    } else if (ev.type === 'poller_status' && (!ev.logKey || ev.logKey === group.logKey)) {
+      lastStatus = ev;
+    }
+  }
+  const sidecar = readStatus(group.logKey);
+  if (sidecar && (!lastStatus || Number(sidecar.t || 0) >= Number(lastStatus.t || 0))) lastStatus = sidecar;
+  return {
+    missing: false,
+    empty: raw.length === 0,
+    cwd,
+    phase,
+    producerAt,
+    activityAt,
+    latestRefAt,
+    prs,
+    refFingerprint: `${refCount}:${lastRefIdentity}`,
+    lastStatus,
+  };
 }
 
-// Reconcile one session's PRs against gh, if it's worth it. Spawns the poller
-// detached (its appends arrive via drain()); never blocks the request loop.
-function reconcilePRs(s) {
-  if (s._polling) return;                                       // a poll's in flight
-  if (Date.now() - (s._lastPoll || 0) < RECONCILE_MS) return;  // throttled
-  const { cwd, open } = prScan(s);
-  if (!cwd || open === 0) return;                               // nothing to reconcile
-  if (!fs.existsSync(cwd)) return;                              // repo dir gone (worktree removed)
-  s._lastPoll = Date.now();
-  s._polling = true;
-  const child = spawn(process.execPath, [POLLER, '--once', '--known', '--log', s.file], {
-    cwd,                                                        // so `gh repo view`/refs resolve to this repo
-    env: { ...process.env, PATH: TOOL_PATH },
-    stdio: 'ignore',                                            // its appends arrive via drain()→SSE
-  });
-  child.on('error', () => { s._polling = false; });
-  child.on('exit', () => { s._polling = false; });
+function terminal(state) {
+  return state === 'merged' || state === 'closed';
 }
 
-// Keep watched sessions fresh while someone's looking — the board IS the poller.
-// Gated on having a viewer AND an open PR, so historical/all-merged sessions
-// never spawn a thing.
-setInterval(() => {
-  for (const s of sessions.values()) if (s.clients.size) reconcilePRs(s);
-}, RECONCILE_MS).unref();
+function producerIsFresh(scan, now) {
+  return scan.phase === 'working' && scan.producerAt != null && now - scan.producerAt <= STALE_MS;
+}
+
+function cadence(scan, now) {
+  if (producerIsFresh(scan, now)) return FRESH_MS;
+  if (scan.phase === 'idle' || scan.phase === 'attention') return IDLE_MS;
+  return STALE_MS;
+}
+
+function statIdentity(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return 'missing';
+  }
+}
+
+// Expired registrations remain durable so a late tape append or an explicit
+// registration refresh can resume reconciliation. Checking those wake-up
+// signals only needs metadata; reopening and parsing the historical tape on
+// every supervisor tick does not.
+function expiredRegistrationObservation(group) {
+  const registrations = group.registrations.map(registration => {
+    const file = path.join(NS_HOME, 'poller-sessions', `${registration.key}.json`);
+    return `${registration.key}:${registration.updatedAt ?? registration.registeredAt ?? 0}:${statIdentity(file)}`;
+  }).sort().join('|');
+  return `${statIdentity(group.log)}\0${registrations}`;
+}
+
+function rememberExpiredRegistration(group, scan, reason, observation) {
+  // Do not hide an append/refresh that raced the scan.
+  if (expiredRegistrationObservation(group) !== observation) return false;
+  expiredRegistrationScans.set(group.logKey, { observation, scan, reason });
+  return true;
+}
+
+function retentionAnchor(scan) {
+  const anchor = Math.max(scan.activityAt ?? -Infinity, scan.latestRefAt ?? -Infinity);
+  return Number.isFinite(anchor) ? anchor : null;
+}
+
+function sameExpiryStatus(scan, reason) {
+  const status = scan.lastStatus;
+  return Boolean(status && status.status === 'expired' && status.reason === reason
+    && (status.retentionAnchorAt ?? null) === retentionAnchor(scan)
+    && (status.refFingerprint ?? '0') === scan.refFingerprint);
+}
+
+function dueRegistration(group, now) {
+  const observation = expiredRegistrationObservation(group);
+  const cached = expiredRegistrationScans.get(group.logKey);
+  if (cached && cached.observation === observation) {
+    return { group, scan: cached.scan, reason: cached.reason, skip: true };
+  }
+  expiredRegistrationScans.delete(group.logKey);
+
+  const scan = prScan(group);
+  if (scan.missing) {
+    const already = sameExpiryStatus(scan, 'missing_log');
+    if (already) rememberExpiredRegistration(group, scan, 'missing_log', observation);
+    return { group, scan, expired: !already, reason: 'missing_log', skip: true, observation };
+  }
+  const anchor = retentionAnchor(scan);
+  if (anchor == null || now - anchor > RECONCILE_RETENTION_MS) {
+    const reason = scan.empty ? 'empty_log' : 'retention';
+    const already = sameExpiryStatus(scan, reason);
+    if (already) rememberExpiredRegistration(group, scan, reason, observation);
+    return { group, scan, expired: !already, reason, skip: true, observation };
+  }
+
+  const refChanged = !scan.lastStatus || scan.lastStatus.refFingerprint !== scan.refFingerprint;
+  const values = [...scan.prs.values()];
+  const nonterminal = values.some(pr => !terminal(pr.state));
+  const terminalSet = values.length > 0 && !nonterminal;
+  // A new sighting after a terminal result must get one immediate authoritative
+  // check (reopen is possible); otherwise a fully terminal set rests until a new
+  // pr_ref appears.
+  if (terminalSet && !refChanged) return { group, scan, skip: true };
+
+  // A recorder that never emitted end does not grant 24 hours of 15-second
+  // polling by itself. Once its producer signal is stale, only a discovered
+  // nonterminal PR keeps the registration eligible (at stale cadence).
+  if (!refChanged && !producerIsFresh(scan, now) && !nonterminal) return { group, scan, skip: true };
+
+  let dueAt = now;
+  if (!refChanged && scan.lastStatus) {
+    if (scan.lastStatus.status === 'error' && Number.isFinite(scan.lastStatus.nextDue)) {
+      dueAt = scan.lastStatus.nextDue;
+    } else {
+      dueAt = Number(scan.lastStatus.t || 0) + cadence(scan, now);
+    }
+  }
+  return { group, scan, dueAt, cadenceMs: cadence(scan, now), due: now >= dueAt };
+}
+
+const supervisor = {
+  active: new Map(),
+  ticking: false,
+  shuttingDown: false,
+
+  tick() {
+    if (this.ticking || this.shuttingDown) return;
+    this.ticking = true;
+    try {
+      const now = supervisorNow();
+      const candidates = [];
+      const groups = registrationGroups();
+      for (const key of expiredRegistrationScans.keys()) {
+        if (!groups.has(key)) expiredRegistrationScans.delete(key);
+      }
+      // Cancellation is log-scoped and remains visible after the session record
+      // is removed, so active children are stopped before group enumeration.
+      for (const [key, entry] of this.active) {
+        if (readCancellation(key)) this.terminate(entry);
+      }
+      for (const group of groups.values()) {
+        if (readCancellation(group.logKey) || this.active.has(group.logKey)) continue;
+        const candidate = dueRegistration(group, now);
+        if (candidate.expired) {
+          this.recordExpired(candidate, now);
+        }
+        if (candidate.due) candidates.push(candidate);
+      }
+      for (const candidate of candidates) {
+        this.launch(candidate);
+      }
+    } finally {
+      this.ticking = false;
+    }
+  },
+
+  recordExpired(candidate, now) {
+    const { group } = candidate;
+    const lease = acquireLease(group.logKey, { registration: group.registrations[0] });
+    if (!lease) return;
+    try {
+      if (readCancellation(group.logKey)) return;
+      const current = dueRegistration(group, now);
+      if (!current.expired) return;
+      const activityAt = Number.isFinite(current.scan.activityAt) ? current.scan.activityAt : null;
+      const latestRefAt = Number.isFinite(current.scan.latestRefAt) ? current.scan.latestRefAt : null;
+      const retentionAnchorAt = retentionAnchor(current.scan);
+      const dedupeKey = `expired:${current.reason}:${retentionAnchorAt}:${current.scan.refFingerprint}`;
+      statusEvent(group, 'expired', now, {
+        reason: current.reason,
+        activityAt,
+        latestRefAt,
+        retentionAnchorAt,
+        refFingerprint: current.scan.refFingerprint,
+      }, dedupeKey);
+      // Re-read once after recording the status. This makes the cached scan
+      // include the durable status append and keeps racing tape changes visible.
+      dueRegistration(group, now);
+    } finally {
+      releaseLease(group.logKey, lease);
+    }
+  },
+
+  launch(candidate) {
+    const { group, scan, cadenceMs } = candidate;
+    if (readCancellation(group.logKey)) return;
+    const lease = acquireLease(group.logKey, { registration: group.registrations[0] });
+    if (!lease) return;
+    const slot = acquireSlot({ limit: MAX_POLLS, log: group.log, sessionId: group.registrations[0].sessionId });
+    if (!slot) { releaseLease(group.logKey, lease); return; }
+    const acquiredAt = supervisorNow();
+    if (!scan.cwd || !fs.existsSync(scan.cwd)) {
+      const failures = Number((scan.lastStatus && scan.lastStatus.failures) || 0) + 1;
+      const delay = Math.min(STALE_MS, FRESH_MS * (2 ** Math.max(0, failures - 1)));
+      statusEvent(group, 'error', acquiredAt, {
+        message: 'registered cwd is unavailable', failures, nextDue: acquiredAt + delay,
+        refFingerprint: scan.refFingerprint,
+      });
+      releaseLease(group.logKey, lease); releaseLease(slot.key, slot);
+      return;
+    }
+
+    let resolveDone;
+    const done = new Promise(resolve => { resolveDone = resolve; });
+    const entry = {
+      group, scan, cadenceMs, lease, slot, child: null, renewTimer: null,
+      settled: false, fenced: false, terminating: false, done, resolveDone,
+    };
+    const finish = (ok, message) => {
+      if (entry.settled) return;
+      entry.settled = true;
+      if (entry.renewTimer) clearInterval(entry.renewTimer);
+      const now = supervisorNow();
+      // Renew then revalidate both generations immediately before recording the
+      // completion. Cancellation, takeover, or shutdown fences the append.
+      const ownsLog = renewLease(lease) && isLeaseCurrent(lease);
+      const ownsSlot = renewLease(slot) && isLeaseCurrent(slot);
+      const canRecord = ownsLog && ownsSlot && !entry.fenced && !this.shuttingDown && !readCancellation(group.logKey);
+      const latest = prScan(group);
+      if (canRecord && ok) {
+        statusEvent(group, 'success', now, {
+          cadenceMs,
+          nextDue: now + cadence(latest, now),
+          failures: 0,
+          refFingerprint: latest.refFingerprint,
+          leaseGeneration: lease.generation,
+        });
+      } else if (canRecord) {
+        const failures = Number((scan.lastStatus && scan.lastStatus.failures) || 0) + 1;
+        const delay = Math.min(STALE_MS, FRESH_MS * (2 ** Math.max(0, failures - 1)));
+        statusEvent(group, 'error', now, {
+          message: message || 'poller failed', failures, nextDue: now + delay,
+          refFingerprint: latest.refFingerprint,
+          leaseGeneration: lease.generation,
+        });
+      }
+      releaseLease(group.logKey, lease); releaseLease(slot.key, slot);
+      this.active.delete(group.logKey);
+      resolveDone();
+      if (!this.shuttingDown) setImmediate(() => this.tick());
+    };
+
+    try {
+      const child = spawn(process.execPath, [POLLER, '--once', '--known', '--log', group.log], {
+        cwd: scan.cwd,
+        env: { ...process.env, PATH: TOOL_PATH, NIGHTSHIFT_PR_START_FD: '3' },
+        stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+      });
+      entry.child = child;
+      this.active.set(group.logKey, entry);
+      child.once('error', error => finish(false, error && error.message));
+      child.once('exit', (code, signal) => finish(code === 0,
+        code === 0 ? null : `poller exited ${signal || code}`));
+      const bound = bindLease(lease, { writerPid: child.pid }) && bindLease(slot, { writerPid: child.pid });
+      if (!bound) {
+        entry.fenced = true;
+        child.kill('SIGTERM');
+        child.stdio[3].destroy();
+        return;
+      }
+      const ttl = Number(process.env.NIGHTSHIFT_PR_LEASE_MS) || 10 * 60 * 1000;
+      entry.renewTimer = setInterval(() => {
+        const renewed = renewLease(lease) && renewLease(slot);
+        if (!renewed) { entry.fenced = true; this.terminate(entry); }
+      }, Math.max(10, Math.floor(ttl / 3)));
+      entry.renewTimer.unref();
+      child.stdio[3].end('g');
+    } catch (error) {
+      finish(false, error && error.message);
+    }
+  },
+
+  terminate(entry) {
+    if (!entry || entry.settled || entry.terminating) return;
+    entry.terminating = true;
+    try { entry.child.kill('SIGTERM'); } catch { /* child already gone */ }
+  },
+
+  async shutdown() {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    const entries = [...this.active.values()];
+    for (const entry of entries) this.terminate(entry);
+    const force = setTimeout(() => {
+      for (const entry of entries) if (!entry.settled) try { entry.child.kill('SIGKILL'); } catch { /* gone */ }
+    }, 5_000);
+    force.unref();
+    await Promise.all(entries.map(entry => entry.done));
+    clearTimeout(force);
+  },
+
+  // A viewer can ask the same durable scheduler to look now; due timestamps and
+  // leases remain authoritative, so this never creates a viewer-owned writer.
+  kick() { setImmediate(() => this.tick()); },
+};
+
+const supervisorTimer = setInterval(() => supervisor.tick(), SUPERVISOR_TICK_MS);
+supervisorTimer.unref();
+setImmediate(() => supervisor.tick());
 
 // ------------------------------------------------------------------- fleet
 // Fleet home (/fleet page + /api/fleet data): one folded row per session — the
@@ -457,7 +849,7 @@ const server = http.createServer((req, res) => {
     }
     res.write('event: ready\ndata: {}\n\n');
     s.clients.add(res);
-    reconcilePRs(s); // heal stale PR state the moment someone opens the board
+    supervisor.kick(); // accelerate the same durable scheduler; never a viewer-owned poller
     // Real `ping` event (not a `:` comment) so the client can observe liveness
     // and detect a wedged socket — a comment fires no handler, so a board left
     // running through a laptop sleep can't tell its stream died.
@@ -535,6 +927,19 @@ server.on('error', err => {
   }
   process.exit(1);
 });
+
+let exitStarted = false;
+async function gracefulExit() {
+  if (exitStarted) return;
+  exitStarted = true;
+  clearInterval(supervisorTimer);
+  await supervisor.shutdown();
+  server.close(() => process.exit(0));
+  // An idle server can already be non-listening during startup failure.
+  if (!server.listening) process.exit(0);
+}
+process.once('SIGTERM', gracefulExit);
+process.once('SIGINT', gracefulExit);
 
 server.listen(PORT, () => {
   const port = server.address().port; // the real bound port (PORT may be 0 = ephemeral)

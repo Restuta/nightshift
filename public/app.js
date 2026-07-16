@@ -3,11 +3,24 @@
 // render path goes through renderAll(); animation only happens on forward,
 // incremental application of events, never on rebuilds (scrub/refresh).
 
-import { initialState, reduce, fold, activeItemId, hotFiles, prList, liveness, sessionPausedAt, STATUSES } from './reducer.js';
+import { initialState, reduce, fold, activeItemId, hotFiles, liveness, sessionPausedAt, STATUSES } from './reducer.js';
 import { initSessionPicker } from './session-picker.js';
 import { turnLabel } from './turn-id.js';
+import { buildSessionInsights } from './session-insights-model.js';
+import { buildSummaryViewModel, summaryHTML } from './session-summary.js';
+import { parseViewContext, viewHref } from './session-view-context.js';
+import { buildBoardViewModel } from './board-model.js';
+import {
+  advanceReplayFrame,
+  buildReplayFrame,
+  loadReplaySession,
+  resetGanttView,
+  shouldOpenLiveStream,
+  visibleReplayDelta,
+} from './board-runtime.js';
 
 const $ = sel => document.querySelector(sel);
+const viewContext = parseViewContext(location.search);
 
 // Mirror of the reducer's per-gap accrual cap, so the live in-flight timer on the
 // active card can't tick past one capped gap while a recorder is fresh.
@@ -21,6 +34,9 @@ let live = true;
 let playing = false;
 let speed = 10;
 let vt = 0;            // virtual time when not live
+let currentInsights = null;
+let currentBoardView = null;
+let showEventActivity = false;
 
 // ---------------------------------------------------------------- helpers
 
@@ -65,9 +81,12 @@ function ageText(ms) {
 const vtNow = () => (live ? Date.now() : vt);
 
 function domain() {
-  const t0 = log.length ? log[0].t : Date.now() - 60e3;
-  let t1 = log.length ? log[log.length - 1].t : Date.now();
-  if (live) t1 = Math.max(t1, Date.now());
+  const t0 = currentInsights?.bounds.recordedStart ?? (log.length ? log[0].t : Date.now() - 60e3);
+  const tapeEnd = log.at(-1)?.t ?? currentInsights?.bounds.recordedEnd ?? Date.now();
+  const replayEnd = Number.isFinite(viewContext.asOfT)
+    ? Math.min(viewContext.asOfT, tapeEnd)
+    : tapeEnd;
+  const t1 = live ? (currentInsights?.bounds.recordedEnd ?? tapeEnd) : replayEnd;
   return [t0, Math.max(t1, t0 + 60e3)];
 }
 
@@ -75,6 +94,75 @@ function upperBound(t) {
   let n = 0;
   while (n < log.length && log[n].t <= t) n++;
   return n;
+}
+
+function setBoardState(pageState, message = '') {
+  const readyState = pageState === 'ready';
+  const loading = $('#board-loading');
+  const empty = $('#board-empty');
+  const error = $('#board-error');
+  loading.hidden = pageState !== 'loading';
+  empty.hidden = pageState !== 'empty';
+  empty.setAttribute('aria-hidden', String(pageState !== 'empty'));
+  error.hidden = pageState !== 'error';
+  error.textContent = pageState === 'error' ? message : '';
+  $('#board-overview').hidden = !readyState;
+  $('#board-summary').hidden = !readyState;
+  $('#board-disposition').hidden = !readyState;
+  $('#deck').hidden = !readyState;
+  $('.recorder').hidden = !readyState;
+  if (!readyState) $('#attention').hidden = true;
+}
+
+function clearSessionView() {
+  log.length = 0;
+  state = initialState();
+  cursor = 0;
+  ready = false;
+  vt = 0;
+  currentInsights = null;
+  currentBoardView = null;
+  for (const element of cardEls.values()) element.remove();
+  cardEls.clear();
+  document.title = 'nightshift';
+  $('#session-title').textContent = '';
+  const badge = $('#agent-badge');
+  badge.textContent = '';
+  badge.className = 'agent-badge';
+  badge.hidden = true;
+  $('#board-summary').replaceChildren();
+  $('#board-disposition').replaceChildren();
+  // Restore the fixed semantic disposition structure after its old content has
+  // been removed atomically.
+  $('#board-disposition').innerHTML = `<div>
+      <span class="board-disposition-label" id="board-disposition-label"></span>
+      <p id="board-disposition-detail"></p>
+    </div>
+    <dl>
+      <div><dt>Current blocker</dt><dd id="board-blocker"></dd></div>
+      <div><dt>Next actor</dt><dd id="board-next-actor"></dd></div>
+      <div><dt>Source freshness</dt><dd id="source-freshness" role="status" aria-live="polite"></dd></div>
+    </dl>
+    <p class="board-uncertainty" id="board-uncertainty" hidden></p>`;
+  $('#tools-list').replaceChildren();
+  $('#tools-metrics').textContent = '';
+  $('#tools').hidden = true;
+  $('#prs-list').replaceChildren();
+  $('#prs').hidden = true;
+  $('#plan-list').replaceChildren();
+  $('#plan').hidden = true;
+  feedEl.replaceChildren();
+  $('#hotfiles-list').replaceChildren();
+  $('#hotfiles').hidden = true;
+  $('#event-counts').textContent = '';
+  $('#attention').hidden = true;
+  resetGanttView({
+    overlay: $('#gantt-overlay'),
+    body: $('#gantt-body'),
+    axis: $('#gantt-axis'),
+    count: $('#gantt-count'),
+  });
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
 // Insert a late-arriving event into the sorted log at its position by t (binary
@@ -112,30 +200,28 @@ function setNum(el, val, animate, fmt = n => n.toLocaleString('en-US')) {
 // -------------------------------------------------------------- transport
 
 let es = null;
-let sessionId = null;
-let firstConnect = true;
+let sessionId = viewContext.session;
 let lastBeat = 0;       // last time the stream showed life (any message or ping)
 let retry = 0;          // backoff counter for explicit reconnects
+
+function syncNavigation() {
+  viewContext.session = sessionId;
+  $('#story-link').href = viewHref('/story', viewContext);
+  $('#lanes-link').href = viewHref('/lanes', viewContext);
+  $('#graph-link').href = viewHref('/graph', viewContext);
+  $('#report-link').href = viewHref('/report', viewContext);
+}
 
 // Switch to a session: wipe the view, then open the stream. State reset lives
 // here so a bare reconnect (openStream) can re-sync without clearing the board.
 function connect(id) {
   sessionId = id;
-  const lanesLink = $('#lanes-link');
-  if (lanesLink) lanesLink.href = '/lanes?session=' + encodeURIComponent(id);
-  const graphLink = $('#graph-link');
-  if (graphLink) graphLink.href = '/graph?session=' + encodeURIComponent(id);
-  const storyLink = $('#story-link');
-  if (storyLink) storyLink.href = '/story?session=' + encodeURIComponent(id);
-  log.length = 0;
-  state = initialState();
-  cursor = 0;
-  ready = false;
+  viewContext.session = id;
+  syncNavigation();
+  clearSessionView();
+  setBoardState('loading');
   live = true; playing = false;
-  for (const el of cardEls.values()) el.remove();
-  cardEls.clear();
-  feedEl.innerHTML = '';
-  openStream(id);
+  if (shouldOpenLiveStream(viewContext)) openStream(id);
 }
 
 // Open (or re-open) the SSE stream for the current session. The server replays
@@ -144,6 +230,7 @@ function connect(id) {
 // makes reconnects idempotent — a native auto-reconnect that re-streams history
 // can't double-count, and a forced reconnect re-syncs from a clean slate.
 function openStream(id) {
+  if (!shouldOpenLiveStream(viewContext)) return;
   if (es) { es.onerror = null; es.close(); }
   let buf = [];           // this connection's replay, applied atomically on ready
   let connReady = false;
@@ -212,35 +299,19 @@ function openStream(id) {
       cursor = upperBound(vt);
     }
     renderAll(false);
-    // deep link into the tape: ?at=0.45 (fraction) or ?at=620 (seconds from
-    // start), or ?t=<epoch-ms> (absolute — how the Shift Report links a moment).
-    // Only on the initial load — switching sessions starts live.
-    if (firstConnect) {
-      firstConnect = false;
-      const params = new URLSearchParams(location.search);
-      const t = params.get('t');
-      const at = params.get('at');
-      if (t != null && log.length) {
-        // Absolute timestamp from a /report deep link. Enter replay scrubbed to
-        // that moment when it falls within the tape; scrubTo clamps to the domain.
-        const tMs = parseInt(t, 10);
-        const t0 = log[0].t, t1 = log[log.length - 1].t;
-        if (!Number.isNaN(tMs) && tMs >= t0 && tMs <= t1) scrubTo(tMs);
-      } else if (at != null && log.length) {
-        const t0 = log[0].t, t1 = log[log.length - 1].t;
-        const v = parseFloat(at);
-        if (!Number.isNaN(v)) scrubTo(v <= 1 ? t0 + v * (t1 - t0) : t0 + v * 1000);
-      }
-    }
+    setBoardState(log.length ? 'ready' : 'empty');
   });
 
   es.onerror = () => {
     $('#status-text').textContent = 'RECONNECTING';
+    if (!ready) setBoardState('error', 'Unable to connect to this live session. Reconnecting…');
     // Native EventSource retries on its own while CONNECTING; only step in when
     // it has given up (CLOSED), with backoff, so a downed server is handled too.
     if (es.readyState === EventSource.CLOSED) {
       const delay = Math.min(1000 * 2 ** retry++, 15000);
-      setTimeout(() => { if (sessionId === id) openStream(id); }, delay);
+      setTimeout(() => {
+        if (sessionId === id && shouldOpenLiveStream(viewContext)) openStream(id);
+      }, delay);
     }
   };
 }
@@ -250,6 +321,7 @@ function openStream(id) {
 // if no message or ping has landed in 60s while the tab is visible, force a
 // clean reconnect. Hidden tabs are left alone — visibilitychange catches wake.
 setInterval(() => {
+  if (!shouldOpenLiveStream(viewContext)) return;
   if (document.visibilityState !== 'visible') return;
   if (sessionId && Date.now() - lastBeat > 60000) openStream(sessionId);
 }, 10000);
@@ -257,10 +329,23 @@ setInterval(() => {
 // Returning to a stale tab (woke from sleep, switched back) — resync at once
 // rather than waiting out the watchdog.
 document.addEventListener('visibilitychange', () => {
+  if (!shouldOpenLiveStream(viewContext)) return;
   if (document.visibilityState === 'visible' && sessionId && Date.now() - lastBeat > 30000) {
     openStream(sessionId);
   }
 });
+
+function applyReplayFrame(frame, { animate = false, freshEvents = null, replaceUrl = true } = {}) {
+  vt = frame.cursorT;
+  state = frame.state;
+  cursor = frame.cursor;
+  viewContext.cursorT = Math.round(frame.cursorT);
+  viewContext.cutoffT = frame.cutoffT;
+  viewContext.mode = 'replay';
+  if (replaceUrl) history.replaceState(null, '', viewHref('/', viewContext));
+  syncNavigation();
+  renderAll(animate, freshEvents, frame.insights);
+}
 
 // Session switcher. A fleet board can serve dozens of tapes, so it's a filterable
 // popover (type to narrow), not a native <select> wall — now the shared
@@ -268,13 +353,50 @@ document.addEventListener('visibilitychange', () => {
 // /lanes. onSelect does what the old click handler did: point the URL at the new
 // tape (no reload) and reconnect the data stream.
 async function initSessions() {
+  syncNavigation();
+  if (viewContext.mode === 'replay') {
+    $('#session-picker').hidden = true;
+    sessionId = viewContext.session;
+    clearSessionView();
+    setBoardState('loading');
+    try {
+      const events = await loadReplaySession({ context: viewContext, sessionId });
+      log.push(...events);
+      live = false;
+      playing = false;
+      ready = true;
+      if (!log.length) {
+        setBoardState('empty');
+        return;
+      }
+      const frame = buildReplayFrame({
+        events: log,
+        cursorT: viewContext.cursorT ?? viewContext.asOfT ?? log.at(-1).t,
+        asOfT: viewContext.asOfT,
+      });
+      applyReplayFrame(frame, { replaceUrl: false });
+      if (!frame.insights.visiblePrefix.length) {
+        setBoardState('empty');
+        return;
+      }
+      setBoardState('ready');
+    } catch (error) {
+      clearSessionView();
+      setBoardState('error', `Unable to load this session. ${error.message}`);
+    }
+    return;
+  }
+
   const picker = await initSessionPicker({
     mount: $('#session-picker'),
-    currentId: new URLSearchParams(location.search).get('session'),
+    currentId: viewContext.session,
     onSelect: id => {
-      const p = new URLSearchParams(location.search);
-      p.set('session', id); p.delete('at');
-      history.replaceState(null, '', `?${p}`);
+      viewContext.session = id;
+      viewContext.cursorT = null;
+      viewContext.cutoffT = null;
+      viewContext.asOfT = null;
+      viewContext.mode = 'live';
+      history.replaceState(null, '', viewHref('/', viewContext));
       connect(id);
     },
   });
@@ -283,6 +405,16 @@ async function initSessions() {
 }
 
 function goLive() {
+  if (!es && viewContext.mode === 'replay') {
+    location.href = viewHref('/', { session: sessionId, mode: 'live' });
+    return;
+  }
+  viewContext.cursorT = null;
+  viewContext.cutoffT = null;
+  viewContext.asOfT = null;
+  viewContext.mode = 'live';
+  history.replaceState(null, '', viewHref('/', viewContext));
+  syncNavigation();
   live = true; playing = false;
   state = fold(log);
   cursor = log.length;
@@ -292,11 +424,15 @@ function goLive() {
 
 function scrubTo(t) {
   const [t0, t1] = domain();
-  vt = Math.max(t0, Math.min(t, t1));
+  const targetT = Math.max(t0, Math.min(t, t1));
   live = false; playing = false;
-  state = fold(log, vt);
-  cursor = upperBound(vt);
-  renderAll(false);
+  if (es) {
+    es.onerror = null;
+    es.close();
+    es = null;
+  }
+  const frame = buildReplayFrame({ events: log, cursorT: targetT, asOfT: viewContext.asOfT });
+  applyReplayFrame(frame);
 }
 
 let lastFrame = 0;
@@ -304,19 +440,20 @@ function playLoop(now) {
   if (!playing) return;
   const dt = lastFrame ? now - lastFrame : 0;
   lastFrame = now;
-  vt += dt * speed;
-  const fresh = [];
-  while (cursor < log.length && log[cursor].t <= vt) {
-    reduce(state, log[cursor]);
-    fresh.push(log[cursor]);
-    cursor++;
-  }
-  if (fresh.length) renderAll(true, fresh);
-  else { drawTimeline(); renderReadout(); tickActiveCards(); }
-  if (cursor >= log.length && log.length) {
-    const tapeEnd = log[log.length - 1].t;
-    if (Date.now() - tapeEnd < 5000) return goLive();   // caught up with reality
-    if (vt >= tapeEnd) { playing = false; renderStatus(); return; }
+  const previousPrefix = currentInsights?.visiblePrefix ?? [];
+  const frame = advanceReplayFrame({
+    events: log,
+    cursorT: vt,
+    elapsedMs: dt,
+    speed,
+    asOfT: viewContext.asOfT,
+  });
+  const fresh = visibleReplayDelta(previousPrefix, frame.insights.visiblePrefix);
+  applyReplayFrame(frame, { animate: fresh.length > 0, freshEvents: fresh });
+  if (frame.cursorT >= frame.ceilingT) {
+    playing = false;
+    renderStatus();
+    return;
   }
   requestAnimationFrame(playLoop);
 }
@@ -330,8 +467,8 @@ function startPlay(fromT = null) {
 
 $('#btn-play').addEventListener('click', () => {
   if (playing) { playing = false; renderStatus(); return; }
-  const [t0] = domain();
-  const atEnd = cursor >= log.length && log.length && vt >= log[log.length - 1].t;
+  const [t0, t1] = domain();
+  const atEnd = log.length && vt >= t1;
   if (live || atEnd) startPlay(t0);
   else startPlay();
 });
@@ -417,32 +554,49 @@ function drawTimeline() {
     }
   }
 
-  // --- event density bars (between the PR band and the axis) ---
-  const BW = 4;
-  const buckets = new Array(Math.ceil(W / BW)).fill(null);
-  for (const ev of log) {
-    const i = Math.min(buckets.length - 1, Math.max(0, Math.floor(x(ev.t) / BW)));
-    const b = buckets[i] || (buckets[i] = { n: 0, commit: false });
-    b.n++;
-    if (ev.type === 'commit') b.commit = true;
-  }
-  for (let i = 0; i < buckets.length; i++) {
-    const b = buckets[i];
-    if (!b) continue;
-    const h = Math.min(base - barTop, 2 + Math.sqrt(b.n) * 6);
-    ctx.fillStyle = b.commit ? '#d29922' : '#232c47';
-    ctx.fillRect(i * BW + 1, base - h, BW - 2, h);
+  // The default footer is a semantic phase partition. Raw event density is an
+  // optional diagnostic and excludes recorder heartbeats; it never stands in
+  // for observed work.
+  if (showEventActivity) {
+    const BW = 4;
+    const buckets = new Array(Math.ceil(W / BW)).fill(null);
+    for (const event of currentBoardView?.events.activity ?? []) {
+      const i = Math.min(buckets.length - 1, Math.max(0, Math.floor(x(event.t) / BW)));
+      const bucket = buckets[i] || (buckets[i] = { count: 0, commit: false });
+      bucket.count++;
+      if (event.type === 'commit') bucket.commit = true;
+    }
+    for (let i = 0; i < buckets.length; i++) {
+      const bucket = buckets[i];
+      if (!bucket) continue;
+      const height = Math.min(base - barTop, 2 + Math.sqrt(bucket.count) * 5);
+      ctx.fillStyle = bucket.commit ? '#d29922' : '#39445f';
+      ctx.fillRect(i * BW + 1, base - height, BW - 2, height);
+    }
+  } else {
+    const phaseColor = {
+      coding: '#4ea7fc', testing: '#4cb782', preflight: '#d29922', other: '#7f89a8',
+      waiting: '#cf8d45', idle: '#596177', unknown: '#3d465c',
+    };
+    for (const phase of currentInsights?.phases ?? []) {
+      const left = x(phase.startT);
+      const right = x(phase.endT);
+      ctx.globalAlpha = phase.confidence === 'explicit' ? 0.9 : phase.confidence === 'strong' ? 0.65 : 0.38;
+      ctx.fillStyle = phaseColor[phase.wallCategory] || phaseColor.unknown;
+      ctx.fillRect(left, barTop, Math.max(1, right - left), Math.max(1, base - barTop));
+    }
+    ctx.globalAlpha = 1;
   }
   ctx.fillStyle = '#1b2338';
   ctx.fillRect(0, base, W, 1);
 
-  // --- PR lifecycles: a line from open (green) to merge (purple) ---
+  // --- PR lifecycles: canonical registry, including recovered/unattached PRs ---
   const nowX = x(Math.min(vtNow(), t1));
-  for (const pr of prList(state)) {
-    if (pr.openedAt == null) continue;
+  for (const pr of currentBoardView?.prs ?? []) {
+    if (pr.discoveryT == null) continue;
     const open = pr.state !== 'merged';
-    const xo = x(pr.openedAt);
-    const xe = open ? nowX : x(pr.mergedAt || pr.t);
+    const xo = x(Math.max(t0, pr.discoveryT));
+    const xe = nowX;
     const y = prTop + prH / 2;
     ctx.strokeStyle = open ? 'rgba(76,183,130,.45)' : 'rgba(163,113,247,.35)';
     ctx.lineWidth = 1;
@@ -482,6 +636,13 @@ function seek(e) {
 }
 
 window.addEventListener('resize', sizeCanvas);
+
+$('#event-activity-toggle').addEventListener('click', event => {
+  showEventActivity = !showEventActivity;
+  event.currentTarget.setAttribute('aria-pressed', String(showEventActivity));
+  event.currentTarget.textContent = showEventActivity ? 'Semantic phases' : 'Event activity';
+  drawTimeline();
+});
 
 // ----------------------------------------------------------------- board
 
@@ -528,13 +689,13 @@ const pinnedCols = new Set();   // empty columns the user clicked open (session-
 // long it's been running, plus an "idle Xm" flag if nothing's updated it lately
 // (so a stalled card is visible at a glance).
 function cardTiming(el) {
-  if (el._status === 'done') return el._activeMs > 0 ? `took ${ageText(el._activeMs)}` : '';
+  if (el._status === 'done') return el._activeMs > 0 ? `${ageText(el._activeMs)} observed work` : '';
   // Paused (Fix A): the session went truly idle with this card still in `doing`.
   // The work timer must NOT advance — nothing is running — so the header reads
   // "paused Xm" (idle-age = time since the session went quiet), not a ticking clock.
   if (el._paused) {
     const idle = el._pausedAt != null ? Math.max(0, vtNow() - el._pausedAt) : 0;
-    return `<span class="paused">paused ${ageText(idle)}</span>`;
+    return `<span class="paused">${ageText(idle)} attention/wait elapsed</span>`;
   }
   // The in-flight gap accrues to the active card ONLY while a recorder is fresh
   // and keyed on PRODUCER activity (lastProducerAt), never any event — so a dead
@@ -546,7 +707,8 @@ function cardTiming(el) {
   const dur = el._activeMs + gap;
   if (dur <= 0) return '';
   const idle = Math.max(0, vtNow() - (el._touchedAt || vtNow()));
-  return ageText(dur) + (idle > 90e3 ? ` <span class="stale">· idle ${ageText(idle)}</span>` : '');
+  return `${ageText(dur)} observed work`
+    + (idle > 90e3 ? ` <span class="stale">· ${ageText(idle)} since last observed work</span>` : '');
 }
 
 // Per-plan-step timing: a done step shows how long it took; the running step
@@ -555,18 +717,18 @@ function cardTiming(el) {
 function stepTime(t, isNow) {
   if (t.status === 'superseded') {
     const d = t.supersededAt && t.startedAt ? Math.max(0, t.supersededAt - t.startedAt) : 0;
-    return d >= 1000 ? `ran ${ageText(d)}` : '';
+    return d >= 1000 ? `${ageText(d)} elapsed before superseded` : '';
   }
   if (t.done) {
     // Prefer the producer's real duration; fall back to the snapshot-delta estimate.
     const d = t.elapsedMs != null
       ? t.elapsedMs
       : (t.doneAt && (t.startedAt || t.firstSeenAt) ? Math.max(0, t.doneAt - (t.startedAt || t.firstSeenAt)) : 0);
-    return d >= 1000 ? ageText(d) : '';   // hide 0s — a backfilled step we have no real timing for
+    return d >= 1000 ? `${ageText(d)} elapsed` : '';   // hide 0s — a backfilled step we have no real timing for
   }
   if (isNow && t.startedAt) {
     const d = Math.max(0, vtNow() - t.startedAt);
-    return d >= 1000 ? ageText(d) : '';
+    return d >= 1000 ? `${ageText(d)} elapsed` : '';
   }
   return '';
 }
@@ -605,7 +767,7 @@ function makeCard() {
   el._refs = {
     emoji: el.querySelector('.emoji'),
     cid: el.querySelector('.cid'),
-    age: Object.assign(el.querySelector('.age'), { title: 'time worked (idle excluded)' }),
+    age: Object.assign(el.querySelector('.age'), { title: 'observed work; idle and attention wait excluded' }),
     title: el.querySelector('.title'),
     pills: el.querySelector('.pills'),
     diff: el.querySelector('.pill.diff'),
@@ -709,7 +871,7 @@ function updateCard(el, it, animate, activeId) {
       const cls = t.status === 'completed' ? 'done' : superseded ? 'superseded'
         : now ? (stepPaused ? 'now paused' : 'now') : 'unfinished';
       const tm = stepPaused
-        ? (t.startedAt && el._pausedAt != null ? ageText(Math.max(0, el._pausedAt - t.startedAt)) : '')
+        ? (t.startedAt && el._pausedAt != null ? `${ageText(Math.max(0, el._pausedAt - t.startedAt))} elapsed` : '')
         : stepTime(t, now);
       // A superseded step (the plan dropped it mid-flight) reads as history, not a
       // live claim: a faint "· superseded" tag, never a ticking timer. A paused
@@ -894,7 +1056,7 @@ function feedLine(ev) {
 
 function renderFeed(freshEvents) {
   if (freshEvents) {
-    for (const ev of freshEvents) {
+    for (const ev of freshEvents.filter(event => event.type !== 'alive')) {
       const li = feedLine(ev);
       li.classList.add('fresh');
       feedEl.prepend(li);
@@ -902,48 +1064,36 @@ function renderFeed(freshEvents) {
     while (feedEl.children.length > 150) feedEl.lastChild.remove();
   } else {
     feedEl.innerHTML = '';
-    for (const ev of state.feed) feedEl.append(feedLine(ev));
+    for (const ev of state.feed.filter(event => event.type !== 'alive')) feedEl.append(feedLine(ev));
   }
-  $('#count-feed').textContent = state.totals.events || '';
+  $('#count-feed').textContent = currentBoardView?.events.nonHeartbeat || '';
 }
 
 // -------------------------------------------------------- pull requests
 
 const RECENT_MERGES = 8;
 
-function renderPRs() {
+function renderPRs(boardView) {
   const box = $('#prs');
-  const all = prList(state);
+  const all = boardView.prs;
   box.hidden = !all.length;
   if (!all.length) return;
-  const open = all.filter(p => p.state === 'open').sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
-  const merged = all.filter(p => p.state === 'merged').sort((a, b) => (b.mergedAt || b.t || 0) - (a.mergedAt || a.t || 0));
-  $('#prs-count').textContent = open.length ? `${open.length} open` : `${merged.length} merged`;
+  const open = all.filter(pr => pr.state === 'open').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const merged = all.filter(pr => pr.state === 'merged').sort((a, b) => (b.discoveryT || 0) - (a.discoveryT || 0));
+  $('#prs-count').textContent = boardView.prTotals;
 
-  const now = vtNow();
-  const link = pr => (pr.url ? ` data-url="${esc(pr.url)}"` : ''); // whole row clickable
-  const title = pr => pr.title ? `<span class="prtitle">${esc(pr.title)}</span>` : '';
-  // Repo prefix ONLY when the session spans more than one repo — otherwise the lone
-  // repo is obvious and a prefix is noise. This is what keeps two repos' #1 from
-  // reading as the same PR (plan 1.4: state.prs is keyed by repo#number).
-  const repos = new Set(all.map(p => p.repo).filter(Boolean));
-  const repoTag = pr => (repos.size > 1 && pr.repo)
-    ? `<span class="prrepo" style="color:var(--dim);font-family:var(--mono);font-size:11px;margin-right:4px">${esc(pr.repo.split('/').pop())}</span>` : '';
-  // Toast / CI status, spelled out and always present so it leads each open row —
-  // the colored chip is the one thing that means "status".
-  const status = pr => {
-    if (pr.ci === 'pass') return '<span class="prci pass" title="CI / Toast checks passed — ready to merge">✓ passed</span>';
-    if (pr.ci === 'fail') return '<span class="prci fail" title="a check failed or the merge is blocked">✗ blocked</span>';
-    if (pr.ci === 'pending') return '<span class="prci pending" title="CI / Toast checks are still running">⋯ running</span>';
-    return '<span class="prci unknown" title="PR is open; no check result recorded yet">open</span>';
+  const row = pr => {
+    const content = `<span class="pr-primary"><b class="prnum">#${pr.number}</b><span class="prtitle">${esc(pr.title)}</span><span class="prage">${esc(pr.openFor)}</span></span>
+      <span class="pr-truth recorded">${esc(pr.recordedTruth)}</span>
+      <span class="pr-truth current">${esc(pr.currentTruth)}</span>
+      <span class="pr-topology">${esc(pr.recordedParent)} · ${esc(pr.currentParent)}</span>
+      <span class="pr-provenance">${esc(pr.provenance)} · ${esc(pr.attribution)}</span>`;
+    return pr.url
+      ? `<a class="pr-row" href="${esc(pr.url)}" target="_blank" rel="noopener" aria-label="Open PR #${pr.number} on GitHub">${content}</a>`
+      : `<div class="pr-row" aria-label="PR #${pr.number}; GitHub link unavailable">${content}</div>`;
   };
-
-  const openRows = open.map(pr =>
-    `<li class="pr-open"${link(pr)} title="open PR #${pr.number} on GitHub">${status(pr)}${repoTag(pr)}<b class="prnum">#${pr.number}</b>${title(pr)}` +
-    `<span class="prage">${pr.openedAt ? ageText(now - pr.openedAt) : ''}</span></li>`).join('');
-  const mergedRows = merged.slice(0, RECENT_MERGES).map(pr =>
-    `<li class="pr-merged"${link(pr)} title="open PR #${pr.number} on GitHub">${repoTag(pr)}<b class="prnum">#${pr.number}</b>${title(pr)}` +
-    `<span class="prage">${pr.mergedAt ? ageText(now - pr.mergedAt) : ''}</span></li>`).join('');
+  const openRows = open.map(pr => `<li class="pr-open${pr.changedSinceRecording ? ' changed' : ''}">${row(pr)}</li>`).join('');
+  const mergedRows = merged.slice(0, RECENT_MERGES).map(pr => `<li class="pr-merged">${row(pr)}</li>`).join('');
   const more = merged.length > RECENT_MERGES
     ? `<li class="pr-more">+${merged.length - RECENT_MERGES} more merged</li>` : '';
 
@@ -952,23 +1102,38 @@ function renderPRs() {
     (merged.length ? `<li class="pr-head">Recently merged</li>${mergedRows}${more}` : '');
 }
 
-// Whole PR row opens the PR on GitHub (listener on the <ul> survives re-renders).
-$('#prs-list').addEventListener('click', e => {
-  const li = e.target.closest('li[data-url]');
-  if (li) window.open(li.dataset.url, '_blank', 'noopener');
-});
+function renderToolCalls(boardView) {
+  const box = $('#tools');
+  const tools = boardView.tools;
+  const count = tools.lifecycles.length + tools.observations.length;
+  box.hidden = count === 0 && tools.metrics.startsWith('0 transcript');
+  $('#tools-count').textContent = count ? String(count) : '';
+  $('#tools-metrics').textContent = tools.metrics;
+  $('#tools-list').innerHTML = [
+    ...tools.lifecycles.map(tool => `<li>
+      <span class="tool-primary"><b>${esc(tool.tool)}</b><span class="tool-state" data-state="${esc(tool.state)}">${esc(tool.status)}</span></span>
+      <span class="tool-duration">${esc(tool.duration)}</span>
+      <span class="tool-provenance">Explicit lifecycle · ${tool.evidenceEventIds.length} evidence events · not permission blocked</span>
+    </li>`),
+    ...tools.observations.slice(-12).reverse().map(tool => `<li>
+      <span class="tool-primary"><b>${esc(tool.tool)}</b><span class="tool-state" data-state="observation">${esc(tool.status)}</span></span>
+      <span class="tool-command">${esc(tool.text || 'No recorded detail')}</span>
+      <span class="tool-provenance">Observed ${clockTime(tool.t)} · no measured duration</span>
+    </li>`),
+  ].join('');
+}
 
 // ----------------------------------------------------------- PR gantt
 // A dedicated, taller view: one row per PR, bar length = open→merge duration,
 // readable per-PR, on a shared time axis. Opened from the PR panel header.
 function renderGantt() {
-  const prs = prList(state).filter(p => p.openedAt != null);
+  const prs = (currentBoardView?.prs ?? []).filter(pr => pr.createdAt != null);
   $('#gantt-count').textContent = prs.length || '';
   const body = $('#gantt-body'), axis = $('#gantt-axis');
   if (!prs.length) { body.innerHTML = '<div class="gantt-empty">No PRs recorded yet.</div>'; axis.innerHTML = ''; return; }
-  const now = vtNow();
+  const now = currentInsights?.bounds.displayNow ?? vtNow();
   let t0 = Infinity, t1 = -Infinity;
-  for (const p of prs) { t0 = Math.min(t0, p.openedAt); t1 = Math.max(t1, p.mergedAt || now); }
+  for (const pr of prs) { t0 = Math.min(t0, pr.createdAt); t1 = Math.max(t1, now); }
   if (t1 <= t0) t1 = t0 + 60e3;
   const span = t1 - t0;
   const pct = t => ((t - t0) / span) * 100;
@@ -978,15 +1143,16 @@ function renderGantt() {
   for (let tk = Math.ceil(t0 / iv) * iv; tk <= t1; tk += iv) ax += `<span class="gantt-tick" style="left:${pct(tk)}%">${tickLabel(tk - t0)}</span>`;
   axis.innerHTML = ax;
 
-  const sorted = prs.slice().sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
+  const sorted = prs.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   body.innerHTML = sorted.map(p => {
     const open = p.state !== 'merged';
-    const end = open ? now : (p.mergedAt || p.t);
-    const left = pct(p.openedAt), width = Math.max(0.4, pct(end) - left);
-    const dur = ageText(Math.max(0, end - p.openedAt));
-    const barCls = (open ? 'g-open' : 'g-merged') + (p.ci ? ` g-${p.ci}` : '');
+    const end = now;
+    const left = pct(p.createdAt), width = Math.max(0.4, pct(end) - left);
+    const validation = /gates fail/.test(p.currentTruth) ? 'fail'
+      : /gates pending/.test(p.currentTruth) ? 'pending' : /gates pass/.test(p.currentTruth) ? 'pass' : '';
+    const barCls = (open ? 'g-open' : 'g-merged') + (validation ? ` g-${validation}` : '');
     return `<div class="gantt-row ${open ? 'g-open' : 'g-merged'}${p.url ? ' has-url' : ''}"${p.url ? ` data-url="${esc(p.url)}"` : ''} title="${esc(p.title || ('#' + p.number))}">` +
-      `<div class="g-label"><b>#${p.number}</b><span class="g-title">${esc(p.title || '')}</span><span class="g-dur">${dur}${open ? ' open' : ''}</span></div>` +
+      `<div class="g-label"><b>#${p.number}</b><span class="g-title">${esc(p.title || '')}</span><span class="g-dur">${esc(p.openFor)}</span></div>` +
       `<div class="g-track"><span class="g-bar ${barCls}" style="left:${left}%;width:${width}%"></span></div></div>`;
   }).join('');
 }
@@ -1057,7 +1223,7 @@ function renderInstruments(animate) {
   setNum($('#stat-add'), state.totals.add, animate);
   setNum($('#stat-del'), state.totals.del, animate);
   setNum($('#stat-commits'), state.totals.commits, animate);
-  setNum($('#stat-events'), state.totals.events, animate);
+  setNum($('#stat-events'), currentBoardView?.events.nonHeartbeat ?? 0, animate);
 
   const tok = state.totals.tokIn + state.totals.tokOut + state.totals.cacheTok;
   $('#stat-tokens-wrap').hidden = !tok;
@@ -1071,8 +1237,7 @@ function renderInstruments(animate) {
     $('#stat-cost').textContent = cost >= 1 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(3)}`;
     $('#stat-cost').title = 'approximate — local price table, not a billing source';
   }
-  const t0 = state.session.startedAt ?? (log.length ? log[0].t : null);
-  $('#stat-elapsed').textContent = t0 ? durText(vtNow() - t0) : '00:00';
+  $('#stat-recorded-session').textContent = currentBoardView?.clocks.recordedSession.value ?? '0s';
   if (state.session.title) $('#session-title').textContent = state.session.title;
   else if (state.session.cwd) $('#session-title').textContent = state.session.cwd.split('/').pop();
   renderAgentBadge();
@@ -1085,6 +1250,14 @@ function renderStatus() {
     badge.classList.add('is-replay');
     text.textContent = playing ? `REPLAY ${speed}×` : 'PAUSED';
   } else {
+    const disposition = currentBoardView?.disposition;
+    if (disposition?.label === 'Permission blocked') {
+      badge.classList.add('is-attn');
+      text.textContent = 'PERMISSION';
+    } else if (disposition?.label === 'Waiting for your next instruction') {
+      badge.classList.add('is-idle');
+      text.textContent = 'HUMAN NEXT';
+    } else {
     // Honest badge: derive from (phase, freshest producer age), so a `working`
     // phase whose recorder has gone silent past its TTL reads STALE with the real
     // "data ends HH:MM" — not a latched, lying LIVE (F3).
@@ -1104,6 +1277,7 @@ function renderStatus() {
     } else {
       text.textContent = L.state === 'ended' ? 'ENDED' : 'WAITING';
     }
+    }
   }
   $('#btn-live').classList.toggle('on', live);
   $('#btn-play').textContent = playing ? '❚❚' : '▶';
@@ -1114,30 +1288,20 @@ function renderStatus() {
 // over the board and a tab title you can spot from another screen.
 function renderAttention() {
   const banner = $('#attention');
-  const phase = state.session.phase;
-  // "quiet/waiting" is time since the agent last DID something (lastProducerAt),
-  // not since any event — else a reconcile append every 30s reset the readout to
-  // "quiet 0m" all night (F3). Falls back to lastAt for a producer-less tape.
-  const quietFrom = state.session.lastProducerAt ?? state.session.lastAt;
-  const waiting = ageText(Math.max(0, vtNow() - (quietFrom || vtNow())));
-  if (live && phase === 'attention') {
+  const disposition = currentBoardView?.disposition;
+  const wait = ageText(currentInsights?.clocks.liveHumanWaitMs ?? 0);
+  if (live && disposition?.state === 'blocked') {
     banner.hidden = false;
     banner.classList.add('urgent');
-    $('#attention-text').textContent =
-      `Agent needs you — ${state.session.attentionText || 'permission or input requested'}`;
-    $('#attention-age').textContent = `waiting ${waiting}`;
-    document.title = '🔴 needs input · nightshift';
-  } else if (live && phase === 'idle') {
+    $('#attention-text').textContent = disposition.label;
+    $('#attention-age').textContent = `${wait} attention wait`;
+    document.title = '🔴 permission · nightshift';
+  } else if (live && disposition?.state === 'attention') {
     banner.hidden = false;
     banner.classList.remove('urgent');
-    // "Idle" only means the log went quiet — for an autonomous agent that's
-    // usually a pause or a slow command, NOT "finished, waiting for you".
-    const autonomous = state.session.agent === 'codex';
-    $('#attention-text').textContent = autonomous
-      ? 'No activity on the log — the agent may be thinking, running a long command, or done'
-      : 'Turn finished — agent is waiting for your next prompt';
-    $('#attention-age').textContent = `quiet ${waiting}`;
-    document.title = '◌ idle · nightshift';
+    $('#attention-text').textContent = disposition.label;
+    $('#attention-age').textContent = `${wait} attention wait`;
+    document.title = '◌ human next · nightshift';
   } else {
     banner.hidden = true;
     document.title = 'nightshift';
@@ -1146,34 +1310,68 @@ function renderAttention() {
 
 function renderReadout() {
   const [t0] = domain();
-  $('#readout').textContent = `T+${durText(vtNow() - t0).padStart(8, '0')}`;
-  $('#stat-elapsed').textContent = durText(vtNow() - (state.session.startedAt ?? t0));
+  $('#readout').textContent = `Recorded session ${currentBoardView?.clocks.recordedSession.value ?? '0s'} · Cursor T+${durText(vtNow() - t0).padStart(8, '0')}`;
 }
 
 // The full session plan, shown once in the sidebar — cards show only their
 // own delta. Progress bar + the live (in-progress, else next-open) step lit.
-function renderPlan() {
+function renderPlan(insights) {
   const box = $('#plan');
-  const todos = state.todos || [];
+  const roadmap = insights.roadmap ?? {};
+  const todos = roadmap.todos ?? [];
   box.hidden = !todos.length;
   if (!todos.length) return;
-  const done = todos.filter(t => t.done).length;
+  const done = todos.filter(todo => todo.done === true || todo.status === 'completed').length;
   $('#plan-frac').textContent = `${done}/${todos.length}`;
   $('#plan-bar').style.width = `${(done / todos.length) * 100}%`;
-  const hasIP = todos.some(t => t.status === 'in_progress');
-  const firstOpen = todos.findIndex(t => !t.done);
-  $('#plan-list').innerHTML = todos.map((t, i) => {
-    const now = hasIP ? t.status === 'in_progress' : i === firstOpen;
-    const cls = t.done ? 'done' : now ? 'now' : '';
-    return `<li class="${cls}">${esc(t.text)}</li>`;
+  box.dataset.stale = String(roadmap.staleSnapshot === true);
+  box.title = roadmap.staleSnapshot
+    ? 'Recorded checklist is stale beside a later handoff assessment'
+    : 'Latest recorded session checklist';
+  const hasIP = todos.some(todo => todo.status === 'in_progress');
+  const firstOpen = todos.findIndex(todo => todo.done !== true && todo.status !== 'completed');
+  $('#plan-list').innerHTML = todos.map((todo, index) => {
+    const complete = todo.done === true || todo.status === 'completed';
+    const now = hasIP ? todo.status === 'in_progress' : index === firstOpen;
+    const cls = complete ? 'done' : now ? 'now' : '';
+    return `<li class="${cls}">${esc(todo.text)}</li>`;
   }).join('');
 }
 
-function renderAll(animate, freshEvents = null) {
+function renderSemanticState(insights, boardView) {
+  const summary = buildSummaryViewModel(insights);
+  $('#board-summary').innerHTML = summaryHTML(buildSummaryViewModel(insights));
+  const disposition = $('#board-disposition');
+  disposition.dataset.state = boardView.disposition.state;
+  $('#board-disposition-label').textContent = boardView.disposition.label;
+  $('#board-disposition-detail').textContent = boardView.disposition.detail;
+  $('#board-blocker').textContent = boardView.disposition.currentBlocker;
+  $('#board-next-actor').textContent = boardView.disposition.nextActorLabel;
+  $('#source-freshness').textContent = summary.sourceFreshness;
+  $('#source-freshness').title = 'Current GitHub fetch state and last successful refresh';
+  const uncertainty = $('#board-uncertainty');
+  uncertainty.hidden = !boardView.disposition.uncertainty;
+  uncertainty.textContent = boardView.disposition.uncertainty
+    ? `${boardView.disposition.uncertainty.label}. ${boardView.disposition.uncertainty.detail}`
+    : '';
+  $('#event-counts').textContent = boardView.events.label;
+}
+
+function renderAll(animate, freshEvents = null, insights = null) {
+  insights ||= buildSessionInsights(log, {
+    untilT: live ? Infinity : vt,
+    asOfT: live ? Infinity : viewContext.asOfT,
+    displayNow: live ? Date.now() : vt,
+  });
+  const boardView = buildBoardViewModel(insights);
+  currentInsights = insights;
+  currentBoardView = boardView;
+  renderSemanticState(insights, boardView);
   renderInstruments(animate);
   renderBoard(animate);
-  renderPlan();
-  renderPRs();
+  renderPlan(insights);
+  renderPRs(boardView);
+  renderToolCalls(boardView);
   if (!$('#gantt-overlay').hidden) renderGantt();
   renderHotfiles();
   renderFeed(animate ? freshEvents : null);
@@ -1268,7 +1466,7 @@ function tickActiveCards() {
     if (el._activeLive && el._todos) {
       const nowEl = el._refs.tlist.querySelector('li.now .steptime');
       const t = el._todos.find(td => td.status === 'in_progress') || el._todos.find(td => !td.done);
-      if (nowEl && t && t.startedAt) nowEl.textContent = ageText(Math.max(0, vtNow() - t.startedAt));
+      if (nowEl && t && t.startedAt) nowEl.textContent = `${ageText(Math.max(0, vtNow() - t.startedAt))} elapsed`;
     }
   }
 }
@@ -1276,11 +1474,9 @@ function tickActiveCards() {
 setInterval(() => {
   if (!ready) return;
   if (live) {
-    renderReadout();
-    drawTimeline();
-    renderStatus(); // re-derive the badge so it flips to STALE on time even with
-                    // zero incoming events (a dead recorder appends nothing)
-    tickActiveCards();
+    // Rebuild canonical insight truth once so open-ended attention/freshness
+    // clocks advance without mutating the frozen recorded session span.
+    renderAll(false);
   }
 }, 1000);
 

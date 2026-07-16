@@ -119,7 +119,8 @@ export function PrNode({ data }) {
   const label = (n.repo ? n.repo + '#' : '#') + n.number;
   const at = n.mergedAt || n.openedAt || n.lastTouched;
   return (
-    <div className={`gfn gfn-pr ${data.glow ? 'glow' : ''}`}>
+    <div className={`gfn gfn-pr ${data.glow ? 'glow' : ''}`} data-state={n.semanticState}>
+      <span className="gf-accent" aria-hidden="true" />
       <Ports />
       <div className="gfr-head">
         <i className={`gf-ring ${n.prState}`} style={{ borderColor: RING[n.prState] || RING.open }}>
@@ -130,7 +131,17 @@ export function PrNode({ data }) {
       </div>
       <div className="gfr-meta">
         <span className="gf-meta mono">{truncate(label, 126, MONO_SM)}</span>
-        {at ? <span className="gf-age mono">{ageText(data.clock - at)}</span> : null}
+        {at ? <span className="gf-age mono">Open for {ageText(Math.max(0, data.clock - at))}</span> : null}
+      </div>
+      <div className="gfr-milestone mono" title={n.milestoneConfidence}>Milestone: {n.milestone} · {n.semanticState}</div>
+      <div className="gfr-truth">
+        <div><b>Current truth</b><span>{n.currentTruth?.replace(/^Current:\s*/, '') ?? 'Unavailable at this cutoff'}</span></div>
+        <div><b>Recorded truth</b><span>{n.recordedTruth?.replace(/^Recorded:\s*/, '') ?? 'Not recorded'}</span></div>
+      </div>
+      <div className="gfr-evidence mono">
+        <span>Discovery provenance: {n.discoveryProvenance}</span>
+        <span>Snapshot provenance: {n.snapshotProvenance}</span>
+        <span>Confidence: {n.confidence}</span>
       </div>
       {hasSize(n) && <DiffChip add={n.add} del={n.del} className="gfr-diff" />}
       {n.url && (
@@ -139,7 +150,8 @@ export function PrNode({ data }) {
           href={n.url}
           target="_blank"
           rel="noopener noreferrer"
-          title="open on GitHub"
+          title={`Open PR #${n.number} on GitHub`}
+          aria-label={`Open PR #${n.number} on GitHub`}
           onClick={e => e.stopPropagation()}
           onPointerDown={e => e.stopPropagation()}
         >
@@ -220,33 +232,6 @@ export function CollapsedNode({ data }) {
   );
 }
 
-// ------------------------------------------------------------ chapter group
-// The LANDED redesign: one collapsible group per digest chapter. Collapsed it
-// reads as a quiet card — prompt (truncated), "N PRs · X.Yh active", PR chips.
-// Expanded it becomes a React Flow subflow containing the real PR nodes.
-export function ChapterNode({ data }) {
-  const { group, meta, titleLines, chips, expanded } = data;
-  return (
-    <div className={`gfn gfn-chapter ${expanded ? 'open' : ''} ${data.glow ? 'glow' : ''}`}>
-      <Ports />
-      <div className="gfc-meta mono">
-        <span>{meta}</span>
-        <svg className="gfc-caret" width="9" height="9" viewBox="0 0 10 10"><path d="M2 3.5 L5 6.5 L8 3.5" fill="none" strokeWidth="1.4" /></svg>
-      </div>
-      <div className="gfc-title" title={group.title}>
-        {titleLines.map((l, i) => <div key={i}>{l}</div>)}
-      </div>
-      {!expanded && chips && (
-        <div className="gfc-chips">
-          {chips.chips.map((c, i) => (
-            <span key={i} className={`gfc-chip mono st-${c.state}`}>{c.label}</span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ----------------------------------------------------------- column band
 export function ColBandNode({ data }) {
   return (
@@ -266,6 +251,5 @@ export const nodeTypes = {
   'step-more': StepMoreNode,
   now: NowNode,
   collapsed: CollapsedNode,
-  chapter: ChapterNode,
   colband: ColBandNode,
 };

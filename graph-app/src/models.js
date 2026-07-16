@@ -8,25 +8,30 @@ let cached = null;
 
 export async function loadModels() {
   if (cached) return cached;
-  const [reducer, graphModel, digest, turnId, sessionLabel, storyModel, sessionPicker] = await Promise.all([
+  const [
+    reducer, graphModel, turnId, sessionLabel, sessionPicker,
+    sessionInsights, sessionSummary, sessionViewContext,
+  ] = await Promise.all([
     import(/* @vite-ignore */ '/reducer.js'),
     import(/* @vite-ignore */ '/graph-model.js'),
-    import(/* @vite-ignore */ '/digest.js'),
     import(/* @vite-ignore */ '/turn-id.js'),
     import(/* @vite-ignore */ '/session-label.js'),
-    import(/* @vite-ignore */ '/story-model.js'),
     import(/* @vite-ignore */ '/session-picker.js'),
+    import(/* @vite-ignore */ '/session-insights-model.js'),
+    import(/* @vite-ignore */ '/session-summary.js'),
+    import(/* @vite-ignore */ '/session-view-context.js'),
   ]);
   cached = {
     fold: reducer.fold,
-    liveness: reducer.liveness,
     buildGraphModel: graphModel.buildGraphModel,
     COLUMNS: graphModel.COLUMNS,
-    buildDigest: digest.buildDigest,
     turnLabel: turnId.turnLabel,
     sessionLabel: sessionLabel.sessionLabel,
-    activeSegments: storyModel.activeSegments,
     initSessionPicker: sessionPicker.initSessionPicker,
+    buildSessionInsights: sessionInsights.buildSessionInsights,
+    buildSummaryViewModel: sessionSummary.buildSummaryViewModel,
+    parseViewContext: sessionViewContext.parseViewContext,
+    viewHref: sessionViewContext.viewHref,
   };
   return cached;
 }

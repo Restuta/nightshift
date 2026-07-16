@@ -4,11 +4,12 @@
 // episode splitting, item ranking, and mark extraction — are unit-testable on
 // golden tapes (see test/lanes-model.test.mjs).
 //
-// This is a SECOND pure pass over the same tape the reducer folds; it does NOT
-// modify the reducer. It reconstructs a lightweight per-item attribution (a
-// faithful-enough mirror of reducer.targetItem: explicit `item` wins, pr/ci
-// match by PR number to the owning card, else the most-recently-touched card in
-// `doing`) purely so activity can be laid out in time.
+// Semantic truth comes from session-insights-model. The lightweight second pass
+// below remains only for the optional item-attribution overlay; it never owns the
+// primary timeline, clocks, PR truth, blockers, or confidence.
+
+import { buildSessionInsights } from './session-insights-model.js';
+import { viewHref } from './session-view-context.js';
 
 export const EPISODE_GAP_MS = 10 * 60 * 1000; // a >10min gap starts a new episode
 export const TOP_ITEMS = 12;                  // lanes shown before "…n more"
@@ -249,18 +250,469 @@ export function densityTimes(events) {
   return byT(events).filter(ev => ev.type === 'say' || ev.type === 'tool').map(ev => ev.t);
 }
 
-// Compose the whole model the page renders. Pure over the event array.
-export function buildModel(events) {
+const PRODUCER_ACTIVITY_TYPES = new Set([
+  'say', 'tool', 'tool_call', 'edit', 'commit', 'todos', 'item', 'work_phase',
+]);
+const RECONCILE_SOURCES = new Set(['poll-github', 'server']);
+
+function eventActivityTimes(events, t0, t1) {
+  return byT(events)
+    .filter(event => PRODUCER_ACTIVITY_TYPES.has(event.type)
+      && !RECONCILE_SOURCES.has(event.source)
+      && event.t >= t0
+      && event.t <= t1)
+    .map(event => event.t);
+}
+
+function titleCase(value) {
+  return String(value ?? 'unknown')
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, character => character.toUpperCase());
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
+}
+
+function eventDetail(event) {
+  const detail = [
+    event.input?.command,
+    event.input?.text,
+    event.command,
+    event.text,
+    event.message,
+    event.title,
+    event.path,
+  ].find(value => typeof value === 'string' && value.trim());
+  if (detail) return detail.trim();
+  if (event.type === 'pr') return `PR #${event.number} ${event.state ?? 'observed'}`;
+  if (event.type === 'ci') return `PR #${event.pr} validation ${event.status ?? 'observed'}`;
+  if (event.type === 'work_phase') {
+    return `${titleCase(event.phase)}${event.stage ? ` / ${titleCase(event.stage)}` : ''} ${event.state ?? 'observed'}`;
+  }
+  if (event.type === 'tool_call') return `${event.tool ?? 'Tool'} ${event.state ?? 'observed'}`;
+  return titleCase(event.type);
+}
+
+function eventProvenance(event) {
+  return [
+    event.source ?? 'recorded tape',
+    event.recovery ? `recovery: ${event.recovery}` : null,
+    event.evidenceRef ? `evidence: ${event.evidenceRef}` : null,
+  ].filter(Boolean).join(' · ');
+}
+
+function evidenceFor(ids, evidenceEvents) {
+  return [...new Set(ids ?? [])]
+    .map(id => evidenceEvents.get(id))
+    .filter(Boolean)
+    .map(event => ({
+      id: event.id,
+      t: event.t,
+      type: event.type,
+      source: event.source ?? 'recorded tape',
+      detail: eventDetail(event),
+      provenance: eventProvenance(event),
+      tool: event.tool ?? null,
+      toolUseId: event.toolUseId ?? null,
+      agentId: event.agentId ?? null,
+      state: event.state ?? event.status ?? null,
+      outcome: event.outcome ?? null,
+      evidenceRef: event.evidenceRef ?? null,
+    }));
+}
+
+function replayHref(startT, context) {
+  return viewHref('/', {
+    ...(context ?? {}),
+    cursorT: Math.round(startT),
+    mode: 'replay',
+  });
+}
+
+function descriptor(values, evidenceEvents, context, recordedMs) {
+  const startT = Number.isFinite(values.startT) ? values.startT : 0;
+  const endT = Number.isFinite(values.endT) ? values.endT : startT;
+  const replayT = Number.isFinite(values.replayT) ? values.replayT : startT;
+  const evidenceEventIds = [...new Set(values.evidenceEventIds ?? [])];
+  const durationMs = Math.max(0, endT - startT);
+  return {
+    ...values,
+    startT,
+    endT,
+    durationMs,
+    percent: values.percent === null
+      ? null
+      : (recordedMs > 0 ? durationMs / recordedMs * 100 : 0),
+    confidence: values.confidence ?? 'heuristic',
+    evidenceEventIds,
+    evidence: evidenceFor(evidenceEventIds, evidenceEvents),
+    replayHref: replayHref(replayT, context),
+  };
+}
+
+function semanticDescriptors(insights, evidenceEvents, context, recordedMs) {
+  return insights.phases.map((phase, index) => {
+    const evidence = evidenceFor(phase.evidenceEventIds, evidenceEvents);
+    const terminal = evidence.find(item => item.type === 'work_phase' && item.state === 'end');
+    return descriptor({
+      id: `semantic-primary-${index}`,
+      kind: 'phase',
+      label: titleCase(phase.wallCategory),
+      phase: phase.phase,
+      stage: phase.stage,
+      disposition: phase.disposition,
+      wallCategory: phase.wallCategory,
+      source: phase.source,
+      outcome: terminal?.outcome ?? null,
+      startT: phase.startT,
+      endT: phase.endT,
+      confidence: phase.confidence,
+      evidenceEventIds: phase.evidenceEventIds,
+    }, evidenceEvents, context, recordedMs);
+  });
+}
+
+function preflightDescriptors(insights, evidenceEvents, context, recordedMs) {
+  return insights.phases
+    .filter(phase => phase.phase === 'preflight')
+    .map((phase, index) => {
+      const evidence = evidenceFor(phase.evidenceEventIds, evidenceEvents);
+      const terminal = evidence.find(item => item.type === 'work_phase' && item.state === 'end');
+      return descriptor({
+        id: `preflight-${index}`,
+        kind: 'preflight',
+        label: titleCase(phase.stage ?? 'prepare'),
+        phase: phase.phase,
+        stage: phase.stage ?? 'prepare',
+        disposition: phase.disposition,
+        wallCategory: phase.wallCategory,
+        source: phase.source,
+        outcome: terminal?.outcome ?? null,
+        startT: phase.startT,
+        endT: phase.endT,
+        confidence: phase.confidence,
+        evidenceEventIds: phase.evidenceEventIds,
+      }, evidenceEvents, context, recordedMs);
+    });
+}
+
+function snapshotTruth(prefix, snapshot) {
+  if (!snapshot) return `${prefix}: unavailable`;
+  const advisory = snapshot.advisoryRunning ? ` · ${snapshot.advisoryRunning} advisory running` : '';
+  return `${prefix}: ${snapshot.state ?? 'unknown'} · validation ${snapshot.validation ?? 'unknown'}${advisory}`;
+}
+
+function snapshotTransitions(pr, evidenceEvents, context, recordedMs, t0, t1) {
+  const transitions = [];
+  const push = ({ kind, label, occurredAt, observedAt, source, evidenceEventIds }) => {
+    const axisT = Number.isFinite(occurredAt) ? occurredAt : observedAt;
+    if (!Number.isFinite(axisT)) return;
+    transitions.push(descriptor({
+      id: `pr-transition-${pr.repo}-${pr.number}-${kind}`,
+      kind,
+      transitionKind: kind,
+      label,
+      repo: pr.repo,
+      number: pr.number,
+      githubHref: pr.url,
+      occurredAt: Number.isFinite(occurredAt) ? occurredAt : null,
+      observedAt: Number.isFinite(observedAt) ? observedAt : null,
+      replayT: Number.isFinite(observedAt) ? observedAt : axisT,
+      startT: clamp(axisT, t0, t1),
+      endT: clamp(axisT, t0, t1),
+      confidence: 'explicit',
+      source: source ?? 'recorded tape',
+      evidenceEventIds,
+    }, evidenceEvents, context, recordedMs));
+  };
+  const createdAt = pr.recorded?.createdAt ?? pr.current?.createdAt ?? null;
+  push({
+    kind: 'discovered',
+    label: pr.discovery.kind === 'recovered' ? 'Discovered retrospectively' : 'PR created',
+    occurredAt: createdAt,
+    observedAt: pr.discovery.observedAt,
+    source: pr.discovery.source,
+    evidenceEventIds: pr.discovery.evidenceEventIds,
+  });
+  push({
+    kind: 'recorded_state',
+    label: `Recorded ${pr.recorded?.state ?? 'state unavailable'}`,
+    occurredAt: pr.recorded?.occurredAt,
+    observedAt: pr.recorded?.prAt,
+    source: pr.recorded?.source,
+    evidenceEventIds: pr.recorded?.evidenceEventIds,
+  });
+  push({
+    kind: 'recorded_validation',
+    label: `Recorded validation ${pr.recorded?.validation ?? 'unavailable'}`,
+    occurredAt: null,
+    observedAt: pr.recorded?.ciAt,
+    source: pr.recorded?.source,
+    evidenceEventIds: pr.recorded?.evidenceEventIds,
+  });
+  push({
+    kind: 'current_state',
+    label: `Current ${pr.current?.state ?? 'state unavailable'}`,
+    occurredAt: pr.current?.occurredAt,
+    observedAt: pr.current?.prAt,
+    source: pr.current?.source,
+    evidenceEventIds: pr.current?.evidenceEventIds,
+  });
+  push({
+    kind: 'current_validation',
+    label: `Current validation ${pr.current?.validation ?? 'unavailable'}`,
+    occurredAt: null,
+    observedAt: pr.current?.ciAt,
+    source: pr.current?.source,
+    evidenceEventIds: pr.current?.evidenceEventIds,
+  });
+  return transitions;
+}
+
+function prDescriptors(insights, evidenceEvents, context, recordedMs, t0, t1) {
+  return (insights.prStack?.prs ?? []).map(pr => {
+    const recorded = pr.recorded;
+    const current = pr.current;
+    const effective = current ?? recorded;
+    const createdAt = recorded?.createdAt ?? current?.createdAt ?? null;
+    const occurredAt = recorded?.occurredAt ?? current?.occurredAt ?? null;
+    const observedAt = pr.discovery.observedAt ?? recorded?.prAt ?? current?.prAt ?? null;
+    const startT = clamp(createdAt ?? occurredAt ?? observedAt, t0, t1);
+    const terminalT = ['merged', 'closed'].includes(recorded?.state)
+      ? (recorded.occurredAt ?? recorded.prAt)
+      : t1;
+    const base = current?.base ?? recorded?.base ?? null;
+    const disagreement = Boolean(recorded && current && (
+      recorded.state !== current.state
+      || recorded.validation !== current.validation
+      || recorded.base !== current.base
+    ));
+    return descriptor({
+      id: `pr-${pr.repo}-${pr.number}`,
+      kind: 'pr',
+      label: `#${pr.number} · ${pr.title || 'Untitled pull request'}`,
+      milestone: pr.title || `PR #${pr.number}`,
+      repo: pr.repo,
+      number: pr.number,
+      githubHref: pr.url,
+      recorded,
+      current,
+      discovery: pr.discovery,
+      recordedTruth: snapshotTruth('Recorded', recorded),
+      currentTruth: snapshotTruth('Current', current),
+      stackTruth: base == null ? 'Base: stack root' : `Base: #${base}`,
+      createdAt,
+      occurredAt,
+      observedAt,
+      replayT: observedAt,
+      state: effective?.state ?? 'unknown',
+      validation: effective?.validation ?? 'unknown',
+      attention: disagreement || Boolean(current?.advisoryRunning)
+        || pr.discovery.kind === 'recovered',
+      transitions: snapshotTransitions(pr, evidenceEvents, context, recordedMs, t0, t1),
+      startT,
+      endT: clamp(terminalT, startT, t1),
+      confidence: pr.discovery.kind === 'recovered' ? 'strong' : 'explicit',
+      source: effective?.source ?? pr.discovery.source,
+      evidenceEventIds: pr.evidenceEventIds,
+    }, evidenceEvents, context, recordedMs);
+  });
+}
+
+function agentRows(prefix, insights, evidenceEvents, context, recordedMs, t1) {
+  const starts = new Map();
+  const rows = new Map();
+  const ensure = agentId => {
+    if (!rows.has(agentId)) rows.set(agentId, { agentId, label: `Agent · ${agentId}`, segments: [] });
+    return rows.get(agentId);
+  };
+  const owningPhase = start => insights.phases.find(candidate => candidate.source === 'work_phase'
+    && candidate.evidenceEventIds.includes(start.id)
+    && candidate.startT <= start.t
+    && candidate.endT > start.t);
+  const canonicalValues = start => {
+    const waiting = start.disposition === 'waiting' || start.stage === 'readiness_wait';
+    return {
+      phase: start.phase ?? 'other',
+      stage: start.stage ?? null,
+      disposition: waiting ? 'waiting' : 'active',
+      wallCategory: waiting ? 'waiting' : (start.phase ?? 'other'),
+    };
+  };
+  const canonicalEnd = (start, terminalT) => {
+    const owner = owningPhase(start);
+    if (owner) return Math.min(terminalT, owner.endT);
+    const disposition = start.disposition === 'waiting' || start.stage === 'readiness_wait'
+      ? 'waiting'
+      : 'active';
+    for (const phase of insights.phases) {
+      if (phase.endT <= start.t || phase.startT >= terminalT) continue;
+      if (phase.disposition !== disposition) return Math.max(start.t, phase.startT);
+    }
+    return terminalT;
+  };
+  const append = (start, endT, outcome, evidenceEventIds) => {
+    const canonical = canonicalValues(start);
+    const closedAt = canonicalEnd(start, endT);
+    if (closedAt <= start.t) return;
+    ensure(start.agentId).segments.push(descriptor({
+      id: `agent-${start.agentId}-${start.runId}`,
+      kind: 'agent_phase',
+      label: `${titleCase(canonical.phase)}${canonical.stage ? ` · ${titleCase(canonical.stage)}` : ''}`,
+      agentId: start.agentId,
+      phase: canonical.phase,
+      stage: canonical.stage,
+      disposition: canonical.disposition,
+      wallCategory: canonical.wallCategory,
+      outcome,
+      startT: start.t,
+      endT: closedAt,
+      confidence: 'explicit',
+      source: 'work_phase',
+      evidenceEventIds,
+    }, evidenceEvents, context, recordedMs));
+  };
+  for (const event of prefix) {
+    if (event.type !== 'work_phase' || !event.agentId || !event.runId) continue;
+    const key = `${event.agentId}\u0000${event.runId}`;
+    if (event.state === 'start') {
+      starts.set(key, event);
+      continue;
+    }
+    if (event.state !== 'end' || !starts.has(key)) continue;
+    const start = starts.get(key);
+    starts.delete(key);
+    append(start, event.t, event.outcome ?? null, [start.id, event.id].filter(Boolean));
+  }
+  for (const start of starts.values()) {
+    append(start, t1, 'not observed', [start.id].filter(Boolean));
+  }
+  return [...rows.values()].sort((a, b) => a.agentId.localeCompare(b.agentId));
+}
+
+const MARK_LABELS = {
+  human_input: 'Human input requested',
+  permission_block: 'Permission blocked',
+  ci_review_wait: 'CI or review wait',
+  unknown_silence: 'Unknown silence',
+  recorder_gap: 'Recorder stale / gap',
+};
+
+function forensicMarks(insights, evidenceEvents, context, recordedMs, t1) {
+  const marks = (insights.blockers ?? []).map((blocker, index) => descriptor({
+    id: `blocker-${blocker.kind}-${index}`,
+    kind: blocker.kind,
+    label: MARK_LABELS[blocker.kind] ?? titleCase(blocker.kind),
+    startT: blocker.startT,
+    endT: blocker.endT,
+    confidence: blocker.confidence,
+    source: 'session insights',
+    evidenceEventIds: blocker.evidenceEventIds,
+  }, evidenceEvents, context, recordedMs));
+
+  for (const [index, tool] of (insights.toolCalls?.lifecycles ?? []).entries()) {
+    marks.push(descriptor({
+      id: `tool-${index}`,
+      kind: tool.endT == null ? 'tool_outcome_unknown' : 'tool_execution',
+      label: `${tool.tool ?? 'Tool'} · ${tool.outcome ?? 'unknown'}`,
+      tool: tool.tool ?? null,
+      toolKey: tool.key,
+      outcome: tool.outcome,
+      startT: tool.startT,
+      endT: tool.endT ?? insights.bounds?.displayNow ?? t1,
+      percent: tool.endT == null ? null : undefined,
+      confidence: 'explicit',
+      source: 'tool_call',
+      evidenceEventIds: tool.evidenceEventIds,
+    }, evidenceEvents, context, recordedMs));
+  }
+  for (const [index, tool] of (insights.toolCalls?.pointObservations ?? []).entries()) {
+    marks.push(descriptor({
+      id: `tool-point-${index}`,
+      kind: 'tool_observation',
+      label: `${tool.tool ?? 'Tool'} · point observation`,
+      tool: tool.tool ?? null,
+      startT: tool.t,
+      endT: tool.t,
+      confidence: 'explicit',
+      source: tool.source ?? 'recorded tape',
+      evidenceEventIds: [tool.id].filter(Boolean),
+    }, evidenceEvents, context, recordedMs));
+  }
+  for (const [index, diagnostic] of (insights.diagnostics ?? []).entries()) {
+    if (diagnostic.kind !== 'stale_poller') continue;
+    marks.push(descriptor({
+      id: `source-stale-${index}`,
+      kind: 'source_stale',
+      label: 'GitHub source stale',
+      startT: diagnostic.lastSignalT ?? insights.bounds.recordedEnd,
+      endT: diagnostic.lastSignalT ?? insights.bounds.recordedEnd,
+      confidence: 'explicit',
+      source: 'session diagnostics',
+      evidenceEventIds: diagnostic.evidenceEventIds,
+    }, evidenceEvents, context, recordedMs));
+  }
+  return marks;
+}
+
+function itemOverlays(lanes, evidenceEvents, context, recordedMs) {
+  return lanes.map(item => ({
+    id: item.id,
+    label: item.title || item.id,
+    segments: item.episodes.map((episode, index) => descriptor({
+      id: `item-${item.id}-${index}`,
+      kind: 'item_episode',
+      label: item.title || item.id,
+      itemId: item.id,
+      startT: episode.start,
+      endT: episode.end,
+      confidence: 'heuristic',
+      source: 'item attribution overlay',
+      evidenceEventIds: [],
+    }, evidenceEvents, context, recordedMs)),
+  }));
+}
+
+// Compose the whole model the page renders. Pure over the event array and the
+// canonical insights prefix. `insights` is optional only for backwards-compatible
+// callers; production builds it once and passes it in.
+export function buildModel(events, insights = null, context = null) {
   // Honor retracts before anything else folds: a retracted card must leave no
   // lane, mark, or count — the same META-level rule the reducer applies in fold().
-  const evs = byT(applyRetractions(events));
-  const t0 = evs.length ? evs[0].t : 0;
-  const t1 = evs.length ? evs[evs.length - 1].t : t0 + 60000;
+  const canonical = insights ?? buildSessionInsights(events);
+  const evs = canonical.visiblePrefix ?? byT(applyRetractions(events));
+  const t0 = canonical.bounds?.recordedStart ?? (evs.length ? evs[0].t : 0);
+  const t1 = canonical.bounds?.recordedEnd ?? (evs.length ? evs[evs.length - 1].t : t0 + 60000);
+  const recordedMs = Math.max(0, t1 - t0);
+  const evidenceEvents = new Map(
+    [...evs, ...(canonical.factPrefix ?? [])]
+      .filter(event => event.id != null)
+      .map(event => [event.id, event]),
+  );
   const itemsMap = buildItems(evs);
   const { lanes, more } = selectLanes(itemsMap);
   const moreActivity = [];
   const moreCommits = [];
   for (const it of more) { moreActivity.push(...it.activityTs); moreCommits.push(...it.commitMarks); }
+  const primary = semanticDescriptors(canonical, evidenceEvents, context, recordedMs);
+  const preflight = preflightDescriptors(canonical, evidenceEvents, context, recordedMs);
+  const prs = prDescriptors(canonical, evidenceEvents, context, recordedMs, t0, t1);
+  const agents = agentRows(evs, canonical, evidenceEvents, context, recordedMs, t1);
+  const marks = forensicMarks(canonical, evidenceEvents, context, recordedMs, t1);
+  const overlays = {
+    items: itemOverlays(lanes, evidenceEvents, context, recordedMs),
+    eventActivity: eventActivityTimes(evs, t0, t1),
+  };
+  const descriptors = [
+    ...primary,
+    ...preflight,
+    ...prs,
+    ...prs.flatMap(pr => pr.transitions),
+    ...agents.flatMap(row => row.segments),
+    ...marks,
+    ...overlays.items.flatMap(row => row.segments),
+  ];
   return {
     t0, t1,
     phases: sessionPhases(evs, t0, t1),
@@ -269,5 +721,9 @@ export function buildModel(events) {
     density: densityTimes(evs),
     lanes,
     more: { count: more.length, episodes: splitEpisodes(moreActivity), commitMarks: moreCommits },
+    semanticRows: { primary, preflight, prs, agents },
+    marks,
+    overlays,
+    descriptors,
   };
 }

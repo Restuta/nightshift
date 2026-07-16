@@ -66,11 +66,10 @@ Session lifecycle. `{phase: "start" | "resume" | "attention" | "idle" | "end", t
 - `start` opens the board clock; `resume` fires on each user prompt; `idle`
   means the agent finished a turn and is waiting for input; `end` closes the
   session. `start`/`resume` flip the badge to LIVE, `idle` to IDLE.
-- `attention` (from Claude Code's `Notification` hook) means the agent is
-  blocked on the human — permission prompt or a question. The board surfaces
-  it loudly: red banner, badge, and tab title. It clears on `resume`/`idle`
-  or on any subsequent tool activity (`edit`/`commit`), since activity means
-  the request was answered.
+- `attention` is the legacy representation of a human question. New hook
+  producers emit structured `notification` events instead; only `permission`
+  and `question` fold to actionable attention. It clears on `resume`/`idle` or
+  on subsequent tool activity, since activity means the request was answered.
 
 ### `item`
 Work item upsert — the kanban cards. `{id, title?, status?, note?, emoji?}`
@@ -271,6 +270,51 @@ Correct a recording error. `{type:"retract", target:{event?:<event id>, item?:<i
   line was never true." Genuine history (a card that really moved `doing`→`done`,
   a PR that really merged) is never retracted — only recording errors are.
 - `fold` stays a pure, deterministic function of `(events, untilT)`.
+
+### work_phase
+
+    {type:"work_phase", state:"start"|"end", phase:"coding"|"testing"|"preflight"|"other", stage?, runId, sessionId?, agentId?, item?, pr?, outcome?}
+
+runId is the lifecycle identity. An unmatched start has outcome unknown.
+
+### tool_call
+
+    {type:"tool_call", state:"start"|"success"|"failure"|"cancelled"|"unknown", sessionId, agentId, toolUseId, tool, item?, parentRunId?, outcome?}
+
+The compound identity is (sessionId, agentId, toolUseId). A missing terminal
+event means only "tool outcome not observed"; it does not prove that the tool is
+running or blocked.
+
+**Mid-turn activation boundary.** The Bash command that enables Nightshift is
+outside exact lifecycle recording: its `PreToolUse` occurs before the active
+marker exists, so it is intentionally not recorded. Its `PostToolUse` arrives
+after activation and remains a legacy point observation; without a recorded
+start it never receives a synthetic `tool_call` terminal. Exact lifecycle
+recording begins with the next `PreToolUse`/`PostToolUse` pair.
+
+### notification
+
+    {type:"notification", reason:"next_prompt"|"permission"|"question"|"background_complete"|"system_notice", text?}
+
+Only permission and question request human input.
+
+### Recovery provenance
+
+A retrospectively recovered pr_ref keeps t equal to the transcript observation
+time and adds recordedAt, recovery:"transcript", and evidenceRef. Narrative
+prose alone is not authoritative PR state.
+
+### Validation checks
+
+    {type:"ci", pr, repo?, status:"pending"|"pass"|"fail"|"unknown", checks?:[{name,status,required:boolean}], fetchedAt?}
+
+An in-progress advisory check does not make gating validation pending.
+
+### assessment
+
+    {type:"assessment", subject:"roadmap", value, text, evidenceRef?}
+
+Assessments are explicit agent claims, not authoritative task state.
 
 ## Ordering
 
