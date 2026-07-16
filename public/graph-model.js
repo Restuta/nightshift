@@ -17,6 +17,8 @@
 
 import { fold, sessionPausedAt, freshestProducerAt } from './reducer.js';
 import { TURN_RE, turnLabel } from './turn-id.js';
+import { buildSessionInsights } from './session-insights-model.js';
+import { buildSessionDisposition } from './session-disposition.js';
 
 // A work item whose id is a turn-card id (legacy `turn-<n>` OR namespaced
 // `turn-<sid8>-<n>`) is a synthesized chat turn, never a node. Re-exported from the
@@ -28,8 +30,8 @@ export { TURN_RE };
 export const COLUMNS = [
   { key: 'plan', label: 'Plan' },
   { key: 'active', label: 'Active' },
-  { key: 'review', label: 'Review' },
-  { key: 'landed', label: 'Landed' },
+  { key: 'review', label: 'Attention' },
+  { key: 'landed', label: 'Complete' },
 ];
 const COL_INDEX = { plan: 0, active: 1, review: 2, landed: 3 };
 
@@ -38,49 +40,83 @@ const COL_INDEX = { plan: 0, active: 1, review: 2, landed: 3 };
 // always pinned visible — they're the loud ones you must not scroll past.
 export const MAX_PER_COL = 12;
 
-// owner/repo for a github PR URL, or null — so a v1 pr event (no `repo`, but a URL)
-// still renders `repo#number`.
-function repoFromUrl(url) {
-  const m = (url || '').match(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/);
-  return m ? m[1] : null;
-}
-
-// The freshest timestamp we can attribute to a PR — used for recency ordering and
-// the replay deep link.
-function prTouchedAt(pr) {
-  return pr.t != null ? pr.t : pr.mergedAt != null ? pr.mergedAt : pr.openedAt || 0;
-}
-
 // --------------------------------------------------------------- node sources
 
-// PR nodes — the strongest nodes. status ring (open/merged/closed), CI glyph,
-// repo#number + title, age. Keyed by the reducer's own repo#number key.
-function prNodes(state) {
-  const out = [];
-  for (const [key, pr] of state.prs) {
-    const repo = pr.repo || repoFromUrl(pr.url);
-    out.push({
-      id: 'pr:' + key,
+function snapshotText(label, snapshot) {
+  if (!snapshot) return null;
+  const state = snapshot.state ?? 'state unknown';
+  const validation = snapshot.validation ?? 'unknown';
+  const base = Number.isFinite(snapshot.base) ? ` · based on #${snapshot.base}` : '';
+  const advisory = snapshot.advisoryRunning ? ` · ${snapshot.advisoryRunning} advisory running` : '';
+  return `${label}: ${state} · gates ${validation}${advisory}${base}`;
+}
+
+function semanticPrState(snapshot) {
+  if (snapshot?.state === 'merged' || snapshot?.state === 'closed') return 'complete';
+  if (snapshot?.validation === 'fail') return 'blocked';
+  if (snapshot?.validation === 'pending') return 'active';
+  return 'attention';
+}
+
+// PR nodes are sourced exclusively from the canonical insights registry. The
+// reducer remains responsible for work items and plan activity, but it is not a
+// second PR registry: recovered PRs and recorded/current axes must agree across
+// Board, Story, Lanes, and Graph.
+function prNodes(insights, topology, state) {
+  return (insights.prStack?.prs ?? []).map(pr => {
+    const recorded = pr.recorded;
+    const current = topology.axis === 'current' ? pr.current : null;
+    const effective = current ?? recorded;
+    const displayMetadata = state.prs.get(pr.key) ?? null;
+    const discovery = pr.discovery ?? {};
+    const recovered = discovery.kind === 'recovered';
+    const confidence = recovered && !recorded && !current ? 'strong' : 'explicit';
+    const discoveryProvenance = recovered
+      ? `${discovery.recovery === 'transcript' ? 'Transcript recovery' : 'Recovered reference'} · ${discovery.source ?? 'unknown source'}`
+      : `${discovery.kind === 'authoritative' ? 'Authoritative discovery' : 'Observed reference'} · ${discovery.source ?? 'unknown source'}`;
+    const snapshotProvenance = effective
+      ? `${current ? 'Current snapshot' : 'Recorded snapshot'} · ${effective.source ?? 'unknown source'}`
+      : 'No effective snapshot at this cutoff';
+    const provenance = `${discoveryProvenance}; ${snapshotProvenance}`;
+    return {
+      id: 'pr:' + pr.key,
       kind: 'pr',
-      key,
+      key: pr.key,
       number: pr.number,
-      repo,
-      title: pr.title || null,
-      prState: pr.state || 'open',
-      ci: pr.ci || null,
-      url: pr.url || null,
-      // Diff size — a recorded fact (poll-github stamps it from gh). 0 when the tape
-      // carries none, so the view renders a chip only for PRs that HAVE size data.
-      add: pr.add || 0,
-      del: pr.del || 0,
-      base: pr.base != null ? pr.base : null,
-      openedAt: pr.openedAt || null,
-      mergedAt: pr.mergedAt || null,
-      lastTouched: prTouchedAt(pr),
-      chainDepth: 0, // filled once base edges are resolved
-    });
-  }
-  return out;
+      repo: pr.repo,
+      title: effective?.title ?? pr.title ?? null,
+      prState: effective?.state ?? 'unknown',
+      ci: effective?.validation ?? 'unknown',
+      url: effective?.url ?? pr.url ?? null,
+      // Size is display metadata only. Registry membership, truth, state, and
+      // topology all come from insights.prStack.
+      add: displayMetadata?.add ?? 0,
+      del: displayMetadata?.del ?? 0,
+      base: effective?.base ?? null,
+      recordedBase: recorded?.base ?? null,
+      currentBase: current?.base ?? null,
+      openedAt: effective?.createdAt ?? discovery.observedAt ?? null,
+      mergedAt: effective?.state === 'merged' ? (effective.occurredAt ?? effective.at ?? null) : null,
+      lastTouched: effective?.at ?? discovery.observedAt ?? 0,
+      replayT: discovery.observedAt ?? effective?.at ?? 0,
+      chainDepth: 0,
+      semanticState: semanticPrState(effective),
+      truthAxis: topology.axis,
+      recorded,
+      current,
+      recordedTruth: snapshotText('Recorded', recorded),
+      currentTruth: snapshotText('Current', current),
+      discoveryProvenance,
+      snapshotProvenance,
+      provenance,
+      confidence,
+      evidenceEventIds: pr.evidenceEventIds ?? [],
+      milestone: pr.recorded?.milestone ?? pr.discovery?.milestone ?? 'Unassigned',
+      milestoneConfidence: pr.recorded?.milestone || pr.discovery?.milestone
+        ? 'Explicit recorded milestone attribution'
+        : 'No explicit milestone attribution recorded',
+    };
+  });
 }
 
 // Intent nodes — explicitly-registered work items (id NOT turn-<n>): real declared
@@ -324,7 +360,7 @@ function intentColumn(node, prCol) {
 
 // --------------------------------------------------------------- edges
 
-function buildEdges(nodes) {
+function buildEdges(nodes, topology) {
   const byId = new Map(nodes.map(n => [n.id, n]));
   const prByNumber = new Map(); // number → node (first wins, deterministic order)
   for (const n of nodes) if (n.kind === 'pr' && !prByNumber.has(n.number)) prByNumber.set(n.number, n);
@@ -339,13 +375,22 @@ function buildEdges(nodes) {
     }
   }
 
-  // PR → base PR (the stacked-chain edge) when the data carries a base number and
-  // that base is itself a known PR head in this session. Old tapes lack base →
-  // no edge, never inferred.
-  for (const n of nodes) {
-    if (n.kind !== 'pr' || n.base == null) continue;
-    const target = prByNumber.get(n.base);
-    if (target && target.id !== n.id) edges.push({ from: n.id, to: target.id, kind: 'pr-base' });
+  // Canonical topology is parent → child. It is never reconstructed from node
+  // labels or reducer fields: the selected recorded/current insight axis owns it.
+  const prByKey = new Map(nodes.filter(n => n.kind === 'pr').map(n => [n.key, n]));
+  for (const edge of topology.edges) {
+    const parent = prByKey.get(edge.from);
+    const child = prByKey.get(edge.to);
+    if (parent && child && parent.id !== child.id) {
+      edges.push({
+        from: parent.id,
+        to: child.id,
+        fromKey: edge.from,
+        toKey: edge.to,
+        kind: 'pr-base',
+        axis: topology.axis,
+      });
+    }
   }
 
   // plan step → intent item (the step advanced under that item — the reducer's
@@ -368,17 +413,67 @@ function buildEdges(nodes) {
 
 // chainDepth: how many base-ancestors a PR has, so the view can offset stacked
 // PRs rightward and the chain reads left→right. Cycle-guarded, deterministic.
-function assignChainDepth(nodes) {
-  const prByNumber = new Map();
-  for (const n of nodes) if (n.kind === 'pr' && !prByNumber.has(n.number)) prByNumber.set(n.number, n);
+function assignChainDepth(nodes, topology) {
+  const byKey = new Map(nodes.filter(n => n.kind === 'pr').map(n => [n.key, n]));
+  const parentByChild = new Map(topology.edges.map(edge => [edge.to, edge.from]));
   const depth = (n, seen) => {
-    if (n.base == null) return 0;
-    const base = prByNumber.get(n.base);
+    const parentKey = parentByChild.get(n.key);
+    if (!parentKey) return 0;
+    const base = byKey.get(parentKey);
     if (!base || base === n || seen.has(base.id)) return 0;
     seen.add(n.id);
     return 1 + depth(base, seen);
   };
   for (const n of nodes) if (n.kind === 'pr') n.chainDepth = depth(n, new Set());
+}
+
+function selectTopology(insights) {
+  const stack = insights.prStack ?? {};
+  // A post-recorded-envelope PR observation is not automatically a present-day
+  // snapshot. Only a reconciliation carrying an explicit fetch timestamp may
+  // select the current axis; this keeps historical replay gaps on recorded
+  // topology instead of relabeling late tape observations as "current".
+  const prs = stack.prs ?? [];
+  const recordedCount = prs.filter(pr => pr.recorded != null).length;
+  const currentCount = prs.filter(pr => pr.current != null).length;
+  const hasCurrent = prs.some(pr => Number.isFinite(pr.current?.fetchedAt))
+    || (recordedCount === 0 && currentCount > 0);
+  const axis = hasCurrent ? 'current' : 'recorded';
+  return {
+    axis,
+    roots: [...(stack[`${axis}Roots`] ?? [])],
+    edges: (stack[`${axis}Edges`] ?? []).map(edge => ({ ...edge })),
+  };
+}
+
+function semanticProjection(insights) {
+  const disposition = buildSessionDisposition(insights);
+
+  const pointEvidence = (insights.toolCalls?.pointObservations ?? []).map(event => ({
+    id: event.id ?? `tool-point:${event.t}`,
+    kind: 'point',
+    label: event.tool ? `${event.tool}: ${event.text ?? 'recorded observation'}` : (event.text ?? 'Recorded tool observation'),
+    startT: event.t,
+    endT: event.t,
+    outcome: 'observation only',
+    provenance: 'Recorded post-tool observation',
+    confidence: 'explicit point; duration unknown',
+  }));
+  const lifecycles = (insights.toolCalls?.lifecycles ?? []).map((tool, index) => ({
+    id: tool.key?.join(':') ?? `tool-lifecycle:${index}`,
+    kind: 'lifecycle',
+    label: `${tool.tool ?? 'Tool'}: ${tool.outcome ?? 'unknown'}`,
+    startT: tool.startT,
+    endT: tool.endT,
+    outcome: tool.outcome ?? 'unknown',
+    provenance: 'Recorded tool lifecycle',
+    confidence: 'explicit',
+  }));
+  return {
+    ...disposition,
+    phases: (insights.phases ?? []).map(phase => ({ ...phase })),
+    toolEvidence: [...lifecycles, ...pointEvidence],
+  };
 }
 
 // --------------------------------------------------------------- collapse
@@ -445,17 +540,22 @@ function barycenterOrder(columns, edges) {
 
 // --------------------------------------------------------------- assembly
 
-export function buildGraphModel(events) {
+export function buildGraphModel(events, projectedInsights = null) {
   // Consumers sort by t (docs/EVENTS.md "Ordering"): a tape can arrive out of
   // order, and last-write-wins state (PR status, item column) must reflect the
   // latest fact by TIME, not by file position. Stable sort → equal t keeps order.
   const sorted = [...events].sort((a, b) => (a.t || 0) - (b.t || 0));
   const state = fold(sorted);
+  const insights = projectedInsights ?? buildSessionInsights(sorted, {
+    untilT: Infinity,
+    displayNow: sorted.at(-1)?.t ?? 0,
+  });
+  const topology = selectTopology(insights);
 
   const session = sessionNode(state);
   const plan = planNode(state);
   const intents = intentNodes(state);
-  const prs = prNodes(state);
+  const prs = prNodes(insights, topology, state);
   const steps = stepNodes(state);
   const now = nowNode(state);   // singular, transient — null unless the session is live
 
@@ -477,8 +577,8 @@ export function buildGraphModel(events) {
   if (now) placed.push(now);
 
   // Edges first (over the full node set), so base chains resolve before collapse.
-  assignChainDepth([...prs]);
-  let edges = buildEdges([session, ...placed]);
+  assignChainDepth(prs, topology);
+  let edges = buildEdges([session, ...placed], topology);
 
   // PRs that are the target of an item-pr/pr-base edge are "owned"; the rest are
   // top-level and hang off the session for containment.
@@ -538,6 +638,8 @@ export function buildGraphModel(events) {
   return {
     nodes,
     edges,
+    topology,
+    semantic: semanticProjection(insights),
     columns: COLUMNS.map((c, i) => ({ ...c, index: i, count: columns[i].length })),
   };
 }

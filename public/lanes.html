@@ -12,10 +12,10 @@
 </head>
 <body class="lanes-page">
 
-<header class="masthead">
+<header class="masthead lanes-masthead">
   <div class="brand">
-    <a class="home-link" href="/" title="board home">
-      <svg class="logo" width="16" height="16" viewBox="0 0 16 16"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0"/></svg>
+    <a class="home-link" id="brand-link" href="/" title="Board">
+      <svg class="logo" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0"/></svg>
       <span class="wordmark">nightshift</span>
     </a>
     <span class="crumb-sep">/</span>
@@ -25,31 +25,83 @@
     <span class="session-picker" id="session-picker" hidden></span>
     <span class="agent-badge" id="agent-badge" hidden></span>
   </div>
-  <div class="instruments">
-    <span class="lanes-legend" id="lanes-legend">
-      <span class="lg"><i class="lg-swatch lg-working"></i>working</span>
-      <span class="lg"><i class="lg-swatch lg-idle"></i>idle</span>
-      <span class="lg"><i class="lg-swatch lg-attention"></i>attention</span>
-      <span class="lg"><i class="lg-mark lg-commit"></i>commit</span>
-      <span class="lg"><i class="lg-mark lg-pr"></i>PR</span>
-      <span class="lg"><i class="lg-mark lg-fail"></i>CI fail</span>
-    </span>
-    <button type="button" class="compress-toggle" id="compress-toggle" aria-pressed="true">
-      <svg class="ct-glyph" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 3.5 2.5 8 6 12.5"/><path d="M10 3.5 13.5 8 10 12.5"/></svg>
-      <span class="ct-label">compress idle</span>
-    </button>
-    <a class="icon-btn" id="board-link" href="/" title="open the board">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="3.4" height="12" rx="1"/><rect x="6.3" y="2" width="3.4" height="8" rx="1"/><rect x="11.1" y="2" width="3.4" height="10" rx="1"/></svg>
-    </a>
-  </div>
+  <nav class="lanes-nav" aria-label="Session views">
+    <a id="board-link" href="/">Board</a>
+    <a id="story-link" href="/story">Story</a>
+    <a class="active" href="/lanes" aria-current="page">Lanes</a>
+    <a id="graph-link" href="/graph">Graph</a>
+  </nav>
 </header>
 
+<section class="lanes-overview" aria-label="Forensic session overview">
+  <div id="lanes-summary" aria-label="Session summary"></div>
+  <ul class="phase-summary" id="phase-summary" aria-label="Semantic phase totals"></ul>
+  <div class="lanes-controls" aria-label="Timeline controls">
+    <button type="button" id="preflight-toggle" class="lanes-control" aria-expanded="true" aria-controls="lanes-canvas">Preflight substages</button>
+    <label class="lanes-check"><input type="checkbox" id="item-overlay-toggle"> Item attribution overlay</label>
+    <label class="lanes-check"><input type="checkbox" id="activity-overlay-toggle"> Event activity overlay</label>
+    <details class="lanes-legend" id="lanes-legend">
+      <summary>Legend and meanings</summary>
+      <div class="legend-grid">
+        <section aria-label="Semantic states">
+          <h3>Semantic state</h3>
+          <span><i class="legend-swatch state-coding"></i>Coding</span>
+          <span><i class="legend-swatch state-testing"></i>Testing</span>
+          <span><i class="legend-swatch state-preflight"></i>Preflight</span>
+          <span><i class="legend-swatch state-other"></i>Other</span>
+          <span><i class="legend-swatch state-waiting"></i>Waiting</span>
+          <span><i class="legend-swatch state-idle"></i>Idle</span>
+          <span><i class="legend-swatch state-unknown"></i>Unknown</span>
+        </section>
+        <section aria-label="Confidence textures">
+          <h3>Confidence texture</h3>
+          <span><i class="legend-texture confidence-explicit"></i>Explicit</span>
+          <span><i class="legend-texture confidence-strong"></i>Strong inference</span>
+          <span><i class="legend-texture confidence-heuristic"></i>Heuristic</span>
+        </section>
+        <section aria-label="Evidence markers">
+          <h3>Evidence marker</h3>
+          <span>Tool execution — measured start to outcome</span>
+          <span>Human input — waiting for the next instruction</span>
+          <span>Permission blocked — an explicit permission request</span>
+          <span>Tool outcome unknown — no terminal result was recorded</span>
+          <span>CI/review wait — explicit readiness evidence</span>
+          <span>PR transition — recorded ring, current square</span>
+          <span>Event activity — recorded producer events only; passive and reconcile traffic excluded</span>
+          <p>Unknown tool outcomes are not labeled blocked.</p>
+        </section>
+        <section aria-label="Preflight substages">
+          <h3>Preflight substages</h3>
+          <span>Prepare</span><span>Local validation</span><span>Visual QA</span>
+          <span>Self review</span><span>Cross-AI review</span><span>Publish PR</span>
+          <span>Readiness wait</span><span>Readiness fix</span>
+        </section>
+      </div>
+    </details>
+  </div>
+</section>
+
 <main class="lanes-main" id="lanes-main">
-  <canvas id="lanes-canvas"></canvas>
-  <div class="lanes-tooltip" id="lanes-tooltip" hidden></div>
-  <div class="lanes-empty" id="lanes-empty" hidden>no events on this tape</div>
-  <div class="lanes-hint">scroll to zoom · drag to pan · click a mark to replay</div>
+  <div class="timeline-shell" id="timeline-shell">
+    <canvas id="lanes-canvas" aria-hidden="true"></canvas>
+    <div class="segment-layer" id="segment-layer" role="group" aria-label="Inspectable timeline segments"></div>
+    <div class="lanes-tooltip" id="lanes-tooltip" role="tooltip" hidden></div>
+    <div class="lanes-state" id="lanes-loading" role="status">Loading recorded session…</div>
+    <div class="lanes-state" id="lanes-empty" aria-hidden="true" hidden>No recorded events at this replay point.</div>
+    <div class="lanes-state lanes-error" id="lanes-error" role="alert" hidden>Unable to load this session.</div>
+  </div>
 </main>
+
+<aside class="evidence-drawer" id="evidence-drawer" aria-labelledby="evidence-title" aria-live="polite" hidden>
+  <header>
+    <div>
+      <p class="evidence-kicker">Inspectable evidence</p>
+      <h2 id="evidence-title">Timeline evidence</h2>
+    </div>
+    <button type="button" id="evidence-close" aria-label="Close evidence">×</button>
+  </header>
+  <div class="evidence-body" id="evidence-body"></div>
+</aside>
 
 <script type="module" src="lanes.js"></script>
 </body>

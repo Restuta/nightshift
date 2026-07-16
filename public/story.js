@@ -1,69 +1,209 @@
-// /story — the chaptered recap of a whole session: open it in the morning and
-// understand the night in a minute. A one-shot read-only view (like /lanes):
-// fetch the tape once, fold it twice — the pure reducer for the header, the pure
-// digest for the narrative — lay the chapters out with story-model, and render.
-// This file stays thin: fetch, fold, render, format. Every derivation with
-// judgment in it lives in digest.js / story-model.js where it is tested.
-//
-// ?t=<ms> renders "the story so far" at that moment (untilT into buildDigest) —
-// the page never fabricates facts from wall-clock now; Date is used only to
-// FORMAT recorded timestamps.
+// /story is the calm morning report for one canonical session prefix. Session
+// insights own clocks, PR truth, lifecycle, progress, phases, and provenance;
+// digest remains only the chapter/dialogue projection beneath that report.
 
 import { fold } from './reducer.js';
 import { buildDigest } from './digest.js';
-import { buildStoryBlocks, activeSegments } from './story-model.js';
-import { dayBoundaries } from './lanes-model.js';
+import { buildStoryBlocks, buildStoryReport, buildStoryNarrativeEvents } from './story-model.js';
+import { buildSessionInsights } from './session-insights-model.js';
+import { buildSummaryViewModel, summaryHTML } from './session-summary.js';
+import { parseViewContext, viewHref } from './session-view-context.js';
 import { initSessionPicker } from './session-picker.js';
 
-const $ = sel => document.querySelector(sel);
+const $ = selector => document.querySelector(selector);
+const viewContext = parseViewContext(location.search);
 
-let sessionId = new URLSearchParams(location.search).get('session');
-let untilT = (() => {
-  const raw = new URLSearchParams(location.search).get('t');
-  const n = raw == null ? NaN : Number(raw);
-  return Number.isFinite(n) ? n : Infinity;
-})();
+let sessionId = viewContext.session;
 let sessionsMeta = [];
-let loadSeq = 0;        // stale async guard — only the newest load may render
+let loadSeq = 0;
 
-// ------------------------------------------------------------------ format
-const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => (
-  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const pad = n => String(n).padStart(2, '0');
-const clockT = t => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const dayLabel = t => { const d = new Date(t); return `${DOW[d.getDay()]}, ${MON[d.getMonth()]} ${d.getDate()}`; };
-const dateTime = t => { const d = new Date(t); return `${MON[d.getMonth()]} ${d.getDate()} ${clockT(t)}`; };
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, character => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+})[character]);
+const pad = value => String(value).padStart(2, '0');
+const clockT = t => {
+  const date = new Date(t);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const dayLabel = t => {
+  const date = new Date(t);
+  return `${DAYS[date.getDay()]}, ${MONTHS[date.getMonth()]} ${date.getDate()}`;
+};
+const dateTime = t => {
+  const date = new Date(t);
+  return `${MONTHS[date.getMonth()]} ${date.getDate()} ${clockT(t)}`;
+};
+const timestampText = t => Number.isFinite(t) ? new Date(t).toLocaleString() : 'Unavailable';
+const titleCase = value => String(value ?? 'unknown')
+  .replaceAll('_', ' ')
+  .replace(/\b\w/g, character => character.toUpperCase());
+const truncate = (value, length) => {
+  const text = String(value ?? '');
+  return text.length > length ? `${text.slice(0, length - 1)}…` : text;
+};
 
-// Decimal hours everywhere ("9.1h"), minutes under an hour — the ledger, gap
-// separators, and chapter durations all speak the same unit.
-function fmtSpan(ms) {
-  if (!(ms > 0)) return '0m';
-  const h = ms / 3600e3;
-  if (h >= 1) return `${h.toFixed(1)}h`;
-  const m = Math.floor(ms / 60e3);
-  return m >= 1 ? `${m}m` : `${Math.floor(ms / 1000)}s`;
+function durationText(ms) {
+  if (!(ms > 0)) return '0s';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
-const fmtCount = n => n >= 10000 ? `${Math.round(n / 1000)}k`
-  : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
-const truncate = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
-// Deep link into board replay at an exact recorded moment — the through-line
-// shared with /report: every claim on this page is one click from the evidence.
-const replayHref = t => `/?session=${encodeURIComponent(sessionId)}&t=${Math.round(t)}`;
+function countText(value) {
+  const number = Number(value) || 0;
+  if (number >= 10_000) return `${Math.round(number / 1000)}k`;
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}k`;
+  return String(number);
+}
 
-// --------------------------------------------------------------- data load
+function replayHref(t) {
+  return viewHref('/', {
+    ...viewContext,
+    session: sessionId,
+    cursorT: Number.isFinite(t) ? Math.round(t) : viewContext.cursorT,
+    mode: 'replay',
+  });
+}
+
+function syncNavigation(insights = null) {
+  viewContext.session = sessionId;
+  $('#home-link').href = viewHref('/', viewContext);
+  $('#nav-board').href = viewHref('/', viewContext);
+  $('#nav-lanes').href = viewHref('/lanes', viewContext);
+  $('#nav-graph').href = viewHref('/graph', viewContext);
+  $('#nav-report').href = viewHref('/report', viewContext);
+
+  const pill = $('#asof-pill');
+  pill.hidden = viewContext.mode !== 'replay';
+  if (!pill.hidden) {
+    const asOf = viewContext.asOfT ?? viewContext.cursorT ?? insights?.asOfT;
+    pill.textContent = Number.isFinite(asOf) ? `as of ${dateTime(asOf)}` : 'replay cutoff';
+    pill.href = viewHref('/story', {
+      session: sessionId,
+      cursorT: null,
+      cutoffT: null,
+      asOfT: null,
+      mode: 'live',
+    });
+  }
+}
+
+function setPageState(state, message = '') {
+  const loading = $('#story-loading');
+  const error = $('#story-error');
+  const emptyElement = $('#story-empty');
+  const empty = state === 'empty';
+  loading.hidden = state !== 'loading';
+  error.hidden = state !== 'error';
+  error.textContent = state === 'error' ? message : '';
+  emptyElement.hidden = !empty;
+  emptyElement.setAttribute('aria-hidden', String(!empty));
+  for (const selector of ['#story-summary', '#morning-report', '#ledger', '#chapters']) {
+    $(selector).hidden = state !== 'ready';
+  }
+}
+
+function clearSessionView() {
+  document.title = 'story';
+  $('#session-title').textContent = '';
+  const badge = $('#agent-badge');
+  badge.textContent = '';
+  badge.className = 'agent-badge';
+  badge.hidden = true;
+  $('#story-summary').replaceChildren();
+  $('#story-headline').textContent = '';
+  const disposition = $('#story-disposition');
+  disposition.replaceChildren();
+  disposition.removeAttribute('data-state');
+  $('#story-checklist').replaceChildren();
+  $('#story-roadmap').replaceChildren();
+  $('#story-stale-warning').textContent = '';
+  $('#story-stale-warning').hidden = true;
+  $('#story-phase-totals').replaceChildren();
+  $('#story-intervals').replaceChildren();
+  $('#story-pr-stack').replaceChildren();
+  $('#ledger').replaceChildren();
+  $('#chapters-head').textContent = '';
+  $('#blocks').replaceChildren();
+}
+
+async function loadSession(id) {
+  sessionId = id || null;
+  viewContext.session = sessionId;
+  syncNavigation();
+  clearSessionView();
+  setPageState('loading');
+  const sequence = ++loadSeq;
+  const query = sessionId ? `?session=${encodeURIComponent(sessionId)}` : '';
+  try {
+    const response = await fetch(`/events${query}`);
+    if (!response.ok) throw new Error(`events request failed (${response.status})`);
+    const text = await response.text();
+    if (sequence !== loadSeq) return;
+
+    const events = text.split('\n').filter(Boolean).map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(event => event && Number.isFinite(event.t) && typeof event.type === 'string')
+      .sort((a, b) => a.t - b.t);
+    const displayNow = viewContext.mode === 'replay'
+      ? (viewContext.cursorT ?? viewContext.cutoffT ?? events.at(-1)?.t ?? 0)
+      : Date.now();
+    const insights = buildSessionInsights(events, {
+      untilT: viewContext.cutoffT ?? Infinity,
+      asOfT: viewContext.asOfT,
+      displayNow,
+    });
+
+    if (!insights.visiblePrefix.length) {
+      setPageState('empty');
+      return;
+    }
+
+    const state = fold(insights.visiblePrefix);
+    const meta = sessionsMeta.find(session => session.id === sessionId) ?? null;
+    const title = state.session.title || meta?.title || sessionId || 'session';
+    document.title = `story — ${title}`;
+    $('#session-title').textContent = title;
+    const agent = state.session.agent || meta?.agent;
+    const badge = $('#agent-badge');
+    badge.hidden = !agent;
+    badge.textContent = agent || '';
+    if (agent) badge.className = `agent-badge agent-${agent}`;
+    syncNavigation(insights);
+
+    const digest = buildDigest(buildStoryNarrativeEvents(insights), Infinity);
+    render(digest, insights);
+    setPageState('ready');
+  } catch (error) {
+    if (sequence !== loadSeq) return;
+    clearSessionView();
+    setPageState('error', `Unable to load this session. ${error.message}`);
+  }
+}
+
 async function load() {
+  syncNavigation();
+  // Replay deliberately skips the present-day session index and all live
+  // refresh paths. One /events read is cut to the shared replay boundary.
+  if (viewContext.mode === 'replay') {
+    $('#session-picker').hidden = true;
+    await loadSession(sessionId);
+    return;
+  }
+
   const picker = await initSessionPicker({
     mount: $('#session-picker'),
     currentId: sessionId,
     onSelect: id => {
-      const p = new URLSearchParams(location.search);
-      p.set('session', id);
-      p.delete('t');            // a scrub time is meaningless on another tape
-      untilT = Infinity;
-      history.replaceState(null, '', '?' + p.toString());
+      sessionId = id;
+      viewContext.session = id;
+      history.replaceState(null, '', viewHref('/story', viewContext));
       loadSession(id);
     },
   });
@@ -72,202 +212,278 @@ async function load() {
   await loadSession(picker.current);
 }
 
-async function loadSession(id) {
-  sessionId = id;
-  const seq = ++loadSeq;
-  const q = sessionId ? '?session=' + encodeURIComponent(sessionId) : '';
-  let text = '';
-  try { text = await (await fetch('/events' + q)).text(); } catch { text = ''; }
-  if (seq !== loadSeq) return;   // a newer load superseded this one
-  const events = text.split('\n').filter(Boolean).map(l => {
-    try { return JSON.parse(l); } catch { return null; }
-  }).filter(ev => ev && typeof ev.t === 'number' && typeof ev.type === 'string');
-
-  const state = fold(events);
-  const meta = sessionsMeta.find(s => s.id === sessionId) || null;
-  const title = state.session.title || (meta && meta.title) || sessionId || 'session';
-  document.title = `story — ${title}`;
-  $('#session-title').textContent = title;
-  const agent = state.session.agent || (meta && meta.agent);
-  const badge = $('#agent-badge');
-  badge.hidden = !agent;
-  if (agent) { badge.textContent = agent; badge.className = 'agent-badge agent-' + agent; }
-  updateNav();
-
-  const digest = buildDigest(events, untilT);
-  render(digest);
+function render(digest, insights) {
+  const report = buildStoryReport(insights);
+  $('#story-summary').innerHTML = summaryHTML(buildSummaryViewModel(insights));
+  renderMorningReport(report);
+  $('#ledger').innerHTML = ledgerHTML(digest, insights, report);
+  const episodeCount = digest.totals.episodes;
+  const beatCount = digest.totals.beats;
+  $('#chapters-head').innerHTML = `chapters <span class="chn">${digest.chapters.length}</span>`
+    + `<span class="chapters-mix">${episodeCount} episode${episodeCount === 1 ? '' : 's'} · ${beatCount} beat${beatCount === 1 ? '' : 's'} · plus unattached activity</span>`;
+  const prsByNumber = new Map(report.prs.map(pr => [pr.number, pr]));
+  $('#blocks').innerHTML = buildStoryBlocks(digest.chapters, digest.gaps, insights)
+    .map(block => blockHTML(block, prsByNumber)).join('');
 }
 
-function updateNav() {
-  const q = '?session=' + encodeURIComponent(sessionId || '');
-  $('#home-link').href = '/' + q;
-  $('#nav-board').href = '/' + q;
-  $('#nav-lanes').href = '/lanes' + q;
-  $('#nav-graph').href = '/graph' + q;
-  $('#nav-report').href = '/report' + q;
-  const pill = $('#asof-pill');
-  pill.hidden = !Number.isFinite(untilT);
-  if (!pill.hidden) {
-    pill.textContent = `as of ${dateTime(untilT)}`;
-    pill.href = '/story' + q;
-  }
+function evidenceHTML(evidenceEventIds, confidence) {
+  const ids = evidenceEventIds.length ? evidenceEventIds.join(', ') : 'No event ids recorded';
+  return `<details class="story-evidence">
+    <summary>Evidence and confidence</summary>
+    <p><strong>${escapeHTML(confidence)}</strong></p>
+    <p>${escapeHTML(ids)}</p>
+  </details>`;
 }
 
-// ------------------------------------------------------------------ render
-function render(digest) {
-  const empty = !digest.chapters.length;
-  $('#story-empty').hidden = !empty;
-  $('#ledger').hidden = empty;
-  $('#chapters').hidden = empty;
-  if (empty) return;
-  $('#ledger').innerHTML = ledgerHTML(digest);
-  const ep = digest.totals.episodes, bt = digest.totals.beats;
-  $('#chapters-head').innerHTML =
-    `chapters <span class="chn">${digest.chapters.length}</span>` +
-    `<span class="chapters-mix">${ep} episode${ep === 1 ? '' : 's'} · ${bt} beat${bt === 1 ? '' : 's'}</span>`;
-  $('#blocks').innerHTML = buildStoryBlocks(digest.chapters, digest.gaps)
-    .map(blockHTML).join('');
+function renderMorningReport(report) {
+  $('#story-headline').textContent = report.headline;
+  const disposition = $('#story-disposition');
+  disposition.dataset.state = report.disposition.state;
+  disposition.innerHTML = `<div>
+      <span class="story-status">${escapeHTML(report.disposition.label)}</span>
+      <p>${escapeHTML(report.disposition.detail)}</p>
+    </div>
+    <dl>
+      <div><dt>Current blocker</dt><dd>${escapeHTML(report.disposition.currentBlocker)}</dd></div>
+      <div><dt>Next action</dt><dd>${escapeHTML(report.disposition.nextAction)}</dd></div>
+      <div><dt>Confidence</dt><dd>${escapeHTML(report.disposition.confidence)}</dd></div>
+    </dl>
+    ${report.disposition.uncertainty ? `<aside class="story-uncertainty" aria-label="Lifecycle uncertainty">
+      <strong>${escapeHTML(report.disposition.uncertainty.label)}</strong>
+      <p>${escapeHTML(report.disposition.uncertainty.detail)} ${escapeHTML(report.disposition.uncertainty.confidence)}.</p>
+    </aside>` : ''}`;
+
+  $('#story-checklist').innerHTML = `<p class="story-progress-label">${escapeHTML(report.checklist.label)}</p>
+    <p>Still recorded in progress: <strong>${escapeHTML(report.checklist.remaining.join(', ') || 'none')}</strong></p>
+    ${evidenceHTML(report.checklist.evidenceEventIds, 'Recorded todo snapshot')}`;
+  $('#story-roadmap').innerHTML = `<p class="story-progress-label">${escapeHTML(report.roadmap.label)}</p>
+    <ul>${report.roadmap.milestones.map(milestone =>
+      `<li><strong>${escapeHTML(milestone.label)}</strong><span>${escapeHTML(milestone.progress)}</span></li>`).join('')}</ul>
+    <p class="story-assessment">${escapeHTML(report.roadmap.assessmentText)}</p>
+    ${evidenceHTML(report.roadmap.evidenceEventIds, report.roadmap.assessmentConfidence)}`;
+
+  const warning = $('#story-stale-warning');
+  warning.hidden = !report.roadmap.staleSnapshot;
+  warning.textContent = report.roadmap.staleWarning || '';
+
+  $('#story-phase-totals').innerHTML = report.phases.map(phase => `<li data-phase="${escapeHTML(phase.category)}">
+      <div><strong>${escapeHTML(titleCase(phase.category))}</strong><span>${durationText(phase.durationMs)} · ${phase.percent.toFixed(1)}% of recorded session</span></div>
+      ${evidenceHTML(phase.evidenceEventIds, phase.confidenceText)}
+    </li>`).join('');
+  $('#story-intervals').innerHTML = report.intervals.map(interval => `<article>
+      <strong>${escapeHTML(interval.label)}</strong>
+      <span>${durationText(interval.durationMs)} · ${escapeHTML(interval.confidence)} confidence</span>
+      <a href="${escapeHTML(replayHref(interval.startT))}">Replay interval evidence</a>
+    </article>`).join('');
+  $('#story-pr-stack').innerHTML = prStackHTML(report.prs);
 }
 
-// The ledger: wall vs active as the hero (active is the honest number — wall
-// includes every hour the human slept), a wall-clock strip of activity bursts,
-// then the countable facts.
-function ledgerHTML(d) {
-  const t = d.totals;
-  const stats = [
-    [String(t.prompts), 'prompts'],
-    [String(t.prsMerged), 'PRs merged'],
-    [String(t.commits), 'commits'],
-    [fmtCount(t.edits), 'edits'],
+function prStackHTML(prs) {
+  const preferred = ['Plan', 'M1a', 'M1b', 'M1c', 'M1d', 'M2', 'M3', 'Unassigned'];
+  const milestones = new Set(prs.map(pr => pr.milestone));
+  const order = [
+    ...preferred.filter(milestone => milestones.has(milestone)),
+    ...[...milestones].filter(milestone => !preferred.includes(milestone)).sort(),
   ];
-  let add = 0, del = 0;
-  for (const ch of d.chapters) for (const c of ch.commits) { add += c.add || 0; del += c.del || 0; }
-  const lines = (add || del)
-    ? `<span class="lstat"><b><em class="add">+${fmtCount(add)}</em> <em class="del">−${fmtCount(del)}</em></b><i>lines</i></span>`
+  return order.flatMap(milestone => {
+    const group = prs.filter(pr => pr.milestone === milestone);
+    if (!group.length) return [];
+    return [`<section class="story-pr-group" aria-labelledby="story-pr-${escapeHTML(milestone)}">
+      <h3 id="story-pr-${escapeHTML(milestone)}">${escapeHTML(milestone)}</h3>
+      ${group.map(storyPrHTML).join('')}
+    </section>`];
+  }).join('');
+}
+
+function storyPrHTML(pr) {
+  const github = pr.url ? `<a href="${escapeHTML(pr.url)}" target="_blank" rel="noreferrer">Open PR #${pr.number} on GitHub</a>` : '';
+  const replay = Number.isFinite(pr.replayT)
+    ? `<a href="${escapeHTML(replayHref(pr.replayT))}">Replay PR #${pr.number} evidence</a>` : '';
+  return `<article class="story-pr" data-state="${escapeHTML(pr.state)}">
+    <header>
+      <div><span>#${pr.number}</span><h4>${escapeHTML(pr.title || 'Untitled pull request')}</h4></div>
+      <strong>${escapeHTML(pr.progress)}</strong>
+    </header>
+    <p class="story-pr-milestone">Milestone: ${escapeHTML(pr.milestone)} · ${escapeHTML(pr.milestoneConfidence)}</p>
+    <dl class="story-pr-truth">
+      <div><dt>Recorded truth</dt><dd>${escapeHTML(pr.recordedTruth)}</dd></div>
+      <div><dt>Current truth</dt><dd>${escapeHTML(pr.currentTruth)}</dd></div>
+      <div><dt>Recorded stack</dt><dd>${escapeHTML(pr.recordedTopology)}</dd></div>
+      <div><dt>Current stack</dt><dd>${escapeHTML(pr.currentTopology)}</dd></div>
+      <div><dt>Provenance</dt><dd>${escapeHTML(pr.provenance)}</dd></div>
+    </dl>
+    <dl class="story-pr-times">
+      <div><dt>Occurred</dt><dd>${escapeHTML(timestampText(pr.occurredAt))}</dd></div>
+      <div><dt>Observed</dt><dd>${escapeHTML(timestampText(pr.observedAt))}</dd></div>
+      <div><dt>Recovery recorded</dt><dd>${escapeHTML(timestampText(pr.recordedAt))}</dd></div>
+      <div><dt>Recorded PR snapshot</dt><dd>${escapeHTML(timestampText(pr.recordedPrAt))}</dd></div>
+      <div><dt>Current PR snapshot</dt><dd>${escapeHTML(timestampText(pr.currentPrAt))}</dd></div>
+      <div><dt>Current fetched</dt><dd>${escapeHTML(timestampText(pr.currentFetchedAt))}</dd></div>
+    </dl>
+    ${pr.changedSinceRecording ? '<p class="story-pr-change">Current truth differs from the recorded snapshot.</p>' : ''}
+    ${evidenceHTML(pr.evidenceEventIds, pr.confidence)}
+    <div class="story-pr-links">${github}${replay}</div>
+  </article>`;
+}
+
+function ledgerHTML(digest, insights, report) {
+  const stats = [
+    [String(digest.totals.prompts), 'prompts'],
+    [String(report.prs.filter(pr => pr.state === 'open').length), 'PRs open'],
+    [String(report.prs.filter(pr => pr.state === 'merged').length), 'PRs merged'],
+    [String(digest.totals.commits), 'commits'],
+    [countText(digest.totals.edits), 'edits'],
+  ];
+  let additions = 0;
+  let deletions = 0;
+  for (const chapter of digest.chapters) {
+    for (const commit of chapter.commits) {
+      additions += commit.add || 0;
+      deletions += commit.del || 0;
+    }
+  }
+  const lines = additions || deletions
+    ? `<span class="lstat"><b><em class="add">+${countText(additions)}</em> <em class="del">−${countText(deletions)}</em></b><i>lines</i></span>`
     : '';
   return `<div class="ledger-hero">
       <div class="lh-time">
-        <b class="lh-num">${fmtSpan(d.wallMs)}</b><span class="lh-lab">wall</span>
+        <b class="lh-num">${durationText(insights.clocks.recordedSessionMs)}</b><span class="lh-lab">recorded session</span>
         <span class="lh-dot">·</span>
-        <b class="lh-num lh-active">${fmtSpan(d.activeMs)}</b><span class="lh-lab">active</span>
+        <b class="lh-num lh-active">${durationText(insights.clocks.observedActiveMs)}</b><span class="lh-lab">observed work</span>
       </div>
-      <div class="lh-range">${esc(dateTime(d.startT))} → ${esc(dateTime(d.endT))}</div>
+      <div class="lh-range">${escapeHTML(dateTime(insights.bounds.recordedStart))} → ${escapeHTML(dateTime(insights.bounds.recordedEnd))}</div>
     </div>
-    ${stripHTML(d)}
+    ${semanticStripHTML(insights)}
     <div class="ledger-stats">
-      ${stats.map(([v, l]) => `<span class="lstat"><b>${v}</b><i>${l}</i></span>`).join('')}
+      ${stats.map(([value, label]) => `<span class="lstat"><b>${value}</b><i>${label}</i></span>`).join('')}
       ${lines}
     </div>`;
 }
 
-// Thin activity strip: amber bursts on a quiet track — the same working/idle
-// palette as the /lanes session lane, so the two views read as one instrument.
-// Pure DOM; x is a percentage of the recorded wall span.
-function stripHTML(d) {
-  const span = Math.max(1, d.endT - d.startT);
-  const px = t => ((t - d.startT) / span * 100).toFixed(3) + '%';
-  const segs = activeSegments(d.startT, d.endT, d.gaps).map(s =>
-    `<i class="strip-seg" style="left:${px(s.fromT)};width:${(Math.max(0.15, (s.toT - s.fromT) / span * 100)).toFixed(3)}%"></i>`).join('');
-  const days = dayBoundaries(d.startT, d.endT);
-  const ticks = days.map(m => `<i class="strip-tick" style="left:${px(m)}"></i>`).join('');
-  const labels = days.map(m =>
-    `<span class="strip-daylab" style="left:${px(m)}">${esc(`${MON[new Date(m).getMonth()]} ${new Date(m).getDate()}`)}</span>`).join('');
-  return `<div class="strip" title="active bursts vs idle, over the wall clock">
-      <div class="strip-track">${segs}${ticks}</div>
-      ${days.length ? `<div class="strip-days">${labels}</div>` : ''}
-    </div>`;
+function semanticStripHTML(insights) {
+  const start = insights.bounds.recordedStart;
+  const span = Math.max(1, insights.bounds.recordedEnd - start);
+  const segments = insights.phases.map(phase => {
+    const left = ((phase.startT - start) / span * 100).toFixed(3);
+    const width = Math.max(0.15, (phase.endT - phase.startT) / span * 100).toFixed(3);
+    const label = `${titleCase(phase.wallCategory)} · ${durationText(phase.endT - phase.startT)} · ${phase.confidence} confidence`;
+    return `<i class="strip-seg" data-phase="${escapeHTML(phase.wallCategory)}" data-confidence="${escapeHTML(phase.confidence)}" style="left:${left}%;width:${width}%" title="${escapeHTML(label)}"></i>`;
+  }).join('');
+  return `<div class="strip" aria-label="Semantic phase strip"><div class="strip-track">${segments}</div></div>`;
 }
 
-function blockHTML(b) {
-  if (b.kind === 'gap') {
-    return `<div class="story-gap"><i></i><span>⏸ ${fmtSpan(b.ms)} idle</span><i></i></div>`;
+function blockHTML(block, prsByNumber) {
+  if (block.kind === 'gap') {
+    return '<div class="story-gap"><i></i><span>recorded-event gap</span><i></i></div>';
   }
-  if (b.kind === 'day') {
-    return `<div class="story-day"><span>${esc(dayLabel(b.t))}</span><i></i></div>`;
+  if (block.kind === 'day') {
+    return `<div class="story-day"><span>${escapeHTML(dayLabel(block.t))}</span><i></i></div>`;
   }
-  if (b.kind === 'beats') return beatsHTML(b.chapters);
-  return episodeHTML(b.chapter);
+  if (block.kind === 'beats') return beatsHTML(block.chapters);
+  if (block.kind === 'unattached') return unattachedHTML(block);
+  return episodeHTML(block.chapter, prsByNumber);
 }
 
-// Episode card — the unit of real work. The prompt is the title, VERBATIM: what
-// the human asked for is the only honest name for what happened next.
-function episodeHTML(ch) {
-  const chips = ch.prs.map(prChipHTML).join('');
+function episodeHTML(chapter, prsByNumber) {
+  const chips = chapter.prs.map(pr => prChipHTML(prsByNumber.get(pr.number) ?? pr)).join('');
   const meta = [];
-  if (ch.counts.commits) {
-    let add = 0, del = 0;
-    for (const c of ch.commits) { add += c.add || 0; del += c.del || 0; }
-    meta.push(`${ch.counts.commits} commit${ch.counts.commits === 1 ? '' : 's'}`);
-    if (add || del) meta.push(`<em class="add">+${fmtCount(add)}</em> <em class="del">−${fmtCount(del)}</em>`);
+  if (chapter.counts.commits) {
+    let additions = 0;
+    let deletions = 0;
+    for (const commit of chapter.commits) {
+      additions += commit.add || 0;
+      deletions += commit.del || 0;
+    }
+    meta.push(`${chapter.counts.commits} commit${chapter.counts.commits === 1 ? '' : 's'}`);
+    if (additions || deletions) meta.push(`<em class="add">+${countText(additions)}</em> <em class="del">−${countText(deletions)}</em>`);
   }
-  if (ch.counts.edits) meta.push(`${fmtCount(ch.counts.edits)} edits`);
-  const closer = ch.closer && ch.closer.text.trim()
-    ? `<blockquote class="ep-closer" title="the agent's last word in this chapter">${esc(ch.closer.text.trim())}</blockquote>`
+  if (chapter.counts.edits) meta.push(`${countText(chapter.counts.edits)} edits`);
+  const closer = chapter.closer?.text?.trim()
+    ? `<blockquote class="ep-closer" title="the agent's last word in this chapter">${escapeHTML(chapter.closer.text.trim())}</blockquote>`
     : '';
-  return `<article class="ep" data-t="${ch.startT}">
+  return `<article class="ep" data-t="${chapter.startT}">
     <header class="ep-head">
-      <a class="t-link" href="${esc(replayHref(ch.startT))}">${clockT(ch.startT)}</a>
-      ${ch.label ? `<span class="ep-turn">${esc(ch.label)}</span>` : ''}
-      <span class="ep-durs">${durText(ch)}</span>
+      <a class="t-link" href="${escapeHTML(replayHref(chapter.startT))}">${clockT(chapter.startT)}</a>
+      ${chapter.label ? `<span class="ep-turn">${escapeHTML(chapter.label)}</span>` : ''}
+      <span class="ep-durs">${chapterDurationText(chapter)}</span>
     </header>
-    <h4 class="ep-title">${esc(ch.title)}</h4>
+    <h4 class="ep-title">${escapeHTML(chapter.title)}</h4>
     ${chips ? `<div class="ep-chips">${chips}</div>` : ''}
     ${meta.length ? `<div class="ep-meta">${meta.join(' · ')}</div>` : ''}
     ${closer}
   </article>`;
 }
 
-// Active is the meaningful duration; wall appears only when idle inflated the
-// window enough to mislead (> 5min difference).
-function durText(ch) {
-  if (ch.wallMs - ch.activeMs < 5 * 60e3) return fmtSpan(ch.wallMs);
-  return `<b>${fmtSpan(ch.activeMs)} active</b> · ${fmtSpan(ch.wallMs)} wall`;
+function chapterDurationText(chapter) {
+  return `${durationText(chapter.wallMs)} chapter span`;
 }
 
-// Digest PRs carry no url (the tape may not have recorded one), so the chip is a
-// replay link to the PR's decisive moment — merge if it merged, else open.
 function prChipHTML(pr) {
   const state = pr.state || 'open';
-  const at = pr.mergedT != null ? pr.mergedT : (pr.openedT != null ? pr.openedT : null);
-  const cycle = pr.mergedT != null && pr.openedT != null
-    ? `<i>${fmtSpan(pr.mergedT - pr.openedT)}</i>` : '';
-  const label = `#${pr.number} — ${state}${pr.title ? ' — ' + pr.title : ''}`;
-  const body = `<b>#${pr.number}</b><span>${esc(truncate(pr.title, 36))}</span>${cycle}`;
-  if (at == null) return `<span class="prchip pr-${esc(state)}" title="${esc(label)}">${body}</span>`;
-  return `<a class="prchip pr-${esc(state)}" href="${esc(replayHref(at))}" title="${esc(label + ' — click to replay')}">${body}</a>`;
+  const title = pr.title || '';
+  const canonical = 'recordedTruth' in pr;
+  if (!canonical) {
+    const at = pr.mergedT ?? pr.openedT;
+    const body = `<b>#${pr.number}</b><span>${escapeHTML(truncate(title, 36))}</span>`;
+    return Number.isFinite(at)
+      ? `<a class="prchip pr-${escapeHTML(state)}" href="${escapeHTML(replayHref(at))}">${body}</a>`
+      : `<span class="prchip pr-${escapeHTML(state)}">${body}</span>`;
+  }
+  const changedTruth = pr.changedSinceRecording
+    ? `<small><b>Recorded</b> ${escapeHTML(pr.recordedTruth.replace(/^Recorded:\s*/, ''))}</small>
+       <small><b>Current</b> ${escapeHTML(pr.currentTruth.replace(/^Current:\s*/, ''))}</small>` : '';
+  const github = pr.url ? `<a href="${escapeHTML(pr.url)}" target="_blank" rel="noreferrer">GitHub</a>` : '';
+  const replay = Number.isFinite(pr.replayT) ? `<a href="${escapeHTML(replayHref(pr.replayT))}">replay</a>` : '';
+  return `<span class="prchip pr-${escapeHTML(state)}">
+    <span class="prchip-head"><b>#${pr.number}</b><span>${escapeHTML(truncate(title, 36))}</span></span>
+    ${changedTruth}
+    <span class="prchip-links">${github}${replay}</span>
+  </span>`;
 }
 
-// Beat run — conversation, not work. One quiet line per prompt with the agent's
-// reply riding along; the single-line ellipsis keeps the run tight, and the
-// recorder caps say-text anyway, so the visible head of the reply is its gist.
+function unattachedHTML(block) {
+  return `<article class="ep unattached" id="unattached-activity">
+    <header class="ep-head"><span class="ep-turn">Attribution gap</span><span class="ep-durs">${escapeHTML(block.confidence)}</span></header>
+    <h4 class="ep-title">${escapeHTML(block.title)}</h4>
+    <p class="unattached-copy">These artifacts are canonical session facts, but no recorded item owns them. They stay visible instead of disappearing from the narrative.</p>
+    <div class="ep-chips">${block.prs.map(unattachedPrChipHTML).join('')}</div>
+    ${block.activity.length ? `<p class="ep-meta">${block.activity.length} producer event${block.activity.length === 1 ? '' : 's'} without item attribution</p>` : ''}
+    ${evidenceHTML(block.evidenceEventIds, block.confidence)}
+  </article>`;
+}
+
+function unattachedPrChipHTML(pr) {
+  const github = pr.url ? `<a href="${escapeHTML(pr.url)}" target="_blank" rel="noreferrer">GitHub</a>` : '';
+  const replay = Number.isFinite(pr.replayT) ? `<a href="${escapeHTML(replayHref(pr.replayT))}">replay</a>` : '';
+  return `<span class="prchip pr-${escapeHTML(pr.state)}">
+    <span class="prchip-head"><b>#${pr.number}</b><span>${escapeHTML(truncate(pr.title, 36))}</span></span>
+    <small>${escapeHTML(pr.provenance)} · ${escapeHTML(pr.confidence)}</small>
+    <span class="prchip-links">${github}${replay}</span>
+  </span>`;
+}
+
 function beatsHTML(chapters) {
-  const rows = chapters.map(b => {
-    const replyText = b.closer ? b.closer.text.trim() : '';
-    const reply = replyText
-      ? `<span class="beat-reply"> — ${esc(truncate(replyText, 200))}</span>` : '';
-    return `<div class="beat" data-t="${b.startT}">
-      <a class="t-link" href="${esc(replayHref(b.startT))}">${clockT(b.startT)}</a>
-      <p class="beat-line"><span class="beat-prompt">${esc(b.title)}</span>${reply}</p>
+  const rows = chapters.map(chapter => {
+    const replyText = chapter.closer?.text?.trim() || '';
+    const reply = replyText ? `<span class="beat-reply"> — ${escapeHTML(truncate(replyText, 200))}</span>` : '';
+    return `<div class="beat" data-t="${chapter.startT}">
+      <a class="t-link" href="${escapeHTML(replayHref(chapter.startT))}">${clockT(chapter.startT)}</a>
+      <p class="beat-line"><span class="beat-prompt">${escapeHTML(chapter.title)}</span>${reply}</p>
     </div>`;
   }).join('');
   return `<div class="beats">${rows}</div>`;
 }
 
-// ------------------------------------------------------------ interactions
-// A chapter is a link into replay at its opening moment; inner anchors (time
-// stamps, PR chips) keep their own more precise targets.
-$('#blocks').addEventListener('click', e => {
-  if (e.target.closest('a')) return;
-  const sel = window.getSelection();
-  if (sel && !sel.isCollapsed) return;   // copying a prompt is not a navigation
-  const el = e.target.closest('[data-t]');
-  if (el) location.href = replayHref(Number(el.dataset.t));
+$('#blocks').addEventListener('click', event => {
+  if (event.target.closest('a, button, summary, details')) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed) return;
+  const element = event.target.closest('[data-t]');
+  if (element) location.href = replayHref(Number(element.dataset.t));
 });
 
-// v1 live-follow: one-shot render, refreshed when the tab becomes visible again
-// — the "open in the morning" moment. No SSE here.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && sessionId) loadSession(sessionId);
+  if (viewContext.mode === 'live' && !document.hidden && sessionId) loadSession(sessionId);
 });
 
 load();

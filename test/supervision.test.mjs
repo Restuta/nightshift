@@ -45,6 +45,17 @@ function whoami(port) {
   });
 }
 
+function getStatus(port, pathname) {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port, path: pathname, timeout: 1000 }, res => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
 async function waitFor(fn, { tries = 60, gap = 50 } = {}) {
   for (let i = 0; i < tries; i++) { const v = await fn(); if (v) return v; await sleep(gap); }
   return null;
@@ -170,6 +181,29 @@ test('server --managed writes board.json atomically and serves its sessions dir'
     const who = await whoami(port);
     assert.ok(who && who.nightshift, '/whoami identifies a nightshift board');
     assert.equal(who.dir, sessionsDir, '/whoami reports the served sessions dir');
+  } finally {
+    killQuiet(child.pid);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('replay-only /events requests never register or trigger current reconciliation', async () => {
+  const dir = mkTmp();
+  const nsHome = path.join(dir, '.nightshift');
+  const sessionsDir = path.join(nsHome, 'sessions');
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionsDir, 'replay.jsonl'), JSON.stringify({
+    t: 1, source: 'hook', type: 'pr_ref', repo: 'org/replay', number: 1,
+  }) + '\n');
+  const { child, port, up } = await startManaged(nsHome, sessionsDir);
+  try {
+    assert.ok(up, 'managed server up');
+    assert.equal(await getStatus(port, '/events?session=replay'), 200);
+    await sleep(50);
+    assert.equal(fs.existsSync(path.join(nsHome, 'poller-sessions')), false,
+      'reading a historical tape does not make it a live registered session');
+    assert.equal(fs.existsSync(path.join(nsHome, 'poller-leases')), false,
+      'replay does not acquire a writer lease or launch reconciliation');
   } finally {
     killQuiet(child.pid);
     fs.rmSync(dir, { recursive: true, force: true });

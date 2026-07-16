@@ -52,6 +52,7 @@ const CMD =
   `then node "${HOOK}"; fi; true`;
 const EVENTS = {
   SessionStart: null, SessionEnd: null, UserPromptSubmit: null, Stop: null, Notification: null,
+  PreToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash',
   PostToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash',
 };
 
@@ -99,13 +100,16 @@ if (fs.existsSync(settingsPath) && !fs.existsSync(settingsPath + '.nightshift-ba
   fs.copyFileSync(settingsPath, settingsPath + '.nightshift-bak');
 }
 
-// Drop any prior version of our group first, then add the current one — this
-// makes re-runs idempotent and migrates an older (e.g. ungated) command.
+// Update our group at its existing index so every foreign group keeps the same
+// position. Append only when absent. This is idempotent and still migrates an
+// older command/matcher without invalidating ordering-sensitive user config.
 for (const [event, matcher] of Object.entries(EVENTS)) {
-  const groups = (settings.hooks[event] || []).filter(g => !isOurs(g));
+  const groups = settings.hooks[event] || [];
   const group = { hooks: [{ type: 'command', command: CMD }] };
   if (matcher) group.matcher = matcher;
-  groups.push(group);
+  const ourIdx = groups.findIndex(isOurs);
+  if (ourIdx === -1) groups.push(group);
+  else groups[ourIdx] = group;
   settings.hooks[event] = groups;
 }
 

@@ -1,94 +1,59 @@
-// The /graph app shell: load the PURE models at runtime, fetch the tape, keep
-// it live over SSE, and render the React Flow canvas + timeline. All judgment
-// about WHAT the graph is stays in public/graph-model.js and public/digest.js
-// (never bundled); this file owns fetching, live wiring, scrub state, and
-// interaction — the same division of labor as the SVG view it replaces.
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import {
-  ReactFlow, MiniMap, Controls, Panel, applyNodeChanges,
-} from '@xyflow/react';
+import { ReactFlow, MiniMap, Controls, Panel, applyNodeChanges } from '@xyflow/react';
 import { nodeTypes } from './nodes/index.jsx';
 import { buildFlow, sigOf } from './flow-build.js';
 import Timeline from './Timeline.jsx';
+import Summary from './Summary.jsx';
 import { loadModels } from './models.js';
-import { ageText, costText, hhmm, dateTime, fmtSpan, fmtNum } from './format.js';
+import {
+  buildReplayWindow,
+  contextForScrub,
+  selectGraphSession,
+  shouldOpenGraphStream,
+} from './runtime.js';
 
-const urlq = () => new URLSearchParams(location.search);
+const initialSession = new URLSearchParams(location.search).get('session');
 
-const BADGE = {
-  live: ['is-live', 'LIVE'],
-  stale: ['is-stale', null], // text carries dataEndsAt
-  idle: ['is-idle', 'IDLE'],
-  attention: ['is-attn', 'NEEDS YOU'],
-  ended: ['is-stale', 'ENDED'],
-};
-
-// ------------------------------------------------------------------ tooltip
-function tooltipFor(n, models, clock) {
-  const hasSize = x => (x.add || 0) > 0 || (x.del || 0) > 0;
-  if (n.kind === 'pr') {
-    const label = (n.repo ? n.repo + '#' : '#') + n.number;
-    const bits = [`${n.prState}`];
-    if (n.ci) bits.push(`CI ${n.ci}`);
-    const when = n.mergedAt ? `merged ${hhmm(n.mergedAt)}` : n.openedAt ? `opened ${hhmm(n.openedAt)}` : '';
-    const size = hasSize(n) ? `\n+${fmtNum(n.add)} / −${fmtNum(n.del)} lines` : '';
-    return [label, (n.title || '') + '\n' + bits.join(' · ') + (when ? '\n' + when : '') + size + (n.base != null ? `\nbased on #${n.base}` : '')];
+function tooltipFor(node) {
+  if (node.kind === 'pr') {
+    return {
+      head: `${node.repo ? `${node.repo}#` : '#'}${node.number}`,
+      body: [
+        node.title,
+        node.currentTruth,
+        node.recordedTruth,
+        `Provenance: ${node.provenance}`,
+        `Confidence: ${node.confidence}`,
+      ].filter(Boolean).join('\n'),
+    };
   }
-  if (n.kind === 'intent') {
-    return [models.turnLabel(n.itemId), `${n.title}\n${n.status}${n.abandoned ? ' · abandoned?' : ''}\n${n.commits} commits · ${n.edits} edits · +${fmtNum(n.add)} / −${fmtNum(n.del)} lines`];
+  if (node.kind === 'plan') {
+    return { head: 'Session checklist', body: `${node.counts.completed}/${node.total} complete` };
   }
-  if (n.kind === 'plan') return ['Plan', `${n.counts.completed} done · ${n.counts.in_progress} in progress · ${n.counts.pending} pending`];
-  if (n.kind === 'step') {
-    const ms = n.paused
-      ? (n.pausedAt != null && n.startedAt ? Math.max(0, n.pausedAt - n.startedAt) : null)
-      : (n.startedAt ? Math.max(0, clock - n.startedAt) : null);
-    const when = ms != null ? (n.paused ? `paused · ${ageText(ms)}` : `running ${ageText(ms)}`) : (n.paused ? 'paused' : 'running');
-    return [n.paused ? 'paused step' : 'running step', `${n.text}\n${when}`];
-  }
-  if (n.kind === 'now') {
-    const nowLine = n.now && n.now.text ? '\n' + n.now.text : '';
-    return ['current turn', `${n.prompt || models.turnLabel(n.turnId)}${nowLine}\n${models.turnLabel(n.turnId)}`];
-  }
-  if (n.kind === 'step-more') return [`${n.count} more running`, 'additional in-progress plan steps, folded to keep the graph legible'];
-  if (n.kind === 'session') return [n.title, `${n.agent || 'agent'}\n${costText(n.cost)} · ${n.commits} commits\nsince ${n.startedAt ? hhmm(n.startedAt) : '—'}`];
-  if (n.kind === 'collapsed') return [n.label, 'the oldest PRs in this column, folded to keep the graph legible'];
-  return [n.kind, ''];
+  return { head: node.kind, body: node.title ?? node.text ?? 'Recorded session entity' };
 }
 
-function chapterTooltip(d) {
-  const g = d.group;
-  const merged = g.members.filter(m => m.prState === 'merged').length;
-  const closed = g.members.length - merged;
-  return [
-    'chapter',
-    `${g.title}\n${g.members.length} PRs${closed ? ` (${merged} merged · ${closed} closed)` : ''} · ${fmtSpan(g.activeMs)} active\n${dateTime(g.startT)} → ${dateTime(g.endT)}\nclick to ${d.expanded ? 'collapse' : 'expand'}`,
-  ];
-}
-
-// ---------------------------------------------------------------------- app
 export default function App() {
   const [models, setModels] = useState(null);
-  const [sessionId, setSessionId] = useState(() => urlq().get('session'));
+  const [viewContext, setViewContext] = useState(null);
+  const [sessionId, setSessionId] = useState(initialSession);
   const [sessionsMeta, setSessionsMeta] = useState([]);
-  const [version, setVersion] = useState(0);          // bumps when events change
-  const [cursorT, setCursorT] = useState(() => {      // live drag position
-    const t = Number(urlq().get('t'));
-    return Number.isFinite(t) && t > 0 ? t : null;
-  });
-  const [scrubT, setScrubT] = useState(cursorT);      // committed (debounced) scrub
-  const [expanded, setExpanded] = useState(() => {
-    const raw = urlq().get('expand');
-    return new Set(raw && raw !== 'all' ? raw.split(',') : []);
-  });
-  const [expandAll, setExpandAll] = useState(() => urlq().get('expand') === 'all');
+  const [pageState, setPageState] = useState('loading');
+  const [pageMessage, setPageMessage] = useState('Loading session graph…');
+  const [version, setVersion] = useState(0);
+  const [cursorT, setCursorT] = useState(null);
+  const [scrubT, setScrubT] = useState(null);
   const [dragVersion, setDragVersion] = useState(0);
   const [tick, setTick] = useState(0);
   const [tooltip, setTooltip] = useState(null);
+  const [nodes, setNodes] = useState([]);
+  const [edges, setEdges] = useState([]);
 
   const eventsRef = useRef([]);
+  const viewContextRef = useRef(null);
   const dragPosRef = useRef({});
   const esRef = useRef(null);
-  const flowRef = useRef(null);       // ReactFlow instance
+  const flowRef = useRef(null);
   const refitRef = useRef(true);
   const draggingNodeRef = useRef(false);
   const pendingFlowRef = useRef(null);
@@ -99,365 +64,385 @@ export default function App() {
   const appendTimerRef = useRef(null);
   const sigRef = useRef({ version: -1, map: new Map() });
 
-  // ------------------------------------------------------------ persistence
-  const dragKey = id => 'nsGraphFlowPos:' + (id || 'default');
+  const dragKey = id => `nsGraphFlowPos:${id || 'default'}`;
   const loadDrag = id => {
     try { dragPosRef.current = JSON.parse(localStorage.getItem(dragKey(id))) || {}; }
     catch { dragPosRef.current = {}; }
   };
   const saveDrag = id => {
-    try { localStorage.setItem(dragKey(id), JSON.stringify(dragPosRef.current)); } catch { /* quota */ }
+    try { localStorage.setItem(dragKey(id), JSON.stringify(dragPosRef.current)); }
+    catch { /* storage is an optional layout convenience */ }
   };
 
-  // -------------------------------------------------------------- data load
-  useEffect(() => { loadModels().then(setModels); }, []);
-  useEffect(() => {
-    let alive = true;
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => { if (alive) setTick(t => t + 1); });
-    }
-    const iv = setInterval(() => setTick(t => t + 1), 30000);
-    return () => { alive = false; clearInterval(iv); };
+  const teardownStream = useCallback(() => {
+    if (!esRef.current) return;
+    esRef.current.onerror = null;
+    esRef.current.close();
+    esRef.current = null;
   }, []);
 
-  const teardownStream = () => {
-    if (esRef.current) { esRef.current.onerror = null; esRef.current.close(); esRef.current = null; }
-  };
+  const clearSessionView = useCallback(() => {
+    eventsRef.current = [];
+    sigRef.current = { version: -1, map: new Map() };
+    setNodes([]);
+    setEdges([]);
+    setTooltip(null);
+  }, []);
 
   const openStream = useCallback(id => {
     teardownStream();
-    let buf = [], connReady = false;
-    const es = new EventSource('/sse?session=' + encodeURIComponent(id));
-    esRef.current = es;
-    es.onmessage = ev => {
-      let e; try { e = JSON.parse(ev.data); } catch { return; }
-      if (typeof e.t !== 'number' || typeof e.type !== 'string') return;
-      if (!connReady) { buf.push(e); return; }
-      eventsRef.current.push(e);
-      // Throttle live refolds to ~1s so an append burst folds once.
+    if (!shouldOpenGraphStream(viewContextRef.current)) return;
+    let buffer = [];
+    let ready = false;
+    const stream = new EventSource('/sse?session=' + encodeURIComponent(id));
+    esRef.current = stream;
+    stream.onmessage = message => {
+      let event;
+      try { event = JSON.parse(message.data); } catch { return; }
+      if (typeof event.t !== 'number' || typeof event.type !== 'string') return;
+      if (!ready) { buffer.push(event); return; }
+      eventsRef.current.push(event);
       if (!appendTimerRef.current) {
         appendTimerRef.current = setTimeout(() => {
           appendTimerRef.current = null;
-          setVersion(v => v + 1);
-        }, 1000);
+          setVersion(value => value + 1);
+        }, 500);
       }
     };
-    es.addEventListener('ready', () => {
-      connReady = true;
-      eventsRef.current = buf.slice().sort((a, b) => a.t - b.t);
-      buf = [];
-      setVersion(v => v + 1);
+    stream.addEventListener('ready', () => {
+      ready = true;
+      eventsRef.current = buffer.slice().sort((a, b) => a.t - b.t);
+      buffer = [];
+      setPageState(eventsRef.current.length ? 'populated' : 'empty');
+      setVersion(value => value + 1);
     });
-    es.onerror = () => {
-      if (es.readyState === EventSource.CLOSED) {
-        setTimeout(() => { if (esRef.current === es || esRef.current === null) openStream(id); }, 2000);
-      }
+    stream.onerror = () => {
+      if (stream.readyState !== EventSource.CLOSED) return;
+      setTimeout(() => {
+        const context = viewContextRef.current;
+        if (esRef.current === stream && context?.session === id && shouldOpenGraphStream(context)) openStream(id);
+      }, 2_000);
     };
-  }, []);
+  }, [teardownStream]);
 
-  const loadSession = useCallback(async id => {
+  const loadSession = useCallback(async (id, context = viewContextRef.current) => {
     teardownStream();
+    clearSessionView();
+    setPageState('loading');
+    setPageMessage('Loading session graph…');
     setSessionId(id);
     loadDrag(id);
-    sigRef.current = { version: -1, map: new Map() }; // no glow-everything on switch
-    setDragVersion(v => v + 1);
-    const q = id ? '?session=' + encodeURIComponent(id) : '';
-    let raw = '';
-    try { raw = await (await fetch('/events' + q)).text(); } catch { raw = ''; }
-    eventsRef.current = raw.split('\n').filter(Boolean).map(l => {
-      try { return JSON.parse(l); } catch { return null; }
-    }).filter(ev => ev && typeof ev.t === 'number' && typeof ev.type === 'string');
+    setDragVersion(value => value + 1);
     refitRef.current = true;
-    setVersion(v => v + 1);
-    if (id) openStream(id);
-  }, [openStream]);
+    const query = id ? `?session=${encodeURIComponent(id)}` : '';
+    try {
+      const response = await fetch('/events' + query);
+      if (!response.ok) throw new Error(`Events request failed (${response.status})`);
+      const raw = await response.text();
+      eventsRef.current = raw.split('\n').filter(Boolean).map(line => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(event => event && typeof event.t === 'number' && typeof event.type === 'string');
+      setVersion(value => value + 1);
+      if (!eventsRef.current.length) {
+        setPageState('empty');
+        setPageMessage('No recorded events for this session.');
+        return;
+      }
+      setPageState('populated');
+      if (context.mode === 'replay') return;
+      if (shouldOpenGraphStream(context)) openStream(id);
+    } catch (error) {
+      clearSessionView();
+      setPageState('error');
+      setPageMessage(error instanceof Error ? error.message : 'Unable to load session graph.');
+    }
+  }, [clearSessionView, openStream, teardownStream]);
 
-  // Mount the shared session picker (a runtime-imported vanilla module that
-  // owns its own DOM, so React never re-renders inside it).
   useEffect(() => {
-    if (!models || !pickerRef.current || pickerApiRef.current) return;
+    let cancelled = false;
+    loadModels().then(runtime => {
+      if (cancelled) return;
+      setModels(runtime);
+      const context = runtime.parseViewContext(location.search);
+      viewContextRef.current = context;
+      setViewContext(context);
+      setCursorT(context.cutoffT);
+      setScrubT(context.cutoffT);
+    }).catch(error => {
+      if (cancelled) return;
+      setPageState('error');
+      setPageMessage(error instanceof Error ? error.message : 'Unable to load graph models.');
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setTick(value => value + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!models || !viewContextRef.current || !pickerRef.current || pickerApiRef.current) return;
     let cancelled = false;
     models.initSessionPicker({
       mount: pickerRef.current,
-      currentId: sessionId,
+      currentId: viewContextRef.current.session,
       onSelect: id => {
-        const p = urlq();
-        p.set('session', id);
-        p.delete('t'); p.delete('expand');
-        history.replaceState(null, '', '?' + p.toString());
-        setCursorT(null); setScrubT(null);
-        setExpanded(new Set()); setExpandAll(false);
-        loadSession(id);
+        const selection = selectGraphSession(viewContextRef, id);
+        viewContextRef.current = selection.context;
+        history.replaceState(null, '', models.viewHref('/graph', selection.context));
+        setViewContext(selection.context);
+        setSessionId(id);
+        setCursorT(selection.cursorT);
+        setScrubT(selection.scrubT);
+        loadSession(id, selection.context);
       },
     }).then(api => {
       if (cancelled) return;
       pickerApiRef.current = api;
       setSessionsMeta(api.sessions);
-      loadSession(api.current);
+      const id = viewContextRef.current.session ?? api.current;
+      const selection = selectGraphSession(viewContextRef, id);
+      viewContextRef.current = selection.context;
+      setViewContext(selection.context);
+      setSessionId(id);
+      setCursorT(selection.cursorT);
+      setScrubT(selection.scrubT);
+      loadSession(id, selection.context);
+    }).catch(error => {
+      if (cancelled) return;
+      setPageState('error');
+      setPageMessage(error instanceof Error ? error.message : 'Unable to initialize session picker.');
     });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [models]);
+  }, [loadSession, models]);
 
-  useEffect(() => () => teardownStream(), []);
+  useEffect(() => () => teardownStream(), [teardownStream]);
 
-  // ------------------------------------------------------------- derivation
   const derived = useMemo(() => {
-    if (!models) return null;
-    const events = eventsRef.current;
-    const fullState = models.fold(events);
-    const fullDigest = models.buildDigest(events);
-    const scrubbed = scrubT != null && fullDigest.endT != null && scrubT < fullDigest.endT;
-    const evs = scrubbed ? events.filter(e => e.t <= scrubT) : events;
-    const state = scrubbed ? models.fold(evs) : fullState;
-    const model = models.buildGraphModel(evs);
-    const digest = scrubbed ? models.buildDigest(events, scrubT) : fullDigest;
-    const clock = scrubbed ? scrubT : Date.now();
-    const expandedView = { has: id => expandAll || expanded.has(id) };
-    // Live-change detection (the SVG view's glow/pulse): compare entity
-    // signatures across appends. Suppressed while scrubbing — time travel is
-    // not data changing.
-    let glowIds = null, pulseIds = null;
-    if (!scrubbed) {
-      const sigs = new Map();
-      for (const n of model.nodes) sigs.set(n.id, sigOf(n));
-      const prev = sigRef.current;
-      if (prev.version !== -1 && prev.version !== version) {
-        glowIds = new Set(); pulseIds = new Set();
-        for (const [id, s] of sigs) {
-          if (!prev.map.has(id) || prev.map.get(id) !== s) {
-            glowIds.add(id);
-            const n = model.nodes.find(x => x.id === id);
-            if (n && n.kind === 'pr' && (n.prState === 'merged' || n.prState === 'closed')
-              && prev.map.has(id)) pulseIds.add(id);
-          }
+    if (!models || !viewContext || pageState !== 'populated') return null;
+    const replayWindow = buildReplayWindow({
+      events: eventsRef.current,
+      cursorT: Number.isFinite(scrubT) ? scrubT : viewContext.cutoffT,
+      asOfT: viewContext.asOfT,
+    });
+    const replaying = viewContext.mode === 'replay' || Number.isFinite(scrubT);
+    const untilT = replaying ? replayWindow.cursorT : Infinity;
+    const displayNow = Number.isFinite(untilT) ? untilT : Date.now();
+    const insights = models.buildSessionInsights(eventsRef.current, {
+      untilT,
+      asOfT: replaying ? viewContext.asOfT : Infinity,
+      displayNow,
+    });
+    const model = models.buildGraphModel(insights.visiblePrefix, insights);
+    const summary = models.buildSummaryViewModel(insights);
+    const clock = Number.isFinite(untilT) ? untilT : Date.now();
+
+    let glowIds = null;
+    let pulseIds = null;
+    if (viewContext.mode === 'live' && !Number.isFinite(scrubT)) {
+      const signatures = new Map(model.nodes.map(node => [node.id, sigOf(node)]));
+      const previous = sigRef.current;
+      if (previous.version !== -1 && previous.version !== version) {
+        glowIds = new Set();
+        pulseIds = new Set();
+        for (const [id, signature] of signatures) {
+          if (previous.map.get(id) === signature) continue;
+          glowIds.add(id);
+          const node = model.nodes.find(candidate => candidate.id === id);
+          if (node?.kind === 'pr' && node.semanticState === 'complete' && previous.map.has(id)) pulseIds.add(id);
         }
       }
-      sigRef.current = { version, map: sigs };
+      sigRef.current = { version, map: signatures };
     }
+
     const flow = buildFlow({
-      model, digest, state, columns: model.columns,
-      expanded: expandedView, dragPos: dragPosRef.current, clock, scrubbed,
-      glowIds, pulseIds,
+      model,
+      columns: model.columns,
+      dragPos: dragPosRef.current,
+      clock,
+      scrubbed: viewContext.mode === 'replay' || Number.isFinite(scrubT),
+      glowIds,
+      pulseIds,
     });
-    const chapterIds = flow.nodes.filter(n => n.type === 'chapter').map(n => n.id);
-    const segments = fullDigest.startT != null
-      ? models.activeSegments(fullDigest.startT, fullDigest.endT, fullDigest.gaps)
-      : [];
-    const meta = sessionsMeta.find(s => s.id === sessionId) || null;
-    const title = fullState.session.title || (meta && meta.title)
-      || models.sessionLabel({ id: sessionId || '', cwd: fullState.session.cwd, title: null }) || 'session';
-    const agent = fullState.session.agent || (meta && meta.agent) || null;
-    const liveness = models.liveness(fullState, Date.now());
-    return { flow, model, fullDigest, scrubbed, clock, chapterIds, segments, title, agent, liveness };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [models, version, scrubT, expanded, expandAll, tick, dragVersion, sessionsMeta, sessionId]);
+    const folded = models.fold(insights.visiblePrefix);
+    const meta = sessionsMeta.find(session => session.id === sessionId) ?? null;
+    const title = folded.session.title || meta?.title
+      || models.sessionLabel({ id: sessionId || '', cwd: folded.session.cwd, title: null })
+      || 'session';
+    return { insights, model, summary, flow, replayWindow, title, agent: folded.session.agent ?? meta?.agent ?? null };
+  }, [models, viewContext, pageState, scrubT, version, dragVersion, tick, sessionsMeta, sessionId]);
 
-  useEffect(() => {
-    if (derived) document.title = `graph — ${derived.title}`;
-  }, [derived && derived.title]);
-
-  // -------------------------------------------------------- controlled flow
-  const [nodes, setNodes] = useState([]);
-  const [edges, setEdges] = useState([]);
   useEffect(() => {
     if (!derived) return;
+    document.title = `graph — ${derived.title}`;
     if (draggingNodeRef.current) { pendingFlowRef.current = derived.flow; return; }
     setNodes(derived.flow.nodes);
     setEdges(derived.flow.edges);
   }, [derived]);
 
-  // Refit once per session load, after the new nodes land.
   useEffect(() => {
-    if (!refitRef.current || !flowRef.current || nodes.length === 0) return;
+    if (!refitRef.current || !flowRef.current || !nodes.length) return;
     refitRef.current = false;
-    requestAnimationFrame(() => {
-      flowRef.current && flowRef.current.fitView({ padding: 0.1, maxZoom: 1.1, duration: 0 });
-    });
+    requestAnimationFrame(() => flowRef.current?.fitView({ padding: 0.12, maxZoom: 1.05, duration: 0 }));
   }, [nodes]);
 
-  const onNodesChange = useCallback(changes => {
-    setNodes(nds => applyNodeChanges(changes, nds));
-  }, []);
-
+  const onNodesChange = useCallback(changes => setNodes(current => applyNodeChanges(changes, current)), []);
   const onNodeDragStart = useCallback(() => { draggingNodeRef.current = true; setTooltip(null); }, []);
-  const onNodeDragStop = useCallback((e, node) => {
+  const onNodeDragStop = useCallback((event, node) => {
     draggingNodeRef.current = false;
     if (node.type !== 'colband') {
       dragPosRef.current[node.id] = { x: node.position.x, y: node.position.y };
       saveDrag(sessionId);
-      setDragVersion(v => v + 1);
+      setDragVersion(value => value + 1);
     }
     if (pendingFlowRef.current) {
-      const f = pendingFlowRef.current;
+      setNodes(pendingFlowRef.current.nodes);
+      setEdges(pendingFlowRef.current.edges);
       pendingFlowRef.current = null;
-      setNodes(f.nodes); setEdges(f.edges);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // ------------------------------------------------------------------ scrub
   const onScrub = useCallback((t, dragging) => {
     setCursorT(t);
     setTooltip(null);
     if (scrubTimerRef.current) clearTimeout(scrubTimerRef.current);
-    if (dragging) {
-      scrubTimerRef.current = setTimeout(() => setScrubT(t), 120);
-    } else {
-      setScrubT(t);
-      const p = urlq();
-      if (t == null) p.delete('t'); else p.set('t', String(Math.round(t)));
-      history.replaceState(null, '', '?' + p.toString());
+    if (!Number.isFinite(t)) {
+      setScrubT(null);
+      return;
     }
+    teardownStream();
+    const next = contextForScrub(
+      viewContextRef.current,
+      t,
+      derived?.replayWindow.ceilingT,
+    );
+    viewContextRef.current = next;
+    setViewContext(next);
+    history.replaceState(null, '', models.viewHref('/graph', next));
+    if (dragging) {
+      scrubTimerRef.current = setTimeout(() => setScrubT(t), 100);
+      return;
+    }
+    setScrubT(t);
+  }, [derived?.replayWindow.ceilingT, models, teardownStream]);
+
+  const onReturnLive = useCallback(() => {
+    const live = { session: sessionId, cursorT: null, cutoffT: null, asOfT: null, mode: 'live' };
+    location.href = models.viewHref('/graph', live);
+  }, [models, sessionId]);
+
+  const openNode = useCallback((event, flowNode) => {
+    if (flowNode.type === 'colband') return;
+    if (event?.target?.closest?.('a,button')) return;
+    const node = flowNode.data.node;
+    const t = node.replayT ?? node.lastTouched;
+    const currentContext = viewContextRef.current;
+    const next = {
+      ...currentContext,
+      session: sessionId,
+      cursorT: Number.isFinite(t) ? Math.round(t) : currentContext.cursorT,
+      cutoffT: Number.isFinite(t) ? Math.min(t, currentContext.asOfT ?? Infinity) : currentContext.cutoffT,
+      mode: 'replay',
+    };
+    location.href = models.viewHref('/', next);
+  }, [models, sessionId]);
+
+  const onNodeKeyDown = useCallback((event, node) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openNode(event, node);
+    }
+  }, [openNode]);
+
+  const moveTooltip = useCallback((event, node) => {
+    if (node.type === 'colband' || draggingNodeRef.current || !mainRef.current) return;
+    const rect = mainRef.current.getBoundingClientRect();
+    const content = tooltipFor(node.data.node);
+    setTooltip({ ...content, x: event.clientX - rect.left + 14, y: event.clientY - rect.top + 16 });
   }, []);
 
-  // ------------------------------------------------------------ interaction
-  const toggleChapter = useCallback(id => {
-    setExpanded(prev => {
-      const base = expandAll ? new Set(derived ? derived.chapterIds : []) : new Set(prev);
-      if (base.has(id)) base.delete(id); else base.add(id);
-      const p = urlq();
-      if (base.size) p.set('expand', [...base].join(',')); else p.delete('expand');
-      history.replaceState(null, '', '?' + p.toString());
-      return base;
-    });
-    setExpandAll(false);
-  }, [expandAll, derived]);
+  const navigation = models && viewContext ? {
+    board: models.viewHref('/', viewContext),
+    story: models.viewHref('/story', viewContext),
+    lanes: models.viewHref('/lanes', viewContext),
+    graph: models.viewHref('/graph', viewContext),
+  } : { board: '/', story: '/story', lanes: '/lanes', graph: '/graph' };
 
-  const onNodeClick = useCallback((e, node) => {
-    if (node.type === 'colband') return;
-    if (node.type === 'chapter') { toggleChapter(node.id); return; }
-    if (node.type === 'collapsed' || node.type === 'step-more') return;
-    const n = node.data.node;
-    const q = new URLSearchParams();
-    if (sessionId) q.set('session', sessionId);
-    if (n.lastTouched) q.set('t', String(Math.round(n.lastTouched)));
-    location.href = '/?' + q.toString();
-  }, [sessionId, toggleChapter]);
-
-  const moveTooltip = useCallback((e, node) => {
-    if (!models || node.type === 'colband' || draggingNodeRef.current) return;
-    const r = mainRef.current.getBoundingClientRect();
-    const [head, body] = node.type === 'chapter'
-      ? chapterTooltip(node.data)
-      : tooltipFor(node.data.node, models, node.data.clock);
-    let x = e.clientX - r.left + 14, y = e.clientY - r.top + 16;
-    setTooltip({ head, body, x, y });
-  }, [models]);
-  const hideTooltip = useCallback(() => setTooltip(null), []);
-
-  // ------------------------------------------------------------------ render
-  const lv = derived && derived.liveness;
-  const badge = lv && BADGE[lv.state];
-  const empty = derived && derived.model.nodes.length <= 1;
-
+  const semantic = derived?.model.semantic;
   return (
-    <div className="gf-root">
+    <div className="gf-root" data-page-state={pageState}>
       <header className="masthead">
         <div className="brand">
-          <a className="home-link" href={'/' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '')} title="board home">
-            <svg className="logo" width="16" height="16" viewBox="0 0 16 16"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0" /></svg>
+          <a className="home-link" href={navigation.board} title="Board">
+            <svg className="logo" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 1.8 A6.6 6.6 0 1 0 14.6 8.4 A5.4 5.4 0 0 1 10 1.8 Z" fill="#F0E2C0" /></svg>
             <span className="wordmark">nightshift</span>
           </a>
-          <span className="crumb-sep">/</span>
-          <span className="lanes-crumb">graph</span>
-          <span className="crumb-sep">/</span>
-          {(!sessionsMeta.length || sessionsMeta.length <= 1) && (
-            <span className="session-title mono">{derived ? derived.title : '…'}</span>
-          )}
+          <span className="crumb-sep">/</span><span className="lanes-crumb">graph</span>
+          {(!sessionsMeta.length || sessionsMeta.length <= 1) && <span className="session-title mono">{derived?.title ?? '…'}</span>}
           <span className="session-picker" ref={pickerRef} hidden={sessionsMeta.length <= 1} />
-          {derived && derived.agent && <span className={`agent-badge agent-${derived.agent}`}>{derived.agent}</span>}
-          {badge && (
-            <span className={`badge ${badge[0]}`}>
-              <i className="badge-dot" />
-              <span>{badge[1] || `STALE · data ends ${hhmm(lv.dataEndsAt)}`}</span>
-            </span>
-          )}
-          {derived && derived.scrubbed && (
-            <a className="asof-pill" href="#" onClick={e => { e.preventDefault(); onScrub(null, false); }} title="scrubbed — click for the full tape">
-              as of {dateTime(derived.clock)}
-            </a>
-          )}
+          {derived?.agent && <span className={`agent-badge agent-${derived.agent}`}>{derived.agent}</span>}
+          {semantic && <span className="gf-live-state mono" data-state={semantic.state}>{semantic.state}</span>}
         </div>
-        <div className="instruments">
-          <span className="graph-legend">
-            <span className="lg"><i className="gl-ring gl-open" />open</span>
-            <span className="lg"><i className="gl-ring gl-merged" />merged</span>
-            <span className="lg"><i className="gl-ring gl-closed" />closed</span>
-            <span className="lg"><i className="gl-mark gl-fail" />CI fail</span>
-            <span className="lg"><i className="gl-dot gl-intent" />work item</span>
-          </span>
-          <button
-            className="icon-btn" title="reset layout (clear dragged positions)"
-            onClick={() => { dragPosRef.current = {}; saveDrag(sessionId); setDragVersion(v => v + 1); refitRef.current = true; }}
-          >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.2V5h-2.8" /></svg>
-          </button>
-          <a className="icon-btn" href={'/?session=' + encodeURIComponent(sessionId || '')} title="open the board">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"><rect x="1.5" y="2" width="3.4" height="12" rx="1" /><rect x="6.3" y="2" width="3.4" height="8" rx="1" /><rect x="11.1" y="2" width="3.4" height="10" rx="1" /></svg>
-          </a>
-        </div>
+        <nav className="gf-nav" aria-label="Session views">
+          <a href={navigation.board}>Board</a><a href={navigation.story}>Story</a><a href={navigation.lanes}>Lanes</a><a href={navigation.graph} aria-current="page">Graph</a>
+        </nav>
       </header>
 
-      <main className="gf-main" ref={mainRef}>
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
-          onInit={inst => { flowRef.current = inst; }}
-          onNodeClick={onNodeClick}
-          onNodeDragStart={onNodeDragStart}
-          onNodeDragStop={onNodeDragStop}
-          onNodeMouseEnter={moveTooltip}
-          onNodeMouseMove={moveTooltip}
-          onNodeMouseLeave={hideTooltip}
-          onMoveStart={hideTooltip}
-          fitView
-          fitViewOptions={{ padding: 0.1, maxZoom: 1.1 }}
-          minZoom={0.1}
-          maxZoom={2.6}
-          nodesConnectable={false}
-          deleteKeyCode={null}
-          selectionKeyCode={null}
-          proOptions={{ hideAttribution: false }}
-        >
-          <Controls position="bottom-left" showInteractive={false} />
-          <MiniMap
-            position="bottom-right"
-            pannable
-            zoomable
-            bgColor="rgba(10, 14, 24, 0.92)"
-            maskColor="rgba(7, 10, 19, 0.72)"
-            nodeColor={n => n.type === 'colband' ? 'rgba(255,255,255,0.02)'
-              : n.type === 'chapter' ? '#1a2136'
-              : n.type === 'session' ? '#2b3550'
-              : '#222b42'}
-            nodeStrokeColor="transparent"
-          />
-          {derived && derived.fullDigest.startT != null && derived.fullDigest.endT > derived.fullDigest.startT && (
-            <Panel position="bottom-center" className="gf-tl-panel">
-              <Timeline
-                digest={derived.fullDigest}
-                segments={derived.segments}
-                cursorT={cursorT}
-                onScrub={onScrub}
-              />
-            </Panel>
-          )}
-        </ReactFlow>
-        {tooltip && (
-          <div
-            className="graph-tooltip"
-            style={{ left: Math.min(tooltip.x, (mainRef.current ? mainRef.current.clientWidth : 1200) - 330), top: tooltip.y }}
+      {derived && <Summary summary={derived.summary} semantic={semantic} />}
+      <div className="gf-state-legend" aria-label="Graph state legend">
+        {['Active', 'Attention', 'Blocked', 'Complete'].map(label => <span key={label} data-state={label.toLowerCase()}>{label}</span>)}
+        {semantic && <><span>Current blocker: {semantic.currentBlocker}</span><span>Next actor: {semantic.nextActor}</span></>}
+      </div>
+
+      <main className="gf-main" ref={mainRef} aria-busy={pageState === 'loading'}>
+        {pageState === 'populated' && derived && (
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onInit={instance => { flowRef.current = instance; }}
+            onNodeClick={openNode}
+            onNodeKeyDown={onNodeKeyDown}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDragStop={onNodeDragStop}
+            onNodeMouseEnter={moveTooltip}
+            onNodeMouseMove={moveTooltip}
+            onNodeMouseLeave={() => setTooltip(null)}
+            onMoveStart={() => setTooltip(null)}
+            fitView
+            fitViewOptions={{ padding: 0.12, maxZoom: 1.05 }}
+            minZoom={0.1}
+            maxZoom={2.6}
+            nodesConnectable={false}
+            deleteKeyCode={null}
+            selectionKeyCode={null}
+            proOptions={{ hideAttribution: false }}
           >
-            <span className="tt-t">{tooltip.head}</span>
-            <span className="tt-b">{tooltip.body}</span>
-          </div>
+            <Controls position="bottom-left" showInteractive={false} />
+            <MiniMap position="bottom-right" pannable zoomable bgColor="#0a0e18" maskColor="rgba(7, 10, 19, .76)" nodeColor="#242d43" nodeStrokeColor="transparent" />
+            {derived.replayWindow.ceilingT > derived.replayWindow.floorT && (
+              <Panel position="bottom-center" className="gf-tl-panel">
+                <Timeline
+                  insights={derived.insights}
+                  cursorT={cursorT}
+                  floorT={derived.replayWindow.floorT}
+                  ceilingT={derived.replayWindow.ceilingT}
+                  onScrub={onScrub}
+                  onReturnLive={onReturnLive}
+                  isReplay={viewContext.mode === 'replay'}
+                />
+              </Panel>
+            )}
+          </ReactFlow>
         )}
-        {empty && <div className="graph-empty">no entities on this tape yet</div>}
-        {!models && <div className="graph-empty">loading…</div>}
-        <div className="graph-hint">scroll to zoom · drag canvas to pan · drag a node to arrange · click a chapter to expand · click a node to replay</div>
+        {tooltip && <div className="graph-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><span className="tt-t">{tooltip.head}</span><span className="tt-b">{tooltip.body}</span></div>}
+        {pageState === 'loading' && <div className="graph-state" role="status">{pageMessage}</div>}
+        {pageState === 'empty' && <div className="graph-state" role="status">{pageMessage}</div>}
+        {pageState === 'error' && <div className="graph-state is-error" role="alert">{pageMessage}</div>}
+        {pageState === 'populated' && derived?.model.nodes.length <= 1 && <div className="graph-state">No semantic entities recorded yet.</div>}
+        <div className="graph-hint">Scroll to zoom · drag canvas to pan · focus a node and press Enter to replay evidence</div>
       </main>
     </div>
   );

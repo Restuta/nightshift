@@ -5,8 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { buildDigest } from '../public/digest.js';
+import { buildSessionInsights } from '../public/session-insights-model.js';
 import {
-  buildStoryBlocks, activeSegments, dayKey, SEPARATOR_GAP_MS,
+  buildStoryBlocks, buildStoryReport, buildStoryNarrativeEvents,
+  activeSegments, dayKey, SEPARATOR_GAP_MS,
 } from '../public/story-model.js';
 
 const MIN = 60e3, HOUR = 3600e3;
@@ -162,4 +166,209 @@ test('when idle crosses midnight, the pause line precedes the new day rule', () 
   const blocks = buildStoryBlocks(chapters, gaps);
   assert.deepEqual(blocks.map(b => b.kind), ['day', 'episode', 'gap', 'day', 'episode'],
     '…slept 11h, then a new day began — that is the reading order');
+});
+
+function referenceInsights() {
+  const events = readFileSync(new URL('./tapes/semantic-reference.jsonl', import.meta.url), 'utf8')
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line));
+  return buildSessionInsights(events, { untilT: Infinity, displayNow: events.at(-1).t });
+}
+
+test('morning report distinguishes checklist progress from product-roadmap progress', () => {
+  const report = buildStoryReport(referenceInsights());
+
+  assert.equal(report.headline, '7 PRs opened · 0 merged · 7 without explicit milestone attribution');
+  assert.equal(report.checklist.label, 'Session checklist: 8/10');
+  assert.deepEqual(report.checklist.remaining, ['Roadmap', 'Final handoff']);
+  assert.equal(report.roadmap.label, 'Product roadmap: roughly one-third');
+  assert.deepEqual(report.roadmap.milestones, [
+    { label: 'M1', progress: 'complete' },
+    { label: 'M2', progress: 'first slice complete' },
+    { label: 'M3', progress: 'first slice complete' },
+    { label: 'M4–M7', progress: 'not started' },
+  ]);
+  assert.equal(report.roadmap.assessmentConfidence, 'Agent assessment · recovered evidence');
+  assert.equal(report.roadmap.staleSnapshot, true);
+  assert.match(report.roadmap.staleWarning, /checklist snapshot is stale/i);
+  assert.deepEqual(report.roadmap.evidenceEventIds, ['final-todos', 'roadmap-assessment']);
+});
+
+test('morning report names the current disposition, blocker, next action, and uncertainty', () => {
+  const report = buildStoryReport(referenceInsights());
+
+  assert.equal(report.disposition.state, 'attention');
+  assert.equal(report.disposition.label, 'Waiting for your next instruction');
+  assert.equal(
+    report.disposition.detail,
+    'Turn complete · session open · human is next actor · no tool outcome is missing',
+  );
+  assert.equal(report.disposition.currentBlocker, 'No execution blocker');
+  assert.notEqual(report.disposition.state, 'blocked');
+  assert.equal(report.disposition.nextAction, 'Human: provide the next instruction');
+  assert.equal(report.disposition.confidence, 'Explicit lifecycle evidence');
+  assert.equal(report.disposition.uncertainty, null);
+});
+
+test('an unmatched tool outcome is uncertainty and never blocked without explicit permission evidence', () => {
+  const insights = buildSessionInsights([
+    { t: 0, id: 'start', type: 'session', phase: 'start', sessionId: 's' },
+    { t: 10, id: 'tool-start', type: 'tool_call', state: 'start', sessionId: 's', agentId: 'a', toolUseId: 'u', tool: 'Bash' },
+    { t: 20, id: 'attention', type: 'notification', reason: 'next_prompt' },
+  ], { untilT: 20, displayNow: 20 });
+  const report = buildStoryReport(insights);
+
+  assert.equal(report.disposition.state, 'attention');
+  assert.notEqual(report.disposition.state, 'blocked');
+  assert.equal(report.disposition.currentBlocker, 'No execution blocker');
+  assert.deepEqual(report.disposition.uncertainty, {
+    kind: 'tool_outcome_unknown',
+    label: '1 tool outcome not observed',
+    detail: 'Outcome uncertainty is not evidence of blocked or running work.',
+    confidence: 'Explicit unmatched tool lifecycle',
+  });
+});
+
+test('an explicit permission request is the blocked branch', () => {
+  const insights = buildSessionInsights([
+    { t: 0, id: 'start', type: 'session', phase: 'start' },
+    { t: 10, id: 'permission', type: 'notification', reason: 'permission' },
+  ], { untilT: 10, displayNow: 10 });
+  const report = buildStoryReport(insights);
+
+  assert.equal(report.disposition.state, 'blocked');
+  assert.equal(report.disposition.currentBlocker, 'Permission decision required');
+  assert.equal(report.disposition.uncertainty, null);
+});
+
+test('morning report phases expose duration, percentage, evidence, and confidence in text', () => {
+  const report = buildStoryReport(referenceInsights());
+  const preflight = report.phases.find(phase => phase.category === 'preflight');
+  const longestUnknown = report.intervals.find(interval => interval.category === 'unknown');
+
+  assert.ok(report.phases.some(phase => phase.category === 'coding'));
+  assert.ok(report.phases.some(phase => phase.category === 'testing'));
+  assert.ok(preflight.durationMs > 0);
+  assert.ok(preflight.percent > 0);
+  assert.ok(preflight.evidenceEventIds.length > 0);
+  assert.match(preflight.confidenceText, /(explicit|strong|heuristic)/i);
+  assert.ok(longestUnknown.durationMs > 0);
+  assert.equal(longestUnknown.label, 'Longest unknown interval');
+});
+
+test('morning report PR stack preserves topology and gates without inventing milestone completion', () => {
+  const report = buildStoryReport(referenceInsights());
+
+  assert.equal(report.prs.length, 7);
+  const plan = report.prs.find(pr => pr.number === 101);
+  assert.equal(plan.milestone, 'Unassigned');
+  assert.equal(plan.progress, 'PR contribution not explicitly attributed');
+  assert.match(plan.milestoneConfidence, /no explicit milestone attribution/i);
+
+  const pr102 = report.prs.find(pr => pr.number === 102);
+  assert.equal(pr102.milestone, 'Unassigned');
+  assert.equal(pr102.progress, 'PR contribution not explicitly attributed');
+  assert.equal(pr102.recordedTruth, 'Recorded: open · gates pending');
+  assert.equal(pr102.currentTruth, 'Current: open · gates pass');
+  assert.equal(pr102.recordedTopology, 'Recorded parent: #101');
+  assert.equal(pr102.currentTopology, 'Current parent: #101');
+  assert.equal(pr102.changedSinceRecording, true);
+  assert.match(pr102.provenance, /authoritative.*poll-github/i);
+  assert.ok(pr102.evidenceEventIds.length >= 4);
+
+  const pr103 = report.prs.find(pr => pr.number === 103);
+  assert.equal(pr103.milestone, 'Unassigned');
+  assert.equal(pr103.recordedTopology, 'Recorded parent: #101');
+  assert.equal(pr103.currentTopology, 'Current parent: #102');
+
+  const pr104 = report.prs.find(pr => pr.number === 104);
+  assert.equal(pr104.milestone, 'Unassigned');
+  assert.equal(pr104.recordedTruth, 'Recorded: unavailable');
+  assert.equal(pr104.currentTruth, 'Current: open · gates pass');
+  assert.match(pr104.provenance, /recovered from transcript/i);
+
+  const pr106 = report.prs.find(pr => pr.number === 106);
+  assert.equal(pr106.currentTruth, 'Current: open · gates pass · 1 advisory running');
+  assert.ok(report.prs.every(pr => pr.progress !== 'Complete'));
+  assert.deepEqual(report.prClassifications, { plan: 0, feature: 0, unassigned: 7 });
+});
+
+test('an explicit milestone on a recorded PR event survives canonical projection', () => {
+  const insights = buildSessionInsights([
+    { t: 0, id: 'start', type: 'session', phase: 'start' },
+    {
+      t: 10, id: 'pr-10', type: 'pr', repo: 'acme/widgets', number: 10,
+      title: 'A title that is not used for classification', state: 'open',
+      milestone: 'M1b', source: 'poll-github',
+    },
+    { t: 20, id: 'say-20', type: 'say', text: 'Recorded after the PR snapshot.' },
+  ], { untilT: 20, displayNow: 20 });
+
+  const [pr] = buildStoryReport(insights).prs;
+  assert.equal(pr.milestone, 'M1b');
+  assert.equal(pr.milestoneClassification, 'feature');
+  assert.equal(pr.milestoneConfidence, 'Explicit recorded milestone attribution');
+});
+
+test('PR report keeps occurrence, observation, recording, and current fetch times separate', () => {
+  const report = buildStoryReport(referenceInsights());
+  const pr102 = report.prs.find(pr => pr.number === 102);
+  const pr104 = report.prs.find(pr => pr.number === 104);
+
+  assert.deepEqual({
+    occurredAt: pr102.occurredAt,
+    observedAt: pr102.observedAt,
+    recordedAt: pr102.recordedAt,
+    recordedPrAt: pr102.recordedPrAt,
+    currentPrAt: pr102.currentPrAt,
+    currentFetchedAt: pr102.currentFetchedAt,
+  }, {
+    occurredAt: 1700002888101,
+    observedAt: 1700004026186,
+    recordedAt: 1700004026186,
+    recordedPrAt: 1700004026186,
+    currentPrAt: 1700120426301,
+    currentFetchedAt: 1700120426302,
+  });
+  assert.equal(pr104.occurredAt, null);
+  assert.equal(pr104.observedAt, 1700004331705);
+  assert.equal(pr104.recordedAt, 1700120426101);
+  assert.equal(pr104.recordedPrAt, null);
+  assert.equal(pr104.currentPrAt, 1700120426501);
+  assert.equal(pr104.currentFetchedAt, 1700120426502);
+  assert.equal(pr104.replayT, pr104.observedAt, 'replay starts when recovery evidence became visible');
+});
+
+test('reference narrative input freezes at recorded end and semantic clocks retain the canonical timing probe', () => {
+  const insights = referenceInsights();
+  const narrativeEvents = buildStoryNarrativeEvents(insights);
+  const digest = buildDigest(narrativeEvents, Infinity);
+  const hours = value => Number((value / HOUR).toFixed(3));
+
+  assert.deepEqual({
+    recorded: hours(insights.clocks.recordedSessionMs),
+    observed: hours(insights.clocks.observedActiveMs),
+    idle: hours(insights.clocks.inferredIdleMs),
+    unknown: hours(insights.clocks.unclassifiedMs),
+  }, { recorded: 11.536, observed: 0.793, idle: 0.05, unknown: 1.673 });
+  assert.ok(narrativeEvents.every(event => event.t <= insights.bounds.recordedEnd));
+  assert.ok(narrativeEvents.every(event => !String(event.id).startsWith('current-')));
+  assert.ok(digest.endT <= insights.bounds.recordedEnd);
+  assert.ok(digest.wallMs < 12 * HOUR, 'post-recorded reconciliation cannot make a 33h narrative');
+});
+
+test('unattached activity is appended from canonical attribution gaps and recovers PR 104', () => {
+  const insights = referenceInsights();
+  const blocks = buildStoryBlocks([
+    ch('episode', insights.bounds.recordedStart, insights.bounds.recordedEnd, 'Recorded work'),
+  ], [], insights);
+  const unattached = blocks.at(-1);
+
+  assert.equal(unattached.kind, 'unattached');
+  assert.equal(unattached.title, 'Unattached activity');
+  assert.ok(unattached.prs.some(pr => pr.number === 104));
+  assert.match(unattached.prs.find(pr => pr.number === 104).provenance, /recovered from transcript/i);
+  assert.ok(unattached.evidenceEventIds.includes('recovered-pr-104'));
+  assert.equal(unattached.confidence, 'Recorded artifacts · chapter attribution unavailable');
 });

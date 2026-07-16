@@ -37,12 +37,44 @@
 </header>
 
 <main class="story" id="story">
+  <div class="story-page-state" id="story-loading" role="status" hidden>loading session story…</div>
+  <div class="story-page-state story-page-error" id="story-error" role="alert" hidden></div>
+  <div class="story-summary" id="story-summary" aria-label="Session summary" hidden></div>
+  <section class="morning-report" id="morning-report" aria-labelledby="morning-report-title" hidden>
+    <header class="morning-report-head">
+      <p class="story-kicker">Semantic morning report</p>
+      <h1 id="morning-report-title">What moved overnight</h1>
+      <p class="story-headline" id="story-headline"></p>
+    </header>
+    <p class="story-state-key" aria-label="Disposition states">Active · Attention · Blocked · Complete</p>
+    <section class="story-disposition" id="story-disposition" aria-label="Current disposition"></section>
+    <div class="story-progress-grid">
+      <section class="story-progress" id="story-checklist" aria-label="Session checklist"></section>
+      <section class="story-progress" id="story-roadmap" aria-label="Product roadmap"></section>
+    </div>
+    <div class="story-stale-warning" id="story-stale-warning" role="status" hidden></div>
+    <section class="story-section" aria-labelledby="story-phase-title">
+      <header class="story-section-head">
+        <h2 id="story-phase-title">Where recorded time went</h2>
+        <span>Exclusive semantic wall-time partition</span>
+      </header>
+      <ul class="story-phase-totals" id="story-phase-totals" aria-label="Semantic phase totals"></ul>
+      <div class="story-intervals" id="story-intervals"></div>
+    </section>
+    <section class="story-section" aria-labelledby="story-pr-title">
+      <header class="story-section-head">
+        <h2 id="story-pr-title">Pull request progress</h2>
+        <span>Recorded tape beside current reconciliation</span>
+      </header>
+      <div class="story-pr-stack" id="story-pr-stack" aria-label="Pull request stack"></div>
+    </section>
+  </section>
   <section class="ledger" id="ledger" hidden></section>
   <section class="chapters" id="chapters" hidden>
     <h3 class="chapters-head" id="chapters-head"></h3>
     <div class="blocks" id="blocks"></div>
   </section>
-  <div class="story-empty" id="story-empty" hidden>no events on this tape</div>
+  <div class="story-empty" id="story-empty" aria-hidden="true" hidden>no events on this tape</div>
 </main>
 
 <script type="module" src="story.js"></script>

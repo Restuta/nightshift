@@ -30,7 +30,7 @@ const skillSrc = path.join(here, 'skills', 'nightshift');
 const skillDir = path.join(home, '.codex', 'skills', 'nightshift');
 const agentHook = path.join(here, 'hooks', 'agent-hook.js');
 const HOOK_MARK = 'hooks/agent-hook.js'; // identifies our hook group on re-runs
-const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse'];
+const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse'];
 // Cheap pre-gate (mirrors the Claude installer): spawn node only when a session
 // has opted in. Codex sets CODEX_THREAD_ID (== the hook payload's session_id) in
 // the command env, so the marker check is per-session. When nothing is

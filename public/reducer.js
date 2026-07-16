@@ -67,7 +67,7 @@ export function initialState() {
     // reconcile append (poll-github/server) can't bump the work clock. `sources`
     // = per-source freshness (source → latest t), fed by every v2 event incl.
     // `alive` heartbeats; the badge derives honest staleness from it.
-    session: { title: null, startedAt: null, lastAt: null, lastProducerAt: null, phase: null, cwd: null, agent: null, attentionText: null, lastSay: null },
+    session: { title: null, startedAt: null, lastAt: null, lastProducerAt: null, phase: null, cwd: null, agent: null, attentionText: null, unresolvedInputReason: null, lastSay: null },
     sources: new Map(),
     items: new Map(),
     todos: [],            // full current plan (session-scoped) → the sidebar Plan panel
@@ -86,6 +86,7 @@ export function initialState() {
 // to "resume") the badge would otherwise stick on idle while the agent keeps
 // working — this flips it back on the next edit/command/plan/commit.
 function awake(state) {
+  state.session.unresolvedInputReason = null;
   if (state.session.phase === 'idle' || state.session.phase === 'attention') {
     state.session.phase = 'working';
     state.session.attentionText = null;
@@ -192,15 +193,21 @@ export function reduce(state, ev) {
         if (state.session.startedAt == null) state.session.startedAt = ev.t;
         state.session.phase = 'working';
         state.session.attentionText = null;
+        state.session.unresolvedInputReason = null;
       } else if (ev.phase === 'attention') {
         state.session.phase = 'attention';
         state.session.attentionText = ev.text || null;
+        // Backward compatibility: old tapes encoded every real human question
+        // as session attention before structured notification reasons existed.
+        state.session.unresolvedInputReason = 'question';
       } else if (ev.phase === 'idle') {
         state.session.phase = 'idle';
         state.session.attentionText = null;
+        state.session.unresolvedInputReason = null;
       } else if (ev.phase === 'end') {
         state.session.phase = 'ended';
         state.session.attentionText = null;
+        state.session.unresolvedInputReason = null;
         // Session boundary (1.6): any card still in `doing` when the session ends
         // was never finished — the agent stopped mid-flight (0/20 real tapes ever
         // emitted an `end`, so these cards latched in "in progress" forever). Mark
@@ -210,6 +217,17 @@ export function reduce(state, ev) {
           if (it.status === 'doing') it.abandoned = true;
         }
       }
+      break;
+    }
+
+    case 'notification': {
+      if (ev.reason === 'permission' || ev.reason === 'question') {
+        state.session.phase = 'attention';
+        state.session.attentionText = ev.text || null;
+        state.session.unresolvedInputReason = ev.reason;
+      }
+      // next_prompt/background_complete/system_notice are informational. They
+      // preserve both phase and any still-unresolved actionable request.
       break;
     }
 
@@ -481,6 +499,14 @@ export function reduce(state, ev) {
         it.abandoned = false;
         if (ev.text) it.now = { text: ev.text, kind: 'tool', t: ev.t };
       }
+      awake(state);
+      break;
+    }
+
+    case 'tool_call': {
+      // A later tool lifecycle observation is work/resolution evidence. The
+      // semantic insights model owns duration pairing; the board fold only
+      // needs it to clear a stale actionable notification and resume phase.
       awake(state);
       break;
     }

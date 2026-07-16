@@ -15,6 +15,8 @@ import {
   EPISODE_GAP_MS, TOP_ITEMS, DAY_MS,
 } from '../public/lanes-model.js';
 import { fold } from '../public/reducer.js';
+import { ACTIVE_GAP_MS, buildSessionInsights } from '../public/session-insights-model.js';
+import { parseViewContext } from '../public/session-view-context.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TAPES = path.join(here, 'tapes');
@@ -203,4 +205,230 @@ test('buildModel honors retract by event id (target.event), dropping the retract
   assert.ok(x, 'wi-x still has a lane');
   assert.equal(x.commits, 1, 'only the un-retracted commit is counted');
   assert.deepEqual(x.commitMarks.map(c => c.sha), ['c0ffee0'], 'the retracted commit mark is gone');
+});
+
+// --- semantic forensic lanes -------------------------------------------------
+test('reference insights become semantic, expanded preflight, and seven-PR rows', () => {
+  const events = readTape('semantic-reference.jsonl');
+  const insights = buildSessionInsights(events, {
+    untilT: Infinity,
+    displayNow: events.at(-1).t,
+  });
+  const context = parseViewContext('?session=reference-session&t=1700041531012&at=1700120426802');
+  const m = buildModel(events, insights, context);
+
+  assert.equal(m.semanticRows.primary.length, insights.phases.length,
+    'the primary row is the canonical wall-time partition');
+  assert.deepEqual(
+    [...new Set(m.semanticRows.preflight.map(segment => segment.stage))].sort(),
+    ['cross_ai_review', 'local_validation', 'prepare'],
+    'preflight is expanded into the canonical substages present on the tape',
+  );
+  assert.equal(m.semanticRows.prs.length, 7, 'the recovered PR is present in the swimlane');
+
+  const recovered = m.semanticRows.prs.find(row => row.number === 104);
+  assert.equal(recovered.recorded, null);
+  assert.equal(recovered.current.state, 'open');
+  assert.equal(recovered.discovery.kind, 'recovered');
+  assert.match(recovered.currentTruth, /^Current: open · validation pass/);
+  assert.match(recovered.stackTruth, /Base: #102/);
+
+  const staleThenCurrent = m.semanticRows.prs.find(row => row.number === 102);
+  assert.match(staleThenCurrent.recordedTruth, /^Recorded: open · validation pending/);
+  assert.match(staleThenCurrent.currentTruth, /^Current: open · validation pass/);
+  assert.equal(staleThenCurrent.attention, true, 'recorded/current disagreement is inspectable');
+  assert.ok(staleThenCurrent.transitions.some(mark => mark.kind === 'recorded_validation'));
+  assert.ok(staleThenCurrent.transitions.some(mark => mark.kind === 'current_validation'));
+
+  assert.ok(m.marks.some(mark => mark.kind === 'human_input'), 'attention is an explicit marker');
+  assert.ok(m.marks.some(mark => mark.kind === 'tool_observation'), 'historical tool points stay visible as points');
+  assert.equal(m.overlays.items.length, m.lanes.length, 'legacy item episodes are demoted to an overlay');
+  assert.ok(m.overlays.eventActivity.length > 0, 'filtered event activity is available as an overlay');
+  assert.ok(m.overlays.eventActivity.every(t => Number.isFinite(t)));
+
+  const phase = m.semanticRows.primary.find(segment => segment.evidenceEventIds.length);
+  assert.equal(phase.replayHref,
+    `/?session=reference-session&t=${phase.startT}&at=1700120426802`);
+  for (const key of ['id', 'label', 'startT', 'endT', 'confidence', 'evidenceEventIds', 'replayHref']) {
+    assert.ok(Object.hasOwn(phase, key), `evidence descriptor contains ${key}`);
+  }
+});
+
+test('semantic activity includes canonical producer events only', () => {
+  const events = [
+    { t: 0, id: 'start', type: 'session', phase: 'start' },
+    { t: 10, id: 'edit', source: 'hook', type: 'edit', path: 'a.js' },
+    { t: 20, id: 'alive', source: 'hook', type: 'alive' },
+    { t: 30, id: 'usage', source: 'hook', type: 'usage', input: 2 },
+    { t: 40, id: 'poll', source: 'poll-github', type: 'ci', pr: 1, status: 'pending' },
+    { t: 50, id: 'server', source: 'server', type: 'pr', number: 1, state: 'open' },
+    { t: 60, id: 'tool', source: 'hook', type: 'tool', tool: 'Read', text: 'read a.js' },
+    { t: 70, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 70, displayNow: 70 });
+  const m = buildModel(events, insights);
+  assert.deepEqual(m.overlays.eventActivity, [10, 60]);
+});
+
+test('agent coverage closes at the canonical attention boundary', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'phase-start', source: 'hook', type: 'work_phase', state: 'start', phase: 'coding', runId: 'r1', agentId: 'worker-1' },
+    { t: 20, id: 'attention', source: 'hook', type: 'session', phase: 'attention' },
+    { t: 30, id: 'resume', source: 'hook', type: 'session', phase: 'resume' },
+    { t: 40, id: 'phase-end', source: 'hook', type: 'work_phase', state: 'end', phase: 'coding', runId: 'r1', agentId: 'worker-1', outcome: 'pass' },
+    { t: 50, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 50, displayNow: 50 });
+  const segment = buildModel(events, insights).semanticRows.agents[0].segments[0];
+
+  assert.equal(segment.startT, 10);
+  assert.equal(segment.endT, 20, 'the late terminal cannot extend work through attention');
+  assert.equal(segment.durationMs, 10);
+  assert.equal(segment.disposition, 'active');
+  assert.equal(segment.wallCategory, 'coding');
+});
+
+test('agent readiness wait uses canonical waiting semantics and idle closure', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'wait-start', source: 'hook', type: 'work_phase', state: 'start', phase: 'preflight', stage: 'readiness_wait', runId: 'r1', agentId: 'worker-1' },
+    { t: 20, id: 'idle', source: 'hook', type: 'session', phase: 'idle' },
+    { t: 30, id: 'wait-end', source: 'hook', type: 'work_phase', state: 'end', phase: 'preflight', stage: 'readiness_wait', runId: 'r1', agentId: 'worker-1' },
+    { t: 40, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 40, displayNow: 40 });
+  const segment = buildModel(events, insights).semanticRows.agents[0].segments[0];
+
+  assert.equal(segment.endT, 20);
+  assert.equal(segment.disposition, 'waiting');
+  assert.equal(segment.wallCategory, 'waiting');
+});
+
+test('agent readiness wait closes at its owning span before human attention', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'wait-start', source: 'hook', type: 'work_phase', state: 'start', phase: 'preflight', stage: 'readiness_wait', runId: 'r1', agentId: 'worker-1' },
+    { t: 20, id: 'human', source: 'hook', type: 'notification', reason: 'next_prompt' },
+    { t: 30, id: 'wait-end', source: 'hook', type: 'work_phase', state: 'end', phase: 'preflight', stage: 'readiness_wait', runId: 'r1', agentId: 'worker-1' },
+    { t: 40, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 40, displayNow: 40 });
+  const segment = buildModel(events, insights).semanticRows.agents[0].segments[0];
+
+  assert.equal(segment.endT, 20, 'human attention shares waiting disposition but not the owning work phase');
+  assert.deepEqual(segment.evidenceEventIds, ['wait-start', 'wait-end']);
+});
+
+test('overlapping explicit agents keep their own phase and stage labels', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'coding-start', source: 'hook', type: 'work_phase', state: 'start', phase: 'coding', runId: 'coding-run', agentId: 'coder' },
+    { t: 10, id: 'preflight-start', source: 'hook', type: 'work_phase', state: 'start', phase: 'preflight', stage: 'local_validation', runId: 'preflight-run', agentId: 'reviewer' },
+    { t: 20, id: 'preflight-end', source: 'hook', type: 'work_phase', state: 'end', phase: 'preflight', stage: 'local_validation', runId: 'preflight-run', agentId: 'reviewer', outcome: 'pass' },
+    { t: 30, id: 'coding-end', source: 'hook', type: 'work_phase', state: 'end', phase: 'coding', runId: 'coding-run', agentId: 'coder', outcome: 'pass' },
+    { t: 40, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 40, displayNow: 40 });
+  const rows = buildModel(events, insights).semanticRows.agents;
+  const coder = rows.find(row => row.agentId === 'coder').segments[0];
+  const reviewer = rows.find(row => row.agentId === 'reviewer').segments[0];
+
+  assert.equal(coder.label, 'Coding');
+  assert.equal(coder.phase, 'coding');
+  assert.equal(coder.stage, null);
+  assert.equal(coder.endT, 30, 'canonical lifecycle may close but never relabel explicit agent evidence');
+  assert.equal(reviewer.label, 'Preflight · Local Validation');
+  assert.equal(reviewer.phase, 'preflight');
+  assert.equal(reviewer.stage, 'local_validation');
+});
+
+test('unmatched tool execution stays unknown while elapsed duration reaches the model cutoff', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'tool-start', source: 'hook', type: 'tool_call', state: 'start', sessionId: 's1', agentId: 'worker-1', toolUseId: 'u1', tool: 'Bash' },
+    { t: 40, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 40, displayNow: 40 });
+  const mark = buildModel(events, insights).marks.find(candidate => candidate.kind === 'tool_outcome_unknown');
+
+  assert.equal(mark.outcome, 'unknown');
+  assert.equal(mark.startT, 10);
+  assert.equal(mark.endT, 40);
+  assert.equal(mark.durationMs, 30);
+});
+
+test('unmatched tail tool measures elapsed time against the insights display clock', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'tool-start', source: 'hook', type: 'tool_call', state: 'start', sessionId: 's1', agentId: 'worker-1', toolUseId: 'u1', tool: 'Bash' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 40, displayNow: 40 });
+  const mark = buildModel(events, insights).marks.find(candidate => candidate.kind === 'tool_outcome_unknown');
+
+  assert.equal(insights.bounds.recordedEnd, 10);
+  assert.equal(mark.outcome, 'unknown');
+  assert.equal(mark.endT, 40);
+  assert.equal(mark.durationMs, 30);
+  assert.equal(mark.percent, null, 'an open tool has no truthful recorded-session percentage');
+});
+
+test('PR rows and transitions retain occurrence, observation, and provenance separately', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 100, id: 'pr', source: 'poll-github', type: 'pr', repo: 'org/repo', number: 7, title: 'Temporal truth', state: 'open', createdAt: 20, occurredAt: 25 },
+    { t: 200, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 200, displayNow: 200 });
+  const context = parseViewContext('?session=s1&at=200');
+  const row = buildModel(events, insights, context).semanticRows.prs[0];
+  const recorded = row.transitions.find(transition => transition.transitionKind === 'recorded_state');
+
+  assert.equal(row.startT, 20, 'the rail starts at canonical creation rather than poll observation');
+  assert.equal(row.createdAt, 20);
+  assert.equal(row.occurredAt, 25);
+  assert.equal(row.observedAt, 100);
+  assert.equal(recorded.startT, 25, 'state transition prefers occurredAt');
+  assert.equal(recorded.occurredAt, 25);
+  assert.equal(recorded.observedAt, 100);
+  assert.equal(recorded.source, 'poll-github');
+  assert.equal(row.replayHref, '/?session=s1&t=100&at=200', 'row replay waits until its evidence is observable');
+  assert.equal(recorded.replayHref, '/?session=s1&t=100&at=200', 'transition replay waits until its evidence is observable');
+});
+
+test('explicit agent and tool lifecycles preserve detail, provenance, and confidence', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start', sessionId: 's1' },
+    { t: 10, id: 'phase-start', source: 'hook', type: 'work_phase', state: 'start', phase: 'preflight', stage: 'local_validation', runId: 'r1', agentId: 'worker-1' },
+    { t: 15, id: 'tool-start', source: 'hook', type: 'tool_call', state: 'start', sessionId: 's1', agentId: 'worker-1', toolUseId: 'u1', tool: 'Bash', input: { command: 'npm test' } },
+    { t: 25, id: 'tool-end', source: 'hook', type: 'tool_call', state: 'success', sessionId: 's1', agentId: 'worker-1', toolUseId: 'u1', tool: 'Bash' },
+    { t: 30, id: 'phase-end', source: 'hook', type: 'work_phase', state: 'end', phase: 'preflight', stage: 'local_validation', runId: 'r1', agentId: 'worker-1', outcome: 'pass' },
+    { t: 40, id: 'end', source: 'hook', type: 'session', phase: 'end' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 40, displayNow: 40 });
+  const m = buildModel(events, insights, parseViewContext('?session=s1'));
+
+  assert.equal(m.semanticRows.agents.length, 1);
+  assert.equal(m.semanticRows.agents[0].agentId, 'worker-1');
+  assert.equal(m.semanticRows.agents[0].segments[0].confidence, 'explicit');
+  assert.equal(m.semanticRows.agents[0].segments[0].outcome, 'pass');
+
+  const tool = m.marks.find(mark => mark.kind === 'tool_execution');
+  assert.equal(tool.label, 'Bash · success');
+  assert.equal(tool.confidence, 'explicit');
+  assert.equal(tool.evidence.length, 2);
+  assert.equal(tool.evidence[0].toolUseId, 'u1');
+  assert.equal(tool.evidence[0].detail, 'npm test');
+  assert.equal(tool.evidence[0].provenance, 'hook');
+});
+
+test('recorder staleness is a labeled forensic marker', () => {
+  const events = [
+    { t: 0, id: 'start', source: 'hook', type: 'session', phase: 'start' },
+    { t: 10, id: 'edit', source: 'hook', type: 'edit', path: 'a.js' },
+    { t: 20, id: 'pr', source: 'poll-github', type: 'pr', repo: 'org/repo', number: 1, state: 'open' },
+  ];
+  const insights = buildSessionInsights(events, { untilT: 20, displayNow: ACTIVE_GAP_MS + 30 });
+  const m = buildModel(events, insights);
+  assert.ok(m.marks.some(mark => mark.kind === 'recorder_gap' && /Recorder stale/.test(mark.label)));
 });

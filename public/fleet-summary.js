@@ -49,10 +49,9 @@ export function summarizeBase(events, { id } = {}) {
     if (pr.ci === 'fail') failingCI++;
   }
 
-  // needsInput: an `attention` phase that was never resolved by the tape's end.
-  // The reducer clears attention on any subsequent activity (awake()), so a
-  // trailing `attention` phase means the agent is genuinely still blocked on you.
-  const needsInput = s.phase === 'attention';
+  // Only explicit permission/question reasons are actionable. Legacy session
+  // attention folds to question in the reducer, preserving old tape behavior.
+  const needsInput = s.unresolvedInputReason === 'permission' || s.unresolvedInputReason === 'question';
   const lastSay = s.lastSay ? String(s.lastSay).slice(0, SAY_CAP) : null;
 
   return {

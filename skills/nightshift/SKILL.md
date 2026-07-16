@@ -15,7 +15,7 @@ one-time install hasn't run — tell the user to run `node <repo>/tools/install-
 ```
 Both record live via hooks gated on a per-session marker (Codex implements
 Claude's hook contract). Codex additionally runs a thin "meter" tail of its
-rollout for the few things hooks don't carry — token cost, PR/CI state, and the
+rollout for the few things hooks don't carry — token cost, PR sightings, and the
 quiet signal for idle. Either way the board is the same.
 
 Parse the argument (default `on`). Set up once for every branch:
@@ -23,6 +23,7 @@ Parse the argument (default `on`). Set up once for every branch:
 REPO=$(node -e 'console.log(require(require("os").homedir()+"/.nightshift/install.json").repo)')
 LOG=$(node "$REPO/tools/resolve-log.js")
 SLUG=$(basename "$LOG" .jsonl)
+POLL_SID=${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}
 ```
 
 ## `/nightshift` / `/nightshift on`
@@ -48,9 +49,9 @@ Branch on that:
 
 - **Already recording** (`LIVE` = `live`): don't ask, don't reset. For **Codex**,
   still run `node "$REPO/tools/codex-recorder.js" "$LOG"` (idempotent — it restarts
-  the recorder if it died). For **Claude**, re-run the PR/CI watcher line **and the
-  task backfill** from *Start* (both idempotent — the watcher no-ops if already live,
-  the backfill just refreshes the task snapshot). Then skip to *Open the board*.
+  the recorder if it died). For **Claude**, re-run the task backfill from *Start*.
+  For both hosts, re-run the poller registration line from *Start* (atomic and
+  idempotent), then skip to *Open the board*.
 - **An existing tape, not currently recording** (`LIVE` = `off` and `EVENTS` >
   0): the tape is left over from an earlier session/run. **Ask the user and wait
   for their answer** — do not start recording until they choose:
@@ -64,10 +65,24 @@ Branch on that:
 Archives, never deletes — the board ignores `*.bak-*` so old tapes vanish from
 the switcher but stay on disk:
 ```sh
+# Cancel any unclaimed mid-turn reservation before its tape is archived. A new
+# Start below will reserve turn 1 against the fresh tape; Continue never archives,
+# so its reservation scans and preserves the existing tape numbering.
+ATTACH_SID=${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}
+if [ -n "$ATTACH_SID" ]; then
+  if ! node "$REPO/tools/turn-attachment.js" cancel --sid "$ATTACH_SID" --reason reset; then
+    echo "nightshift: failed to cancel the turn attachment; reset aborted before archiving." >&2
+    exit 1
+  fi
+fi
+# Remove the durable supervisor registration before rotating its tape.
+if [ -n "$POLL_SID" ]; then
+  if ! node "$REPO/tools/poller-registration.js" unregister --log "$LOG" --session "$POLL_SID" --drain; then
+    echo "nightshift: PR reconciliation did not drain; reset aborted before archiving." >&2
+    exit 1
+  fi
+fi
 [ -n "$CLAUDE_CODE_SESSION_ID" ] || node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
-# Stop the PR/CI watcher too — it's keyed by log path, so without this the live
-# worker survives the archive and self-retires on the empty fresh tape.
-node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 [ -s "$LOG" ] && mv "$LOG" "$LOG.bak-$(date +%s)"
 # Drop the per-session turn state so the fresh tape starts at turn 1 and doesn't
 # write a stale 'done' for the archived card. Both agents synthesize per-turn
@@ -83,25 +98,22 @@ node "$REPO/tools/poll-github.js" --stop --log "$LOG"
 **Claude Code** — mark the session, emit the opening event:
 ```sh
 mkdir -p ~/.nightshift/active && touch ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
+# UserPromptSubmit already fired before this skill could create the marker. Reserve
+# its deterministic card now; the next PostToolUse atomically recovers the newest
+# real human prompt from this session's transcript.
+if ! node "$REPO/tools/turn-attachment.js" request --sid "$CLAUDE_CODE_SESSION_ID" --log "$LOG" --cwd "$PWD"; then
+  echo "nightshift: failed to reserve the current turn; recording was not started." >&2
+  rm -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
+  exit 1
+fi
 node "$REPO/tools/emit.js" session --phase start --agent claude --title "$(basename "$PWD")" --cwd "$PWD" --log "$LOG"
-```
-Seed the plan: Claude's task tools (TaskCreate/TaskUpdate) live only in the
-transcript and aren't in the hook matcher, so backfill the current task list once
-— the board shows sub-statuses immediately, then the hook keeps it live by tailing
-the transcript on each tool call:
-```sh
+# Backfill before this Bash invocation returns: its PostToolUse is the claim that
+# opens the recovered card, and can attach this freshly seeded task snapshot.
 node "$REPO/tools/backfill-tasks.js" --log "$LOG" --sid "$CLAUDE_CODE_SESSION_ID" --cwd "$PWD" 2>/dev/null || true
 ```
-Then start the PR/CI watcher (Codex gets PR/CI from its meter; Claude has none).
-It polls only the PRs THIS session has surfaced — **session-scoped, never the whole
-repo** — using **toast review-ci** for status (fast, realtime, authoritative) with
-gh as the fallback when toast isn't installed. It self-detaches a background worker
-(near-realtime; retires itself once every PR is merged/closed) and seeds the board
-on its first tick. Skip silently if it's not a GitHub repo or gh is missing:
-```sh
-RS=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
-  && [ -n "$RS" ] && node "$REPO/tools/poll-github.js" --known --interval 15 --repo "$RS" --log "$LOG"
-```
+Claude's task tools (TaskCreate/TaskUpdate) live only in the transcript and aren't
+in the hook matcher, so that one-time backfill seeds the current task list; the
+hook then keeps it live by tailing the transcript on each tool call.
 
 **Codex** — start recording; `codex-recorder` picks the path automatically and
 prints which (`hook` or `tail`): **hook** recording + thin meter for a session
@@ -110,6 +122,30 @@ to this session, backfilling it) for one that predates the hook — since Codex
 loads hooks only at session start.
 ```sh
 node "$REPO/tools/codex-recorder.js" "$LOG"
+```
+
+**Both hosts** — register this session for the board server's durable PR/CI
+supervisor. The server is the sole scheduler/writer; it invokes the session-scoped
+one-shot poller under a lease, survives restarts, and needs no open viewer:
+```sh
+# BEGIN_CHECKED_POLLER_REGISTRATION
+if [ -n "$POLL_SID" ]; then
+  if ! node "$REPO/tools/poller-registration.js" register --log "$LOG" --session "$POLL_SID" --cwd "$PWD"; then
+    echo "nightshift: PR supervisor registration failed; recording was not started." >&2
+    ATTACH_SID=${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}
+    if [ -n "$ATTACH_SID" ]; then
+      node "$REPO/tools/turn-attachment.js" cancel --sid "$ATTACH_SID" --reason poller-registration-failed >/dev/null 2>&1 || true
+    fi
+    [ -n "$CLAUDE_CODE_SESSION_ID" ] && rm -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
+    [ -n "$CODEX_THREAD_ID" ] && rm -f ~/.nightshift/active/"$CODEX_THREAD_ID"
+    if [ -z "$CLAUDE_CODE_SESSION_ID" ]; then
+      node "$REPO/tools/codex-tail.js" --stop --log "$LOG" >/dev/null 2>&1 || true
+    fi
+    node "$REPO/tools/emit.js" session --phase idle --log "$LOG" >/dev/null 2>&1 || true
+    exit 1
+  fi
+fi
+# END_CHECKED_POLLER_REGISTRATION
 ```
 
 ### Open the board
@@ -125,6 +161,22 @@ Reset without asking: run *Reset (archive the old tape)*, then *Start*, then
 
 ## `/nightshift off` (or `stop`)
 ```sh
+# Prevent a late PostToolUse from claiming a reservation after recording stops.
+ATTACH_SID=${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}
+if [ -n "$ATTACH_SID" ]; then
+  if ! node "$REPO/tools/turn-attachment.js" cancel --sid "$ATTACH_SID" --reason off; then
+    echo "nightshift: failed to cancel the turn attachment; recording remains on." >&2
+    exit 1
+  fi
+fi
+# Cancel and drain PR reconciliation before stopping recorders or mutating their
+# markers; a timeout leaves the whole recording path intact and retryable.
+if [ -n "$POLL_SID" ]; then
+  if ! node "$REPO/tools/poller-registration.js" unregister --log "$LOG" --session "$POLL_SID" --drain; then
+    echo "nightshift: PR reconciliation did not drain; recording remains on." >&2
+    exit 1
+  fi
+fi
 # Retire the open per-turn card before dropping the marker — once the marker is
 # gone the Stop hook (Claude) / meter (Codex) is gated out and can't close it, so
 # it would stick in "doing" on the kept tape. No-op if no card is open.
@@ -134,8 +186,7 @@ rm -f ~/.nightshift/active/"$CLAUDE_CODE_SESSION_ID"
 # Codex (drop the marker so hooks stop recording, and stop the meter):
 rm -f ~/.nightshift/active/"$CODEX_THREAD_ID"
 node "$REPO/tools/codex-tail.js" --stop --log "$LOG"
-# both: stop the PR/CI watcher (no-op if none) and mark idle.
-node "$REPO/tools/poll-github.js" --stop --log "$LOG"
+# both: mark idle after supervision and recording have stopped.
 node "$REPO/tools/emit.js" session --phase idle --log "$LOG"
 ```
 Confirm recording is paused (the tape is kept).

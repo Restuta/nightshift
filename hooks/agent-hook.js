@@ -12,7 +12,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 
 const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightshift');
 
@@ -20,6 +20,11 @@ const NS_HOME = process.env.NIGHTSHIFT_HOME || path.join(os.homedir(), '.nightsh
 // defensively — a missing/broken module must never take the hook down.
 let tasksFold = null;
 try { tasksFold = require(path.join(__dirname, '..', 'tools', 'tasks-fold.js')); } catch { /* optional */ }
+
+// Mid-turn /nightshift attachment recovery. Loaded defensively for vendored or
+// partially upgraded installs: observability must remain fail-open.
+let turnAttachment = null;
+try { turnAttachment = require(path.join(__dirname, '..', 'tools', 'turn-attachment.js')); } catch { /* optional */ }
 
 // Which agent produced this payload — read it from the transcript path, which
 // is namespaced (~/.codex/… vs ~/.claude/…); fall back to the Claude env var.
@@ -70,9 +75,12 @@ function resolveLog(root, repo, self) {
 
 // Recording gate for central sessions: opt in via NIGHTSHIFT env or a per-session
 // marker (created by /nightshift), keyed on the payload's session_id.
+function sessionIdOf(hook) {
+  return hook.session_id || hook.sessionId || process.env.CODEX_THREAD_ID || process.env.CLAUDE_CODE_SESSION_ID || null;
+}
 function recording(hook, central) {
   if (!central || process.env.NIGHTSHIFT) return true;
-  const sid = hook.session_id;
+  const sid = sessionIdOf(hook);
   return !!(sid && fs.existsSync(path.join(NS_HOME, 'active', sid)));
 }
 
@@ -125,6 +133,125 @@ function turnState(sid) {
 function saveTurn(sid, st) {
   fs.mkdirSync(TURNS, { recursive: true });
   fs.writeFileSync(path.join(TURNS, sid + '.json'), JSON.stringify(st));
+}
+
+// Open tool calls are durable hook state because PreToolUse/PostToolUse/Stop run
+// in separate processes. Keep one identity file per compound key inside a
+// session directory: unrelated agents/tools never overwrite one shared JSON
+// snapshot, and rename is an atomic claim when a PostToolUse races a boundary.
+const TOOL_CALLS = path.join(NS_HOME, 'tool-calls');
+const sessionStateName = value => createHash('sha256').update(String(value || '')).digest('hex');
+const toolSessionDir = sid => path.join(TOOL_CALLS, sessionStateName(sid));
+const toolIdentityName = (agentId, toolUseId) =>
+  Buffer.from(JSON.stringify([agentId, toolUseId])).toString('base64url') + '.json';
+const toolIdentityPath = identity =>
+  path.join(toolSessionDir(identity.sessionId), toolIdentityName(identity.agentId, identity.toolUseId));
+
+function beginTool(identity, append) {
+  const file = toolIdentityPath(identity);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    // Write the full record privately, then publish it with one exclusive hard
+    // link. Readers can only observe complete JSON, while EEXIST makes duplicate
+    // PreToolUse delivery idempotent without a shared read/modify/write race.
+    fs.writeFileSync(tmp, JSON.stringify(identity));
+    fs.linkSync(tmp, file);
+  } catch (error) {
+    if (error && error.code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+  }
+  append({ type: 'tool_call', state: 'start', ...identity });
+  return true;
+}
+
+function claimOpenTool(identity) {
+  const file = toolIdentityPath(identity);
+  const claimed = `${file}.claim-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try { fs.renameSync(file, claimed); } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+  let open = null;
+  try { open = JSON.parse(fs.readFileSync(claimed, 'utf8')); } catch { /* corrupt state is not evidence */ }
+  try { fs.unlinkSync(claimed); } catch { /* already gone */ }
+  return open;
+}
+
+function sameToolIdentity(left, right) {
+  return !!left && !!right
+    && left.sessionId === right.sessionId
+    && left.agentId === right.agentId
+    && left.toolUseId === right.toolUseId;
+}
+
+function finishTool(identity, append) {
+  const open = claimOpenTool(identity);
+  if (!sameToolIdentity(open, identity)) return false;
+  append({ type: 'tool_call', state: 'success', ...open });
+  return true;
+}
+
+function closeOpenTools(sid, append) {
+  if (!sid) return;
+  const dir = toolSessionDir(sid);
+  let files;
+  try { files = fs.readdirSync(dir).filter(file => file.endsWith('.json')); } catch { return; }
+  for (const name of files) {
+    const file = path.join(dir, name);
+    const claimed = `${file}.claim-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try { fs.renameSync(file, claimed); } catch { continue; }
+    let open = null;
+    try { open = JSON.parse(fs.readFileSync(claimed, 'utf8')); } catch { /* corrupt state is not evidence */ }
+    try { fs.unlinkSync(claimed); } catch { /* already gone */ }
+    const expectedName = open && toolIdentityName(open.agentId, open.toolUseId);
+    if (open && open.sessionId === sid && expectedName === name) {
+      append({ type: 'tool_call', state: 'unknown', ...open });
+    }
+  }
+  try { fs.rmdirSync(dir); } catch { /* non-empty or already removed */ }
+}
+
+function toolIdentity(hook, sid, item) {
+  const toolUseId = hook.tool_use_id || hook.toolUseId;
+  if (!sid || !toolUseId) return null;
+  const identity = {
+    sessionId: sid,
+    agentId: hook.agent_id || hook.agentId || 'main',
+    toolUseId,
+    tool: hook.tool_name || hook.toolName || '',
+  };
+  if (item) identity.item = item;
+  const parentRunId = hook.parent_run_id || hook.parentRunId;
+  if (parentRunId) identity.parentRunId = parentRunId;
+  return identity;
+}
+
+// Notification text is display-only. Actionability comes exclusively from
+// structured subtype/reason/type fields; an unfamiliar subtype stays an
+// informational system_notice rather than being guessed from prose.
+function notificationReason(hook) {
+  const nested = hook.notification && typeof hook.notification === 'object' ? hook.notification : {};
+  const candidates = [
+    hook.notification_type, hook.notificationType, hook.subtype, hook.reason, hook.type,
+    nested.notification_type, nested.notificationType, nested.subtype, nested.reason, nested.type,
+  ];
+  const reasons = new Map([
+    ['next_prompt', 'next_prompt'], ['idle_prompt', 'next_prompt'],
+    ['permission', 'permission'], ['permission_prompt', 'permission'], ['permission_request', 'permission'],
+    ['question', 'question'], ['elicitation', 'question'], ['elicitation_dialog', 'question'],
+    ['background_complete', 'background_complete'], ['background_task_complete', 'background_complete'],
+    ['task_complete', 'background_complete'], ['task_completed', 'background_complete'],
+    ['system_notice', 'system_notice'],
+  ]);
+  for (const value of candidates) {
+    if (typeof value !== 'string') continue;
+    const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+    if (reasons.has(normalized)) return reasons.get(normalized);
+  }
+  return 'system_notice';
 }
 
 // Live capture of Claude's task list (TaskCreate/TaskUpdate). Those tools aren't
@@ -335,7 +462,81 @@ function main() {
   const append = makeAppend(LOG);
   const name = hook.hook_event_name;
   const agent = agentOf(hook);
-  const sid = hook.session_id;
+  const sid = sessionIdOf(hook);
+
+  // The one path for opening both normal UserPromptSubmit turns and a reserved
+  // mid-turn attachment. An explicit id is tape-deterministic and may already
+  // exist when claimAttachment repaired a crash after append.
+  const openTurn = ({ id, title, promptT, sessionId }) => {
+    if (!sessionId) return null;
+    const st = turnState(sessionId);
+    const namespace = sid8(sessionId);
+    if (st.turnN === 0) st.turnN = maxTurnN(LOG, namespace);
+
+    let turnId = id;
+    if (turnId) {
+      const match = namespace && new RegExp(`^turn-${namespace}-(\\d+)$`).exec(turnId);
+      if (match) st.turnN = Math.max(st.turnN, Number(match[1]));
+    } else {
+      st.turnN++;
+      turnId = namespace ? `turn-${namespace}-${st.turnN}` : `turn-${st.turnN}`;
+    }
+
+    if (st.card && st.card !== turnId) append({ type: 'item', id: st.card, status: 'done' });
+    const exists = readLog(LOG).some(event => event.type === 'item' && event.id === turnId);
+    st.card = turnId;
+    if (!exists) {
+      append({
+        ...(promptT != null ? { t: promptT } : {}),
+        type: 'item', id: turnId, title: title || `turn ${st.turnN}`, status: 'doing',
+      });
+    }
+    saveTurn(sessionId, st);
+
+    // The /nightshift skill backfills Claude's task state immediately after it
+    // requests the attachment. Put that current snapshot on the recovered card
+    // before the triggering tool event is recorded.
+    if (tasksFold && agent === 'claude') {
+      try {
+        const taskState = JSON.parse(fs.readFileSync(path.join(TASKS, sessionId + '.json'), 'utf8'));
+        const todos = tasksFold.toTodos(taskState);
+        if (todos.todos.length) append({ ...todos, item: turnId });
+      } catch { /* no task state yet */ }
+    }
+    return turnId;
+  };
+
+  // Stop/next-prompt atomically make the reservation non-claimable under its fs
+  // lease. A returned helper-appended id is safe to close after lease release:
+  // delayed PostToolUse delivery can only observe terminal state.
+  const transitionAttachmentBoundary = reason => {
+    if (SELF || !sid || !turnAttachment || !turnAttachment.boundaryAttachment) return null;
+    try { return turnAttachment.boundaryAttachment({ sid, log: LOG, reason }); }
+    catch { return null; }
+  };
+
+  const closeBoundaryAttachment = boundary => {
+    if (!boundary || !boundary.turnId) return false;
+    const st = turnState(sid);
+    const itemStatus = id => {
+      let status = null;
+      for (const event of readLog(LOG)) {
+        if (event.type === 'item' && event.id === id && event.status) status = event.status;
+      }
+      return status;
+    };
+    if (st.card && st.card !== boundary.turnId && itemStatus(st.card) !== 'done') {
+      append({ type: 'item', id: st.card, status: 'done' });
+    }
+    if (itemStatus(boundary.turnId) !== 'done') append({ type: 'item', id: boundary.turnId, status: 'done' });
+    st.turnN = Math.max(st.turnN || 0, maxTurnN(LOG, sid8(sid)));
+    st.card = null;
+    saveTurn(sid, st);
+    if (turnAttachment && turnAttachment.ackBoundaryAttachment) {
+      turnAttachment.ackBoundaryAttachment({ sid, turnId: boundary.turnId });
+    }
+    return true;
+  };
 
   if (name === 'SessionStart') {
     append({ type: 'session', phase: 'start', agent, session: sid, cwd: hook.cwd });
@@ -350,6 +551,7 @@ function main() {
   // freezes the now-lines (1.6). Retire the open turn card first so it doesn't
   // strand in "in progress" behind the end.
   if (name === 'SessionEnd') {
+    try { closeOpenTools(sid, append); } catch { /* never break */ }
     if (!SELF && sid) {
       const st = turnState(sid);
       if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
@@ -359,6 +561,7 @@ function main() {
   }
 
   if (name === 'Stop') { // Claude only — Codex fires no Stop
+    try { closeOpenTools(sid, append); } catch { /* never break */ }
     // For central recordings (where we synthesize the turn card, below), retire
     // it here: Claude gives a clean end-of-turn signal Codex lacks, so the card
     // moves to "done" the moment the turn ends — no card stuck in "doing" until
@@ -366,20 +569,23 @@ function main() {
     // leave those alone.
     // Capture any last task change before the card is retired (a TaskUpdate with
     // no following tool call would otherwise be missed until the next turn).
+    const boundaryAttachment = transitionAttachmentBoundary('stop');
     if (agent === 'claude' && !SELF) {
       try { syncClaudeTasks(hook, sid, append); } catch { /* never break */ }
       try { syncClaudeSay(hook, sid, append, turnState(sid).card); } catch { /* never break */ }
     }
     if (!SELF && sid) {
       const st = turnState(sid);
-      if (st.card) { append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st); }
+      if (!closeBoundaryAttachment(boundaryAttachment) && st.card) {
+        append({ type: 'item', id: st.card, status: 'done' }); st.card = null; saveTurn(sid, st);
+      }
     }
     append({ type: 'session', phase: 'idle', session: sid });
     return;
   }
 
   if (name === 'Notification') { // Claude only
-    append({ type: 'session', phase: 'attention', text: hook.message || '', session: sid });
+    append({ type: 'notification', reason: notificationReason(hook), text: hook.message || hook.text || '', session: sid });
     return;
   }
 
@@ -393,36 +599,18 @@ function main() {
     // Skip card synthesis for harness-injected turns — they'd just litter the
     // board with "<task-notification>" cards. The agent still does work in that
     // turn; it attaches to the open card (or none), and Stop retires as usual.
-    const synth = sid && isHumanPrompt(hook.prompt) && (agent === 'codex' || !SELF);
+    const humanPrompt = sid && isHumanPrompt(hook.prompt);
+    const boundaryAttachment = humanPrompt ? transitionAttachmentBoundary('next_prompt') : null;
+    closeBoundaryAttachment(boundaryAttachment);
+    const synth = humanPrompt && (agent === 'codex' || !SELF);
     if (synth) {
-      const st = turnState(sid);
-      // Restart continuity (plan 1.3): if this session's per-sid counter was lost
-      // (state file deleted/rolled) but it already minted cards into the log, resume
-      // numbering from the log's highest n in MY namespace — the tape is the truth —
-      // so a fresh turn-1 can't re-collide with a card this same session wrote. No-op
-      // on a genuine first turn (the scan finds nothing).
-      if (st.turnN === 0) st.turnN = maxTurnN(LOG, sid8(sid));
-      // Closing the prior card only ever touches THIS session's own card (turnState
-      // is keyed by session id), so it stays within our namespace by construction.
-      if (st.card) append({ type: 'item', id: st.card, status: 'done' });
-      st.turnN++;
-      // Namespace the card by this session's sid8 so two sessions on one central log
-      // never mint the same id. Degrade to the legacy shape only if sid is unknown.
-      const ns = sid8(sid);
-      st.card = ns ? `turn-${ns}-${st.turnN}` : `turn-${st.turnN}`;
-      append({ type: 'item', id: st.card, title: promptTitle(hook.prompt) || `turn ${st.turnN}`, status: 'doing' });
+      const promptT = hook.timestamp ? Date.parse(hook.timestamp) : null;
+      openTurn({
+        title: promptTitle(hook.prompt),
+        promptT: Number.isFinite(promptT) ? promptT : null,
+        sessionId: sid,
+      });
       append({ type: 'session', phase: 'resume', agent, session: sid });
-      saveTurn(sid, st);
-      // Show the current task plan on the fresh card right away (Claude) — so the
-      // active card carries its checklist from the start of the turn, not only
-      // after the next task change. Pulled from the state the transcript tail keeps.
-      if (tasksFold && agent === 'claude') {
-        try {
-          const ts = JSON.parse(fs.readFileSync(path.join(TASKS, sid + '.json'), 'utf8'));
-          const todos = tasksFold.toTodos(ts);
-          if (todos.todos.length) append({ ...todos, item: st.card });
-        } catch { /* no task state yet */ }
-      }
     } else {
       append({ type: 'session', phase: 'resume', agent, session: sid });
     }
@@ -443,11 +631,50 @@ function main() {
     return;
   }
 
+  if (name === 'PreToolUse') {
+    const item = sid ? turnState(sid).card : null;
+    const identity = toolIdentity(hook, sid, item);
+    if (identity) {
+      try { beginTool(identity, append); } catch { /* never break */ }
+    }
+    return;
+  }
+
   if (name === 'PostToolUse') {
+    // This must be the first PostToolUse action: claim before any turn-state read
+    // so the triggering tool/task snapshot attaches to the recovered card.
+    let attachment = null;
+    if (!SELF && turnAttachment && sid) {
+      try { attachment = turnAttachment.claimAttachment({ sid, log: LOG, transcriptPath: hook.transcript_path }); }
+      catch { /* leave the reservation retryable */ }
+    }
+    if (attachment && attachment.turnId && /^(adopted_existing|recovered)$/.test(attachment.status)) {
+      try {
+        turnAttachment.ackAttachment({
+          sid,
+          turnId: attachment.turnId,
+          adopt: () => {
+            const currentCard = turnState(sid).card;
+            if (currentCard !== attachment.turnId) {
+              openTurn({
+                id: attachment.turnId,
+                title: promptTitle(attachment.prompt),
+                promptT: attachment.promptT,
+                sessionId: sid,
+              });
+            }
+          },
+        });
+      } catch { /* leave pending so the next tool/boundary can retry */ }
+    }
     const tool = hook.tool_name || '';
     const inp = hook.tool_input || {};
     const item = sid ? turnState(sid).card : null;
     const withItem = ev => (item ? { ...ev, item } : ev);
+    const identity = toolIdentity(hook, sid, item);
+    if (identity) {
+      try { finishTool(identity, append); } catch { /* never break */ }
+    }
 
     // Piggyback on this firing tool to pull in any Claude task-list changes and
     // narration (both live only in the transcript, not in this payload).

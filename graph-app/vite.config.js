@@ -20,6 +20,7 @@ const proxyPaths = [
   '/reducer.js', '/graph-model.js', '/digest.js', '/turn-id.js',
   '/session-label.js', '/session-picker.js', '/story-model.js',
   '/lanes-model.js', '/lanes-scale.js', '/fleet-summary.js',
+  '/session-insights-model.js', '/session-summary.js', '/session-view-context.js',
 ];
 
 export default defineConfig({
@@ -36,6 +37,7 @@ export default defineConfig({
       external: [
         '/reducer.js', '/graph-model.js', '/digest.js', '/turn-id.js',
         '/session-label.js', '/story-model.js', '/session-picker.js',
+        '/session-insights-model.js', '/session-summary.js', '/session-view-context.js',
       ],
       output: {
         entryFileNames: 'assets/graph-app.js',
