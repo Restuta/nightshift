@@ -14,6 +14,7 @@ import {
   advanceReplayFrame,
   buildReplayFrame,
   loadReplaySession,
+  reconcileDisclosureList,
   resetGanttView,
   shouldOpenLiveStream,
   visibleReplayDelta,
@@ -131,6 +132,7 @@ function clearSessionView() {
   badge.className = 'agent-badge';
   badge.hidden = true;
   $('#board-overview-label').textContent = 'Session overview';
+  $('#board-overview-state-label').textContent = '';
   $('#board-overview-meta').textContent = '';
   delete $('#board-overview-details').dataset.state;
   $('#board-summary').replaceChildren();
@@ -151,6 +153,7 @@ function clearSessionView() {
   $('#tools-metrics').textContent = '';
   $('#tools').hidden = true;
   $('#prs-list').replaceChildren();
+  renderedPrMarkup = '';
   $('#prs').hidden = true;
   $('#plan-list').replaceChildren();
   $('#plan').hidden = true;
@@ -1075,24 +1078,29 @@ function renderFeed(freshEvents) {
 // -------------------------------------------------------- pull requests
 
 const RECENT_MERGES = 8;
+let renderedPrMarkup = '';
 
 function renderPRs(boardView) {
   const box = $('#prs');
   const all = boardView.prs;
   box.hidden = !all.length;
-  if (!all.length) return;
+  if (!all.length) {
+    renderedPrMarkup = '';
+    return;
+  }
   const open = all.filter(pr => pr.state === 'open').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const merged = all.filter(pr => pr.state === 'merged').sort((a, b) => (b.discoveryT || 0) - (a.discoveryT || 0));
   $('#prs-count').textContent = boardView.prHeaderTotals;
 
   const row = pr => {
+    const rowKey = pr.key ?? `${pr.repo ?? 'unknown'}#${pr.number}`;
     const primaryContent = `<b class="prnum">#${pr.number}</b><span class="prtitle">${esc(pr.title)}</span><span class="prage">${esc(pr.openFor)}</span>`;
     const primary = pr.url
       ? `<a class="pr-primary" href="${esc(pr.url)}" target="_blank" rel="noopener" aria-label="Open PR #${pr.number} on GitHub">${primaryContent}</a>`
       : `<div class="pr-primary" aria-label="PR #${pr.number}; GitHub link unavailable">${primaryContent}</div>`;
-    return `<div class="pr-row">
+    return `<div class="pr-row" data-pr-key="${esc(rowKey)}">
       ${primary}
-      <details class="pr-details">
+      <details class="pr-details" data-pr-key="${esc(rowKey)}">
         <summary><span class="pr-summary-truth" data-tone="${esc(pr.summaryTone)}">${esc(pr.summaryTruth)}</span><span class="pr-details-label">Forensics</span></summary>
         <dl class="pr-forensics">
           <div><dt>Recorded</dt><dd>${esc(pr.recordedTruth.replace(/^Recorded:\s*/, ''))}</dd></div>
@@ -1108,9 +1116,15 @@ function renderPRs(boardView) {
   const more = merged.length > RECENT_MERGES
     ? `<li class="pr-more">+${merged.length - RECENT_MERGES} more merged</li>` : '';
 
-  $('#prs-list').innerHTML =
+  const markup =
     (open.length ? `<li class="pr-head">In flight</li>${openRows}` : '') +
     (merged.length ? `<li class="pr-head">Recently merged</li>${mergedRows}${more}` : '');
+  renderedPrMarkup = reconcileDisclosureList({
+    list: $('#prs-list'),
+    markup,
+    previousMarkup: renderedPrMarkup,
+    activeElement: document.activeElement,
+  }).markup;
 }
 
 function renderToolCalls(boardView) {
@@ -1355,6 +1369,7 @@ function renderSemanticState(insights, boardView) {
   const overview = $('#board-overview-details');
   overview.dataset.state = boardView.disposition.state;
   $('#board-overview-label').textContent = 'Session overview';
+  $('#board-overview-state-label').textContent = boardView.disposition.label;
   const checklist = summary.checklist.replace(/^Session checklist:\s*/, 'checklist ');
   $('#board-overview-meta').textContent = `${summary.prs} · ${checklist} · ${summary.recordedSpan}`;
   const disposition = $('#board-disposition');

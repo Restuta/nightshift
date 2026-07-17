@@ -1106,6 +1106,15 @@ a.pr-primary:focus-visible {
   font-weight: 500;
   text-transform: uppercase;
 }
+.board-overview-state-label {
+  color: var(--faint);
+  font-weight: 400;
+}
+.board-overview-state-label::before {
+  content: '/';
+  margin-right: 7px;
+  color: var(--line);
+}
 .board-overview-dot {
   width: 6px;
   height: 6px;

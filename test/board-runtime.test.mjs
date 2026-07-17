@@ -163,3 +163,71 @@ test('Gantt reset closes the overlay and removes every stale PR surface', () => 
   assert.deepEqual(axis.children, []);
   assert.equal(count.textContent, '');
 });
+
+test('PR reconciliation keeps disclosure, focus, and scroll stable across live renders', () => {
+  assert.equal(typeof boardRuntime.reconcileDisclosureList, 'function');
+  const { reconcileDisclosureList } = boardRuntime;
+  const oldDetails = { dataset: { prKey: 'acme/replay#7' }, open: true };
+  const nextDetails = { dataset: { prKey: 'acme/replay#7' }, open: false };
+  const nextSummary = {
+    focused: false,
+    focus(options) {
+      this.focused = options?.preventScroll === true;
+    },
+  };
+  const nextRow = {
+    dataset: { prKey: 'acme/replay#7' },
+    querySelector(selector) {
+      return selector === '.pr-details > summary' ? nextSummary : null;
+    },
+  };
+  const list = {
+    _markup: '<li>stable</li>',
+    _details: [oldDetails],
+    _rows: [],
+    replacements: 0,
+    scrollTop: 41,
+    get innerHTML() { return this._markup; },
+    set innerHTML(value) {
+      this._markup = value;
+      this._details = [nextDetails];
+      this._rows = [nextRow];
+      this.replacements++;
+      this.scrollTop = 0;
+    },
+    querySelectorAll(selector) {
+      if (selector === '.pr-details[open]') return this._details.filter(details => details.open);
+      if (selector === '.pr-details[data-pr-key]') return this._details;
+      if (selector === '.pr-row[data-pr-key]') return this._rows;
+      return [];
+    },
+  };
+  const activeElement = {
+    closest: selector => selector === '.pr-row[data-pr-key]'
+      ? { dataset: { prKey: 'acme/replay#7' } }
+      : null,
+    matches: selector => selector === 'summary',
+  };
+
+  const unchanged = reconcileDisclosureList({
+    list,
+    markup: '<li>stable</li>',
+    previousMarkup: '<li>stable</li>',
+    activeElement,
+  });
+  assert.deepEqual(unchanged, { markup: '<li>stable</li>', changed: false });
+  assert.equal(list.replacements, 0);
+  assert.equal(oldDetails.open, true);
+
+  const changed = reconcileDisclosureList({
+    list,
+    markup: '<li>updated age</li>',
+    previousMarkup: unchanged.markup,
+    activeElement,
+  });
+  assert.deepEqual(changed, { markup: '<li>updated age</li>', changed: true });
+  assert.equal(list.replacements, 1);
+  assert.equal(nextDetails.open, true);
+  assert.equal(nextSummary.focused, true);
+  assert.equal(list.scrollTop, 41);
+});

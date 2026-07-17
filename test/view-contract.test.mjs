@@ -65,6 +65,7 @@ test('Board document exposes canonical summary, entity, freshness, timeline, and
   assert.match(html, /<body class="board-page">/);
   assert.match(html, /<details class="board-overview-details" id="board-overview-details">/);
   assert.match(html, /id="board-overview-label"/);
+  assert.match(html, /id="board-overview-state-label"/);
   assert.match(html, /id="board-overview-meta"/);
   assert.match(html, /id="board-summary"[^>]*aria-label="Session summary"[^>]*hidden/);
   assert.match(html, /id="board-disposition"[^>]*aria-label="Session disposition"[^>]*hidden/);
@@ -98,6 +99,7 @@ test('Board consumes one canonical insight projection and exact shared summary c
   assert.match(source, /OVERVIEW_KEY = 'ns-board-overview-open'/);
   assert.match(source, /overviewDetails\.addEventListener\('toggle'/);
   assert.match(source, /\$\('#board-overview-meta'\)\.textContent/);
+  assert.match(source, /\$\('#board-overview-state-label'\)\.textContent = boardView\.disposition\.label/);
   assert.match(source, /renderAll\([^)]*insights/);
   assert.match(source, /viewHref\('\/', viewContext\)/);
   assert.match(source, /viewHref\('\/story', viewContext\)/);
@@ -213,10 +215,11 @@ test('Board PR rows keep forensic metadata behind native disclosure', () => {
   const source = read('public/app.js');
   const css = read('public/style.css');
 
-  assert.match(source, /<details class="pr-details">/);
+  assert.match(source, /<details class="pr-details"[^>]*>/);
   assert.match(source, /class="pr-forensics"/);
   assert.match(source, /data-tone="\$\{esc\(pr\.summaryTone\)\}"/);
   assert.doesNotMatch(source, /<a class="pr-row"/);
+  assert.match(source, /reconcileDisclosureList\(\{/);
   assert.match(css, /\.pr-details:not\(\[open\]\) \.pr-forensics/);
 });
 

@@ -68,3 +68,34 @@ export function resetGanttView({ overlay, body, axis, count }) {
   axis.replaceChildren();
   count.textContent = '';
 }
+
+export function reconcileDisclosureList({
+  list,
+  markup,
+  previousMarkup = '',
+  activeElement = null,
+}) {
+  if (markup === previousMarkup) return { markup, changed: false };
+
+  const scrollTop = list.scrollTop;
+  const expandedKeys = new Set(
+    [...list.querySelectorAll('.pr-details[open]')].map(details => details.dataset.prKey),
+  );
+  const focusedRow = activeElement?.closest?.('.pr-row[data-pr-key]') ?? null;
+  const focusedKey = focusedRow?.dataset.prKey ?? null;
+  const focusedTarget = activeElement?.matches?.('summary')
+    ? '.pr-details > summary'
+    : activeElement?.matches?.('a.pr-primary') ? 'a.pr-primary' : null;
+
+  list.innerHTML = markup;
+  for (const details of list.querySelectorAll('.pr-details[data-pr-key]')) {
+    if (expandedKeys.has(details.dataset.prKey)) details.open = true;
+  }
+  if (focusedKey && focusedTarget) {
+    const nextRow = [...list.querySelectorAll('.pr-row[data-pr-key]')]
+      .find(row => row.dataset.prKey === focusedKey);
+    nextRow?.querySelector(focusedTarget)?.focus({ preventScroll: true });
+  }
+  list.scrollTop = scrollTop;
+  return { markup, changed: true };
+}
