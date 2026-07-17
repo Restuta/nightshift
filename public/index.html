@@ -52,19 +52,32 @@
 </header>
 
 <section class="board-overview" id="board-overview" hidden>
-  <div class="board-summary" id="board-summary" aria-label="Session summary" hidden></div>
-  <section class="board-disposition" id="board-disposition" aria-label="Session disposition" hidden>
-    <div>
-      <span class="board-disposition-label" id="board-disposition-label"></span>
-      <p id="board-disposition-detail"></p>
+  <details class="board-overview-details" id="board-overview-details">
+    <summary>
+      <span class="board-overview-status">
+        <i class="board-overview-dot" aria-hidden="true"></i>
+        <span id="board-overview-label">Session overview</span>
+        <span class="board-overview-state-label" id="board-overview-state-label"></span>
+      </span>
+      <span class="board-overview-meta" id="board-overview-meta"></span>
+      <span class="board-overview-hint" aria-hidden="true">Details</span>
+    </summary>
+    <div class="board-overview-content">
+      <section class="board-disposition" id="board-disposition" aria-label="Session disposition" hidden>
+        <div>
+          <span class="board-disposition-label" id="board-disposition-label"></span>
+          <p id="board-disposition-detail"></p>
+        </div>
+        <dl>
+          <div><dt>Current blocker</dt><dd id="board-blocker"></dd></div>
+          <div><dt>Next actor</dt><dd id="board-next-actor"></dd></div>
+          <div><dt>Source freshness</dt><dd id="source-freshness" role="status" aria-live="polite"></dd></div>
+        </dl>
+        <p class="board-uncertainty" id="board-uncertainty" hidden></p>
+      </section>
+      <div class="board-summary" id="board-summary" aria-label="Session summary" hidden></div>
     </div>
-    <dl>
-      <div><dt>Current blocker</dt><dd id="board-blocker"></dd></div>
-      <div><dt>Next actor</dt><dd id="board-next-actor"></dd></div>
-      <div><dt>Source freshness</dt><dd id="source-freshness" role="status" aria-live="polite"></dd></div>
-    </dl>
-    <p class="board-uncertainty" id="board-uncertainty" hidden></p>
-  </section>
+  </details>
 </section>
 
 <div class="board-page-state" id="board-loading" role="status">Loading session…</div>

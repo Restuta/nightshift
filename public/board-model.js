@@ -51,6 +51,28 @@ function truthText(axis, snapshot) {
   return `${label}: ${snapshot.state ?? 'state unavailable'} · ${validationText(snapshot)}${advisory}`;
 }
 
+export function compactPrTruth(pr) {
+  const current = pr.current ?? null;
+  const snapshot = current ?? pr.recorded ?? null;
+  if (!snapshot) {
+    return { text: 'Current state unavailable', tone: 'unavailable' };
+  }
+  const source = current ? 'Current' : 'Recorded';
+  const advisory = snapshot.advisoryRunning > 0
+    ? ` · ${snapshot.advisoryRunning} advisory running`
+    : '';
+  const unavailable = current ? '' : ' · current unavailable';
+  const validation = snapshot.validation ?? 'unknown';
+  const tone = validation === 'pass' ? 'pass'
+    : validation === 'fail' ? 'fail'
+      : validation === 'pending' ? 'pending'
+        : 'unavailable';
+  return {
+    text: `${source} ${snapshot.state ?? 'state unavailable'} · ${validationText(snapshot)}${advisory}${unavailable}`,
+    tone,
+  };
+}
+
 function parentText(axis, snapshot) {
   const label = axis === 'recorded' ? 'Recorded parent' : 'Current parent';
   return `${label}: ${Number.isFinite(snapshot?.base) ? `#${snapshot.base}` : 'unavailable'}`;
@@ -116,6 +138,7 @@ function prsOf(insights) {
       ?? pr.recorded?.createdAt
       ?? null;
     const state = effectivePrState(pr);
+    const compactTruth = compactPrTruth(pr);
     return {
       key: pr.key,
       repo: pr.repo,
@@ -133,6 +156,8 @@ function prsOf(insights) {
             : 'Opened time unavailable'),
       recordedTruth: truthText('recorded', pr.recorded),
       currentTruth: truthText('current', pr.current),
+      summaryTruth: compactTruth.text,
+      summaryTone: compactTruth.tone,
       recordedParent: parentText('recorded', pr.recorded),
       currentParent: parentText('current', pr.current),
       provenance: prProvenance(pr),
@@ -171,6 +196,7 @@ export function buildBoardViewModel(insights) {
     disposition: buildSessionDisposition(insights),
     prs,
     prTotals: `${open} ${open === 1 ? 'PR' : 'PRs'} open · ${merged} merged`,
+    prHeaderTotals: `${open} open · ${merged} merged`,
     tools: toolsOf(insights),
     timeline,
     timelineLegend: Object.values(WALL_LABELS),

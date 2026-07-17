@@ -14,6 +14,7 @@ import {
   advanceReplayFrame,
   buildReplayFrame,
   loadReplaySession,
+  reconcileDisclosureList,
   resetGanttView,
   shouldOpenLiveStream,
   visibleReplayDelta,
@@ -130,6 +131,10 @@ function clearSessionView() {
   badge.textContent = '';
   badge.className = 'agent-badge';
   badge.hidden = true;
+  $('#board-overview-label').textContent = 'Session overview';
+  $('#board-overview-state-label').textContent = '';
+  $('#board-overview-meta').textContent = '';
+  delete $('#board-overview-details').dataset.state;
   $('#board-summary').replaceChildren();
   $('#board-disposition').replaceChildren();
   // Restore the fixed semantic disposition structure after its old content has
@@ -148,6 +153,7 @@ function clearSessionView() {
   $('#tools-metrics').textContent = '';
   $('#tools').hidden = true;
   $('#prs-list').replaceChildren();
+  renderedPrMarkup = '';
   $('#prs').hidden = true;
   $('#plan-list').replaceChildren();
   $('#plan').hidden = true;
@@ -1072,34 +1078,53 @@ function renderFeed(freshEvents) {
 // -------------------------------------------------------- pull requests
 
 const RECENT_MERGES = 8;
+let renderedPrMarkup = '';
 
 function renderPRs(boardView) {
   const box = $('#prs');
   const all = boardView.prs;
   box.hidden = !all.length;
-  if (!all.length) return;
+  if (!all.length) {
+    renderedPrMarkup = '';
+    return;
+  }
   const open = all.filter(pr => pr.state === 'open').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const merged = all.filter(pr => pr.state === 'merged').sort((a, b) => (b.discoveryT || 0) - (a.discoveryT || 0));
-  $('#prs-count').textContent = boardView.prTotals;
+  $('#prs-count').textContent = boardView.prHeaderTotals;
 
   const row = pr => {
-    const content = `<span class="pr-primary"><b class="prnum">#${pr.number}</b><span class="prtitle">${esc(pr.title)}</span><span class="prage">${esc(pr.openFor)}</span></span>
-      <span class="pr-truth recorded">${esc(pr.recordedTruth)}</span>
-      <span class="pr-truth current">${esc(pr.currentTruth)}</span>
-      <span class="pr-topology">${esc(pr.recordedParent)} · ${esc(pr.currentParent)}</span>
-      <span class="pr-provenance">${esc(pr.provenance)} · ${esc(pr.attribution)}</span>`;
-    return pr.url
-      ? `<a class="pr-row" href="${esc(pr.url)}" target="_blank" rel="noopener" aria-label="Open PR #${pr.number} on GitHub">${content}</a>`
-      : `<div class="pr-row" aria-label="PR #${pr.number}; GitHub link unavailable">${content}</div>`;
+    const rowKey = pr.key ?? `${pr.repo ?? 'unknown'}#${pr.number}`;
+    const primaryContent = `<b class="prnum">#${pr.number}</b><span class="prtitle">${esc(pr.title)}</span><span class="prage">${esc(pr.openFor)}</span>`;
+    const primary = pr.url
+      ? `<a class="pr-primary" href="${esc(pr.url)}" target="_blank" rel="noopener" aria-label="Open PR #${pr.number} on GitHub">${primaryContent}</a>`
+      : `<div class="pr-primary" aria-label="PR #${pr.number}; GitHub link unavailable">${primaryContent}</div>`;
+    return `<div class="pr-row" data-pr-key="${esc(rowKey)}">
+      ${primary}
+      <details class="pr-details" data-pr-key="${esc(rowKey)}">
+        <summary><span class="pr-summary-truth" data-tone="${esc(pr.summaryTone)}">${esc(pr.summaryTruth)}</span><span class="pr-details-label">Forensics</span></summary>
+        <dl class="pr-forensics">
+          <div><dt>Recorded</dt><dd>${esc(pr.recordedTruth.replace(/^Recorded:\s*/, ''))}</dd></div>
+          <div><dt>Current</dt><dd>${esc(pr.currentTruth.replace(/^Current:\s*/, ''))}</dd></div>
+          <div><dt>Parent stack</dt><dd>${esc(pr.recordedParent)} · ${esc(pr.currentParent)}</dd></div>
+          <div><dt>Evidence</dt><dd>${esc(pr.provenance)} · ${esc(pr.attribution)}</dd></div>
+        </dl>
+      </details>
+    </div>`;
   };
   const openRows = open.map(pr => `<li class="pr-open${pr.changedSinceRecording ? ' changed' : ''}">${row(pr)}</li>`).join('');
   const mergedRows = merged.slice(0, RECENT_MERGES).map(pr => `<li class="pr-merged">${row(pr)}</li>`).join('');
   const more = merged.length > RECENT_MERGES
     ? `<li class="pr-more">+${merged.length - RECENT_MERGES} more merged</li>` : '';
 
-  $('#prs-list').innerHTML =
+  const markup =
     (open.length ? `<li class="pr-head">In flight</li>${openRows}` : '') +
     (merged.length ? `<li class="pr-head">Recently merged</li>${mergedRows}${more}` : '');
+  renderedPrMarkup = reconcileDisclosureList({
+    list: $('#prs-list'),
+    markup,
+    previousMarkup: renderedPrMarkup,
+    activeElement: document.activeElement,
+  }).markup;
 }
 
 function renderToolCalls(boardView) {
@@ -1340,7 +1365,13 @@ function renderPlan(insights) {
 
 function renderSemanticState(insights, boardView) {
   const summary = buildSummaryViewModel(insights);
-  $('#board-summary').innerHTML = summaryHTML(buildSummaryViewModel(insights));
+  $('#board-summary').innerHTML = summaryHTML(summary);
+  const overview = $('#board-overview-details');
+  overview.dataset.state = boardView.disposition.state;
+  $('#board-overview-label').textContent = 'Session overview';
+  $('#board-overview-state-label').textContent = boardView.disposition.label;
+  const checklist = summary.checklist.replace(/^Session checklist:\s*/, 'checklist ');
+  $('#board-overview-meta').textContent = `${summary.prs} · ${checklist} · ${summary.recordedSpan}`;
   const disposition = $('#board-disposition');
   disposition.dataset.state = boardView.disposition.state;
   $('#board-disposition-label').textContent = boardView.disposition.label;
@@ -1383,6 +1414,13 @@ function renderAll(animate, freshEvents = null, insights = null) {
 // ------------------------------------------------------------------ tape
 
 const TAPE_KEY = 'tb-tape-collapsed';
+const OVERVIEW_KEY = 'ns-board-overview-open';
+
+const overviewDetails = $('#board-overview-details');
+try { overviewDetails.open = localStorage.getItem(OVERVIEW_KEY) === '1'; } catch { /* private mode */ }
+overviewDetails.addEventListener('toggle', () => {
+  try { localStorage.setItem(OVERVIEW_KEY, overviewDetails.open ? '1' : '0'); } catch { /* private mode */ }
+});
 
 function setTape(collapsed) {
   document.body.classList.toggle('tape-collapsed', collapsed);
