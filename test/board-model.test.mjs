@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildSessionInsights } from '../public/session-insights-model.js';
-import { buildBoardViewModel } from '../public/board-model.js';
+import { buildBoardViewModel, compactPrTruth } from '../public/board-model.js';
 
 function referenceEvents() {
   return readFileSync(new URL('./tapes/semantic-reference.jsonl', import.meta.url), 'utf8')
@@ -33,6 +33,8 @@ test('Board projects the seven-PR reference truth without collapsing recorded an
   assert.equal(pr104.currentParent, 'Current parent: #102');
   assert.equal(pr104.provenance, 'Discovered retrospectively · transcript evidence');
   assert.equal(pr104.openFor, 'Open duration unavailable');
+  assert.equal(pr104.summaryTruth, 'Current open · gates pass');
+  assert.equal(pr104.summaryTone, 'pass');
 
   const pr102 = board.prs.find(pr => pr.number === 102);
   assert.match(pr102.openFor, /^Open for /);
@@ -40,8 +42,28 @@ test('Board projects the seven-PR reference truth without collapsing recorded an
   const pr106 = board.prs.find(pr => pr.number === 106);
   assert.equal(pr106.recordedTruth, 'Recorded: open · gates pending');
   assert.equal(pr106.currentTruth, 'Current: open · gates pass · 1 advisory running');
+  assert.equal(pr106.summaryTruth, 'Current open · gates pass · 1 advisory running');
+  assert.equal(pr106.summaryTone, 'pass');
   assert.equal(pr106.changedSinceRecording, true);
   assert.equal(board.prTotals, '7 PRs open · 0 merged');
+  assert.equal(board.prHeaderTotals, '7 open · 0 merged');
+});
+
+test('Board compact PR truth prioritizes current state and labels recorded fallback', () => {
+  assert.deepEqual(compactPrTruth({
+    recorded: { state: 'open', validation: 'fail', advisoryRunning: 0 },
+    current: null,
+  }), {
+    text: 'Recorded open · gates fail · current unavailable',
+    tone: 'fail',
+  });
+  assert.deepEqual(compactPrTruth({
+    recorded: { state: 'open', validation: 'pending', advisoryRunning: 0 },
+    current: { state: 'merged', validation: 'pass', advisoryRunning: 0 },
+  }), {
+    text: 'Current merged · gates pass',
+    tone: 'pass',
+  });
 });
 
 test('Board keeps tool lifecycles, observations, and transcript metrics semantically separate', () => {
