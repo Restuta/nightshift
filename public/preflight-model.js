@@ -11,7 +11,10 @@
 // Because it is a pure function of (events, untilT), old tapes gain the panel
 // retroactively and replay scrubs through a run's phases honestly.
 
-const RUN_TITLE = /(^|\s)\/(?:[\w-]*-)?preflight\b/i;
+// Exactly /preflight — prefixed cousins (/design-preflight, …) are different
+// skills with different stages; opening a run for them would report a phase-less
+// "incomplete" verdict on a gate this model doesn't understand.
+const RUN_TITLE = /(^|\s)\/preflight\b/i;
 const PHASE_STEP = /^Phase\s+(\d+)\s*[:.\-]\s*(.*)$/i;
 
 export const PREFLIGHT_PHASES = 7; // the canonical pipeline depth (PF-00..PF-63)

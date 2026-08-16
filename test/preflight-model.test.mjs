@@ -136,6 +136,15 @@ test('an explicit work_phase preflight lane is honored, outcome from the end eve
   assert.equal(r.outcome, 'pass', 'an explicit producer outcome wins over the derived one');
 });
 
+test('a prefixed cousin like /design-preflight is NOT a run (different skill, different stages)', () => {
+  T = 0;
+  const events = [
+    { t: at(), type: 'item', id: 'turn-hh-1', title: '/design-preflight', status: 'doing' },
+    { t: at(), type: 'item', id: 'turn-hh-1', status: 'done' },
+  ];
+  assert.equal(preflightRuns(events).length, 0);
+});
+
 test('an ordinary session with no preflight yields zero runs', () => {
   T = 0;
   const events = [
