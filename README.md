@@ -172,7 +172,7 @@ approval-request events; for the full picture, import the rollout afterwards.
 
 ## Event vocabulary
 
-`session` · `item` · `todos` · `edit` · `commit` · `pr` · `ci` · `usage` · `note` —
+`session` · `item` · `todos` · `edit` · `commit` · `pr` · `ci` · `agent` · `usage` · `note` —
 envelope, semantics, and the attribution heuristic are specified in
 [docs/EVENTS.md](docs/EVENTS.md). Unknown types are ignored by design, so the
 vocabulary can grow without breaking old logs.
