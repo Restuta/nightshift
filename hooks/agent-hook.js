@@ -731,7 +731,12 @@ function main() {
       // 'start'; the completion arrives later as SubagentStop.
       const r = hook.tool_response;
       const resp = (r && typeof r === 'object' && !Array.isArray(r)) ? r : {};
-      const agentId = resp.agentId || resp.agent_id || hook.tool_use_id || null;
+      // Require the response's own identity. Falling back to tool_use_id would
+      // mint a row under a key SubagentStop (which carries the real agent_id)
+      // could never close — a phantom stuck "running" until the session-end
+      // sweep. An identity-less response (older harness returning bare content)
+      // still gets its lifecycle from the SubagentStart/Stop boundaries.
+      const agentId = resp.agentId || resp.agent_id || null;
       if (agentId) {
         const ev = { type: 'agent', agentId, state: resp.status === 'completed' ? 'done' : 'start' };
         if (inp.description) ev.desc = String(inp.description).slice(0, 120);
