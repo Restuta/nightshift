@@ -76,6 +76,7 @@ export function initialState() {
     files: new Map(), // path → {edits, lastAt} — churn signal
     prs: new Map(),   // repo#number (bare number for v1/no-repo) → {number, repo, state, url, title, ci, openedAt, mergedAt} — the PR panel
     prRefs: new Set(),// session-relevant PR numbers seen via pr_ref sightings; NOT rendered (they carry no state) until a real pr event arrives
+    subagents: new Map(), // agentId → {id, type, desc, model, startedAt, endedAt, durMs, tokens, toolUses, tools, edits, status, …} — the Subagents panel
     feed: [],
     totals: { add: 0, del: 0, commits: 0, edits: 0, events: 0, tokIn: 0, tokOut: 0, cacheTok: 0, cost: 0 },
   };
@@ -216,6 +217,12 @@ export function reduce(state, ev) {
         for (const it of state.items.values()) {
           if (it.status === 'doing') it.abandoned = true;
         }
+        // Same truth for subagents: one still "running" when the session ends was
+        // never observed finishing — the honest state is abandoned, not a forever-
+        // ticking timer. Cleared like cards if a later event revives it.
+        for (const sub of state.subagents.values()) {
+          if (sub.status === 'running') { sub.status = 'abandoned'; if (sub.endedAt == null) sub.endedAt = ev.t; }
+        }
       }
       break;
     }
@@ -258,7 +265,63 @@ export function reduce(state, ev) {
       break;
     }
 
+    case 'agent': {
+      // A subagent's lifecycle in the parent session. Multiple producers sight the
+      // same agent (SubagentStart/Stop boundaries; the spawning call's enriched
+      // response), so this MERGES by agentId — later sightings enrich, never
+      // duplicate. Metrics from the spawner's response (durMs/tokens/toolUses)
+      // are authoritative; boundary math is the fallback for background agents
+      // whose completion is only a SubagentStop.
+      const key = ev.agentId || ev.id;
+      if (!key) break;
+      let sub = state.subagents.get(key);
+      if (!sub) {
+        sub = { id: key, type: null, desc: null, model: null, background: false,
+                startedAt: null, endedAt: null, durMs: null, tokens: null, toolUses: null,
+                tools: 0, edits: 0, todos: null, status: 'running', outcome: null,
+                item: null, parentAgentId: null, t: ev.t };
+        state.subagents.set(key, sub);
+      }
+      if (ev.agentType && !sub.type) sub.type = ev.agentType;
+      if (ev.desc && !sub.desc) sub.desc = ev.desc;
+      if (ev.model) sub.model = ev.model;
+      if (ev.background) sub.background = true;
+      if (ev.item && !sub.item) sub.item = ev.item;
+      if (ev.parentAgentId) sub.parentAgentId = ev.parentAgentId;
+      if (ev.state === 'start') {
+        if (sub.startedAt == null) sub.startedAt = ev.t;
+      } else if (ev.state === 'done') {
+        if (sub.endedAt == null) sub.endedAt = ev.t;
+        sub.status = 'done';
+        if (ev.outcome) sub.outcome = ev.outcome;
+      }
+      if (ev.durMs != null) sub.durMs = ev.durMs;
+      if (ev.tokens != null) sub.tokens = ev.tokens;
+      if (ev.toolUses != null) sub.toolUses = ev.toolUses;
+      if (sub.durMs == null && sub.startedAt != null && sub.endedAt != null) sub.durMs = sub.endedAt - sub.startedAt;
+      // A done with metrics but no witnessed start (old tape, missed Start hook):
+      // derive the start so the row still has a real span.
+      if (sub.startedAt == null && sub.endedAt != null && ev.durMs != null) sub.startedAt = sub.endedAt - ev.durMs;
+      sub.t = ev.t;
+      const it = targetItem(state, ev);
+      if (it) { it.touchedAt = ev.t; it.abandoned = false; }
+      awake(state);
+      break;
+    }
+
     case 'todos': {
+      // A subagent's plan is ITS OWN, not the session's — folding it into
+      // state.todos would clobber the parent's checklist mid-turn (and smear the
+      // subagent's steps onto the parent's cards). Park it on the subagent row.
+      if (ev.agentId) {
+        const sub = state.subagents.get(ev.agentId);
+        if (sub) {
+          sub.todos = (ev.todos || []).map(td => ({ text: td.text, status: td.status || (td.done ? 'completed' : 'pending') }));
+          sub.t = ev.t;
+        }
+        awake(state);
+        break;
+      }
       // The plan is SESSION state, not a turn's: the agent keeps one cumulative
       // list. The full plan lives at session level (state.todos -> the sidebar
       // Plan panel); each card carries only its DELTA -- the steps that advanced
@@ -351,6 +414,13 @@ export function reduce(state, ev) {
         f.edits++;
         f.lastAt = ev.t;
         state.files.set(ev.path, f);
+      }
+      // agentId-stamped: a subagent touched the file. Count it on the subagent's
+      // row too — it's still session work (files/totals above stay), but the row
+      // shows who actually did it.
+      if (ev.agentId) {
+        const sub = state.subagents.get(ev.agentId);
+        if (sub) { sub.edits++; sub.t = ev.t; }
       }
       const it = targetItem(state, ev);
       if (it) { it.edits++; it.touchedAt = ev.t; it.abandoned = false; }
@@ -492,6 +562,10 @@ export function reduce(state, ev) {
       // turn looks alive between edits. The text becomes the card's live "now"
       // line until newer narration (a `say`) or another command replaces it.
       state.totals.tools = (state.totals.tools || 0) + 1;
+      if (ev.agentId) {
+        const sub = state.subagents.get(ev.agentId);
+        if (sub) { sub.tools++; sub.t = ev.t; }
+      }
       const it = targetItem(state, ev);
       if (it) {
         it.tools = (it.tools || 0) + 1;
@@ -610,6 +684,16 @@ export function prList(state) {
 export function activeItemId(state) {
   const it = activeDoingItem(state);
   return it ? it.id : null;
+}
+
+// Subagents for the panel: running first (freshest spawn on top), then done by
+// completion time. Pure over state — live and replay agree.
+export function subagentList(state) {
+  return [...state.subagents.values()].sort((a, b) => {
+    if ((a.status === 'running') !== (b.status === 'running')) return a.status === 'running' ? -1 : 1;
+    if (a.status === 'running') return (b.startedAt || 0) - (a.startedAt || 0);
+    return (b.endedAt || 0) - (a.endedAt || 0);
+  });
 }
 
 // The freshest sign that SOME recorder of this session's agent work is alive:

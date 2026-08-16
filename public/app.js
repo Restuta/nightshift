@@ -3,7 +3,7 @@
 // render path goes through renderAll(); animation only happens on forward,
 // incremental application of events, never on rebuilds (scrub/refresh).
 
-import { initialState, reduce, fold, activeItemId, hotFiles, liveness, sessionPausedAt, STATUSES } from './reducer.js';
+import { initialState, reduce, fold, activeItemId, hotFiles, liveness, sessionPausedAt, subagentList, STATUSES } from './reducer.js';
 import { initSessionPicker } from './session-picker.js';
 import { turnLabel } from './turn-id.js';
 import { buildSessionInsights } from './session-insights-model.js';
@@ -1045,6 +1045,12 @@ function feedLine(ev) {
       tx = `<span class="cmd">${esc(ev.text || '')}</span>`;
       break;
     }
+    case 'agent':
+      tag = 'agent'; cls = 'agent';
+      tx = ev.state === 'done'
+        ? `<b>${esc(ev.agentType || 'subagent')}</b> finished${ev.desc ? ` — ${esc(ev.desc)}` : ''}${ev.durMs != null ? ` · ${esc(durText(ev.durMs))}` : ''}`
+        : `<b>${esc(ev.agentType || 'subagent')}</b> spawned${ev.desc ? ` — ${esc(ev.desc)}` : ''}`;
+      break;
     case 'say':
       tag = 'says'; cls = 'say';
       tx = esc(ev.text || '');
@@ -1125,6 +1131,35 @@ function renderPRs(boardView) {
     previousMarkup: renderedPrMarkup,
     activeElement: document.activeElement,
   }).markup;
+}
+
+// -------------------------------------------------------- subagents
+// The session's fan-out workforce: who was spawned, what they were asked, how
+// long they ran, what they cost. Running rows tick (renderAll fires each second
+// live); done rows freeze at the spawner-reported duration.
+function renderSubagents() {
+  const box = $('#subagents');
+  const subs = subagentList(state);
+  box.hidden = !subs.length;
+  if (!subs.length) return;
+  const running = subs.filter(s => s.status === 'running').length;
+  $('#subagents-count').textContent = running ? `${running} live · ${subs.length}` : String(subs.length);
+  $('#subagents-list').innerHTML = subs.map(s => {
+    const dur = s.status === 'running'
+      ? (s.startedAt != null ? durText(vtNow() - s.startedAt) : '·')
+      : (s.durMs != null ? durText(s.durMs) : '');
+    const activity = s.toolUses != null ? s.toolUses : (s.tools || 0);
+    const meta = [
+      s.model ? s.model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null,
+      s.tokens != null ? `${compactNum(s.tokens)} tok` : null,
+      activity ? `${activity} tool${activity === 1 ? '' : 's'}` : null,
+      s.edits ? `${s.edits} edit${s.edits === 1 ? '' : 's'}` : null,
+    ].filter(Boolean).join(' · ');
+    return `<li class="sa-row" data-status="${esc(s.status)}">
+      <span class="sa-primary"><i class="sa-dot"></i><b class="sa-type">${esc(s.type || 'agent')}</b><span class="sa-desc">${esc(s.desc || '')}</span><span class="sa-dur">${esc(dur)}</span></span>
+      ${meta ? `<span class="sa-meta">${esc(meta)}</span>` : ''}
+    </li>`;
+  }).join('');
 }
 
 function renderToolCalls(boardView) {
@@ -1401,6 +1436,7 @@ function renderAll(animate, freshEvents = null, insights = null) {
   renderInstruments(animate);
   renderBoard(animate);
   renderPlan(insights);
+  renderSubagents();
   renderPRs(boardView);
   renderToolCalls(boardView);
   if (!$('#gantt-overlay').hidden) renderGantt();

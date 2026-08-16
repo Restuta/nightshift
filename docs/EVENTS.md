@@ -197,6 +197,32 @@ turn spent thinking and watching a job still reads as alive instead of frozen.
 Distinct from `note` (which is a deliberate, sparse milestone): `say` is the
 ambient status stream and can be frequent.
 
+### `agent`
+A SUBAGENT's lifecycle in the parent session — the fan-out workforce.
+
+    {type:"agent", state:"start"|"done", agentId, agentType?, desc?, model?,
+     background?, durMs?, tokens?, toolUses?, outcome?, item?, parentAgentId?}
+
+- Produced by the hook from three sightings that all carry the same `agentId`
+  (probe-verified payloads, `tools/hook-probe.js`): Claude's **SubagentStart** /
+  **SubagentStop** hooks (the live boundaries — `agent_id`, `agent_type`, no
+  description), and the spawning **Task/Agent** call's PostToolUse (the richest
+  record: `tool_input.description` → `desc`, and the response's `agentId`,
+  `resolvedModel` → `model`, `totalDurationMs` → `durMs`, `totalTokens` →
+  `tokens`, `totalToolUseCount` → `toolUses`).
+- **The reducer MERGES by `agentId`** into `state.subagents` — repeated
+  sightings enrich one row, never duplicate it. Foreground spawns get all three
+  events (start → done → enriched done); a background spawn gets a described
+  `start` at once and its completion later as a bare SubagentStop `done`, with
+  duration falling back to the recorded boundaries.
+- A subagent's OWN tool calls fire the parent's hooks with `agent_id` stamped
+  (probe-verified), so the hook attributes them: `tool`/`edit` events carry
+  `agentId` and count on the subagent's row *and* the session totals; a
+  subagent's `todos` snapshot parks on its row and never clobbers the session
+  plan. `parentAgentId` marks a nested spawn (a subagent spawning its own).
+- On `session {phase:"end"}`, a subagent still `running` sweeps to `abandoned`
+  — same honesty rule as cards: an unobserved finish is not a live agent.
+
 ### `note`
 Free-form narration from the agent. `{text}` — used sparingly for milestones,
 not a chat log.

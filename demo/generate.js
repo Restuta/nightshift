@@ -100,6 +100,10 @@ e(33.2, { type: 'todos', todos: [
 ] });
 e(34.8, { type: 'pr', number: 2, title: 'kanban board UI', state: 'open', url: 'https://github.com/Restuta/nightshift/pull/2' });
 e(35.0, { type: 'ci', pr: 2, status: 'pending' });
+// --- fan-out: a review subagent works PR 2 while the parent waits on CI
+e(35.2, { type: 'agent', state: 'start', agentId: 'demo-rev-1', agentType: 'code-reviewer', desc: 'Cross-AI review: kanban board UI (PR #2)', item: 'wi-ui' });
+e(35.6, { type: 'tool', tool: 'run', text: 'git diff main...HEAD -- public/', agentId: 'demo-rev-1', item: 'wi-ui' });
+e(36.2, { type: 'agent', state: 'done', agentId: 'demo-rev-1', agentType: 'code-reviewer', desc: 'Cross-AI review: kanban board UI (PR #2)', model: 'claude-opus-5', durMs: 60e3, tokens: 48200, toolUses: 7, outcome: 'completed', item: 'wi-ui' });
 e(36.4, { type: 'ci', pr: 2, status: 'fail' });
 e(36.6, { type: 'note', text: 'CI red: stylelint — custom property typo. Fixing.' });
 e(37.6, { type: 'edit', path: 'public/style.css' });
@@ -146,6 +150,8 @@ e(47.1, { type: 'todos', todos: [
 ] });
 e(47.2, { type: 'edit', path: 'hooks/claude-hook.js' });
 e(47.3, { type: 'note', text: 'Replay at 60× reads like a time-lapse of the session. Demo-ready.' });
+// a background subagent still running when the tape ends — the live pulse row
+e(47.4, { type: 'agent', state: 'start', agentId: 'demo-exp-2', agentType: 'Explore', desc: 'Audit replay-timeline edge cases', background: true, item: 'wi-dogfood' });
 e(47.5, { type: 'edit', path: '.claude/settings.json' });
 e(47.7, { type: 'ci', pr: 3, status: 'pass' });
 e(47.8, { type: 'session', phase: 'idle' });

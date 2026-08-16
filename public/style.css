@@ -822,6 +822,54 @@ body.tape-collapsed .tape-resize { display: none; }
 
 /* ----------------------------------------------------------- PR panel */
 
+/* ------------------------------------------------------------- subagents */
+
+.subagents {
+  flex: 0 1 auto;
+  max-height: 34%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 9px 8px 9px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.subagents[hidden] { display: none; }
+
+.sa-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 7px; }
+.sa-head h3 {
+  flex: 1;
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--faint);
+}
+.sa-count { font-family: var(--mono); font-size: 10px; color: var(--dim); text-transform: none; letter-spacing: 0; }
+
+.sa-list { list-style: none; flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; padding-right: 6px; }
+.sa-row { padding: 4px 0; border-bottom: 1px solid var(--line-soft); }
+.sa-row:last-child { border-bottom: none; }
+
+.sa-primary { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.sa-dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--faint); align-self: center;
+}
+.sa-row[data-status="running"] .sa-dot { background: var(--green); animation: sa-pulse 1.6s ease-in-out infinite; }
+.sa-row[data-status="abandoned"] .sa-dot { background: var(--yellow); }
+@keyframes sa-pulse { 50% { opacity: .35; } }
+
+.sa-type { font-size: 11px; font-weight: 600; color: var(--ink); flex: none; }
+.sa-desc {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--dim);
+}
+.sa-dur { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+.sa-row[data-status="running"] .sa-dur { color: var(--green); }
+
+.sa-meta {
+  display: block; margin: 1px 0 0 13px;
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .prs {
   flex: 1 1 auto;            /* the PR panel owns the sidebar's vertical space */
   min-height: 120px;
@@ -1054,6 +1102,7 @@ body.tape-collapsed .tape-resize { display: none; }
 .feed .tag.item   { color: var(--dim); }
 .feed .tag.tool   { color: var(--faint); }
 .feed .tag.say    { color: var(--ink); }
+.feed .tag.agent  { color: var(--indigo); }
 
 .feed .tx .cmd { color: var(--dim); opacity: .85; }
 

@@ -52,8 +52,12 @@ const CMD =
   `then node "${HOOK}"; fi; true`;
 const EVENTS = {
   SessionStart: null, SessionEnd: null, UserPromptSubmit: null, Stop: null, Notification: null,
-  PreToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash',
-  PostToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash',
+  // Task|Agent: the subagent spawn/return in the parent thread; SubagentStart/
+  // SubagentStop: the subagent's own lifecycle boundaries. Together they feed
+  // the `agent` events behind the board's Subagents panel.
+  SubagentStart: null, SubagentStop: null,
+  PreToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash|Task|Agent',
+  PostToolUse: 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash|Task|Agent',
 };
 
 let settings = {};

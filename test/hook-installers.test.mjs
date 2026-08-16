@@ -66,7 +66,13 @@ test('global installer adds symmetric tool matchers idempotently and preserves f
       assert.deepEqual(config.hooks[event][2], foreignAfter, `${event} foreign-after index`);
     }
     assert.equal(config.keep, 1);
-    assertSymmetric(config, 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash');
+    assertSymmetric(config, 'Edit|Write|MultiEdit|NotebookEdit|TodoWrite|Bash|Task|Agent');
+    // Subagent lifecycle boundaries are registered (matcher-less groups).
+    for (const event of ['SubagentStart', 'SubagentStop']) {
+      const groups = (config.hooks[event] || []).filter(ours);
+      assert.equal(groups.length, 1, `exactly one Nightshift ${event} group`);
+      assert.equal('matcher' in groups[0], false, `${event} needs no matcher`);
+    }
   } finally {
     sb.cleanup();
   }
