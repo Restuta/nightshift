@@ -303,6 +303,16 @@ Correct a recording error. `{type:"retract", target:{event?:<event id>, item?:<i
 
 runId is the lifecycle identity. An unmatched start has outcome unknown.
 
+**Preflight runs (a derived view, not an event).** The board's Preflight panel
+(`public/preflight-model.js`) is a pure projection over EXISTING events: a run
+opens at a turn card titled `/preflight` (or an explicit
+`work_phase {phase:"preflight"}` start), its stages fold from `todos` snapshots
+whose steps carry the skill's own `Phase N:` subjects, its PR/CI attach via
+`pr_ref`/`pr`/`ci`, and it closes with the card (outcome `pass` only when every
+sighted phase completed — an explicit `work_phase` end outcome wins). No new
+producer exists, so old tapes gain the panel retroactively and replay scrubs
+through a run's phases honestly.
+
 ### tool_call
 
     {type:"tool_call", state:"start"|"success"|"failure"|"cancelled"|"unknown", sessionId, agentId, toolUseId, tool, item?, parentRunId?, outcome?}
