@@ -9,6 +9,7 @@ import { turnLabel } from './turn-id.js';
 import { buildSessionInsights } from './session-insights-model.js';
 import { buildSummaryViewModel, summaryHTML } from './session-summary.js';
 import { parseViewContext, viewHref } from './session-view-context.js';
+import { preflightRuns } from './preflight-model.js';
 import { buildBoardViewModel } from './board-model.js';
 import {
   advanceReplayFrame,
@@ -1133,6 +1134,50 @@ function renderPRs(boardView) {
   }).markup;
 }
 
+// -------------------------------------------------------- preflight
+// /preflight runs derived purely from the tape (public/preflight-model.js): the
+// run count, the latest run's phase strip + live step, and prior runs' verdicts.
+function renderPreflight() {
+  const box = $('#preflight');
+  const runs = preflightRuns(log, live ? Infinity : vt);
+  box.hidden = !runs.length;
+  if (!runs.length) return;
+  const latest = runs[runs.length - 1];
+  $('#preflight-count').textContent = latest.status === 'running'
+    ? `run ${latest.seq} · phase ${latest.activePhase || '–'}/${latest.phaseTotal}`
+    : `${runs.length} run${runs.length === 1 ? '' : 's'}`;
+
+  // phase strip: one segment per canonical phase, colored by folded status
+  const byN = new Map(latest.phases.map(ph => [ph.n, ph.status]));
+  $('#preflight-strip').innerHTML = Array.from({ length: latest.phaseTotal }, (_, i) => {
+    const st = byN.get(i + 1) || 'pending';
+    return `<i class="pf-seg" data-status="${st}" title="Phase ${i + 1}"></i>`;
+  }).join('');
+
+  const nowEl = $('#preflight-now');
+  if (latest.status === 'running') {
+    const step = latest.activeStep ? latest.activeStep.text.replace(/^Phase\s+\d+\s*[:.\-]\s*/i, '') : 'working…';
+    const bits = [`Phase ${latest.activePhase || '–'}`, step, durText(vtNow() - latest.startT)];
+    if (latest.pr != null) bits.push(`PR #${latest.pr}`);
+    if (latest.ci) bits.push(`CI ${latest.ci}`);
+    nowEl.innerHTML = `<i class="badge-dot"></i>${esc(bits.join(' · '))}`;
+    nowEl.dataset.state = 'running';
+  } else {
+    const verdict = latest.status === 'abandoned' ? 'abandoned' : (latest.outcome || 'done');
+    const bits = [verdict, durText(latest.durMs)];
+    if (latest.pr != null) bits.push(`PR #${latest.pr}`);
+    if (latest.ci) bits.push(`CI ${latest.ci}`);
+    nowEl.textContent = bits.join(' · ');
+    nowEl.dataset.state = verdict;
+  }
+
+  const prior = runs.slice(0, -1).reverse();
+  $('#preflight-runs').innerHTML = prior.slice(0, 6).map(r => {
+    const verdict = r.status === 'abandoned' ? 'abandoned' : (r.outcome || r.status);
+    return `<li data-outcome="${esc(verdict)}"><b>run ${r.seq}</b><span>${esc(verdict)}</span><span class="pf-dur">${esc(durText(r.durMs))}</span>${r.pr != null ? `<span>#${r.pr}</span>` : ''}</li>`;
+  }).join('');
+}
+
 // -------------------------------------------------------- subagents
 // The session's fan-out workforce: who was spawned, what they were asked, how
 // long they ran, what they cost. Running rows tick (renderAll fires each second
@@ -1437,6 +1482,7 @@ function renderAll(animate, freshEvents = null, insights = null) {
   renderBoard(animate);
   renderPlan(insights);
   renderSubagents();
+  renderPreflight();
   renderPRs(boardView);
   renderToolCalls(boardView);
   if (!$('#gantt-overlay').hidden) renderGantt();

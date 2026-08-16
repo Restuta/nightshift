@@ -100,8 +100,24 @@ e(33.2, { type: 'todos', todos: [
 ] });
 e(34.8, { type: 'pr', number: 2, title: 'kanban board UI', state: 'open', url: 'https://github.com/Restuta/nightshift/pull/2' });
 e(35.0, { type: 'ci', pr: 2, status: 'pending' });
-// --- fan-out: a review subagent works PR 2 while the parent waits on CI
+// --- a /preflight run gates PR 2; its Phase 3 fans out the review subagent
+e(35.05, { type: 'item', id: 'turn-demo11-9', title: '/preflight', status: 'doing' });
+e(35.1, { type: 'todos', item: 'turn-demo11-9', todos: [
+  { text: 'Phase 1: Detect tooling', status: 'completed' },
+  { text: 'Phase 2: Build (parallel)', status: 'in_progress' },
+  { text: 'Phase 2: Test (parallel)', status: 'in_progress' },
+  { text: 'Phase 3: Cross-AI review (sub-agent)', status: 'pending' },
+  { text: 'Phase 6: Verify CI green', status: 'pending' },
+] });
+e(35.15, { type: 'pr_ref', number: 2, item: 'turn-demo11-9' });
 e(35.2, { type: 'agent', state: 'start', agentId: 'demo-rev-1', agentType: 'code-reviewer', desc: 'Cross-AI review: kanban board UI (PR #2)', item: 'wi-ui' });
+e(35.3, { type: 'todos', item: 'turn-demo11-9', todos: [
+  { text: 'Phase 1: Detect tooling', status: 'completed' },
+  { text: 'Phase 2: Build (parallel)', status: 'completed' },
+  { text: 'Phase 2: Test (parallel)', status: 'completed' },
+  { text: 'Phase 3: Cross-AI review (sub-agent)', status: 'in_progress' },
+  { text: 'Phase 6: Verify CI green', status: 'pending' },
+] });
 e(35.6, { type: 'tool', tool: 'run', text: 'git diff main...HEAD -- public/', agentId: 'demo-rev-1', item: 'wi-ui' });
 e(36.2, { type: 'agent', state: 'done', agentId: 'demo-rev-1', agentType: 'code-reviewer', desc: 'Cross-AI review: kanban board UI (PR #2)', model: 'claude-opus-5', durMs: 60e3, tokens: 48200, toolUses: 7, outcome: 'completed', item: 'wi-ui' });
 e(36.4, { type: 'ci', pr: 2, status: 'fail' });
@@ -110,6 +126,14 @@ e(37.6, { type: 'edit', path: 'public/style.css' });
 e(38.0, { type: 'commit', sha: '1c93f5e', message: 'ui: fix custom property name', add: 4, del: 4, files: 1 });
 e(38.2, { type: 'ci', pr: 2, status: 'pending' });
 e(39.6, { type: 'ci', pr: 2, status: 'pass' });
+e(40.0, { type: 'todos', item: 'turn-demo11-9', todos: [
+  { text: 'Phase 1: Detect tooling', status: 'completed' },
+  { text: 'Phase 2: Build (parallel)', status: 'completed' },
+  { text: 'Phase 2: Test (parallel)', status: 'completed' },
+  { text: 'Phase 3: Cross-AI review (sub-agent)', status: 'completed' },
+  { text: 'Phase 6: Verify CI green', status: 'completed' },
+] });
+e(40.2, { type: 'item', id: 'turn-demo11-9', status: 'done' });
 e(40.8, { type: 'pr', number: 2, state: 'merged' });
 
 // --- replay engine
