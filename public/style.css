@@ -822,6 +822,49 @@ body.tape-collapsed .tape-resize { display: none; }
 
 /* ----------------------------------------------------------- PR panel */
 
+/* ------------------------------------------------------------- preflight */
+
+.preflight {
+  flex: none;
+  padding: 9px 8px 9px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.preflight[hidden] { display: none; }
+
+.pf-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 7px; }
+.pf-head h3 {
+  flex: 1;
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--faint);
+}
+.pf-count { font-family: var(--mono); font-size: 10px; color: var(--dim); text-transform: none; letter-spacing: 0; }
+
+.pf-strip { display: flex; gap: 3px; margin-bottom: 7px; }
+.pf-seg { flex: 1; height: 4px; border-radius: 2px; background: #1b2236; }
+.pf-seg[data-status="completed"] { background: var(--green); }
+.pf-seg[data-status="active"] { background: var(--yellow); animation: sa-pulse 1.6s ease-in-out infinite; }
+
+.pf-now {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pf-now .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--yellow); animation: sa-pulse 1.6s ease-in-out infinite; flex: none; }
+.pf-now[data-state="pass"] { color: var(--green); }
+.pf-now[data-state="incomplete"], .pf-now[data-state="abandoned"] { color: var(--yellow); }
+
+.pf-runs { list-style: none; margin-top: 6px; }
+.pf-runs li {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 2px 0;
+  font-family: var(--mono); font-size: 10px; color: var(--faint);
+}
+.pf-runs li b { font-weight: 500; color: var(--dim); }
+.pf-runs li[data-outcome="pass"] span:first-of-type { color: var(--green); }
+.pf-runs li[data-outcome="incomplete"] span:first-of-type,
+.pf-runs li[data-outcome="abandoned"] span:first-of-type { color: var(--yellow); }
+.pf-dur { margin-left: auto; }
+
 /* ------------------------------------------------------------- subagents */
 
 .subagents {
