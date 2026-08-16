@@ -589,6 +589,26 @@ function main() {
     return;
   }
 
+  // Claude subagent lifecycle boundaries (SubagentStart / SubagentStop). These
+  // fire in the PARENT session with the subagent's identity (`agent_id`,
+  // `agent_type` — verified by probe, see tools/hook-probe.js). They carry no
+  // description or metrics; the spawning Task/Agent call's PostToolUse (below)
+  // enriches the same agentId with desc/model/duration/tokens. The reducer
+  // merges by agentId, so double sighting is enrichment, not duplication.
+  if (name === 'SubagentStart' || name === 'SubagentStop') {
+    if (!hook.agent_id) return;
+    const item = sid ? turnState(sid).card : null;
+    const ev = {
+      type: 'agent',
+      state: name === 'SubagentStart' ? 'start' : 'done',
+      agentId: hook.agent_id,
+    };
+    if (hook.agent_type) ev.agentType = hook.agent_type;
+    if (item) ev.item = item;
+    append(ev);
+    return;
+  }
+
   if (name === 'UserPromptSubmit') {
     // Synthesize one card per prompt whenever there's no hand-curated intent
     // layer to defer to: always for Codex (it has no intent layer at all), and for
@@ -670,7 +690,19 @@ function main() {
     const tool = hook.tool_name || '';
     const inp = hook.tool_input || {};
     const item = sid ? turnState(sid).card : null;
-    const withItem = ev => (item ? { ...ev, item } : ev);
+    // A tool payload carrying `agent_id` is a SUBAGENT's own call surfacing in the
+    // parent session (verified by probe). Don't suppress it — attribute it: the
+    // reducer routes agentId-stamped activity to the subagent's row instead of
+    // letting it masquerade as main-thread work. When the event already names an
+    // agentId of its own (an `agent` event for a nested spawn), the caller becomes
+    // parentAgentId instead of clobbering the child's identity.
+    const subAgent = hook.agent_id || null;
+    const withItem = ev => {
+      const e = item ? { ...ev, item } : { ...ev };
+      if (subAgent && e.agentId == null) e.agentId = subAgent;
+      else if (subAgent && e.agentId !== subAgent) e.parentAgentId = subAgent;
+      return e;
+    };
     const identity = toolIdentity(hook, sid, item);
     if (identity) {
       try { finishTool(identity, append); } catch { /* never break */ }
@@ -689,6 +721,31 @@ function main() {
       for (const f of patchFiles(inp.command)) {
         const abs = path.isAbsolute(f) ? f : path.join(hook.cwd || root, f);
         append(withItem({ type: 'edit', path: path.relative(root, abs), tool: 'apply_patch' }));
+      }
+    } else if (/^(Task|Agent)$/.test(tool)) {
+      // The spawning call for a subagent, seen from the parent thread. Its
+      // response is the richest record we get: agentId, agentType, resolvedModel,
+      // totalDurationMs, totalTokens, totalToolUseCount, status (probe-verified).
+      // Foreground: PostToolUse fires at completion → a fully-enriched 'done'.
+      // Background: it fires at spawn (status not completed) → a described
+      // 'start'; the completion arrives later as SubagentStop.
+      const r = hook.tool_response;
+      const resp = (r && typeof r === 'object' && !Array.isArray(r)) ? r : {};
+      const agentId = resp.agentId || resp.agent_id || hook.tool_use_id || null;
+      if (agentId) {
+        const ev = { type: 'agent', agentId, state: resp.status === 'completed' ? 'done' : 'start' };
+        if (inp.description) ev.desc = String(inp.description).slice(0, 120);
+        const at = resp.agentType || inp.subagent_type;
+        if (at) ev.agentType = at;
+        if (resp.resolvedModel) ev.model = resp.resolvedModel;
+        if (inp.run_in_background) ev.background = true;
+        if (resp.status === 'completed') {
+          ev.outcome = 'completed';
+          if (Number.isFinite(resp.totalDurationMs)) ev.durMs = resp.totalDurationMs;
+          if (Number.isFinite(resp.totalTokens)) ev.tokens = resp.totalTokens;
+          if (Number.isFinite(resp.totalToolUseCount)) ev.toolUses = resp.totalToolUseCount;
+        }
+        append(withItem(ev));
       }
     } else if (tool === 'TodoWrite' && Array.isArray(inp.todos)) {
       append(withItem({ type: 'todos', todos: inp.todos.map(td => ({ text: td.content, done: td.status === 'completed', status: td.status })) }));
